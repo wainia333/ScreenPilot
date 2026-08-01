@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import type { TranslationRequest, TranslationResult } from '../../desktop/contract'
+import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { TranslatorPage } from './translator-page'
 
 class RecordingDesktop extends FakeDesktopPort {
@@ -10,6 +11,8 @@ class RecordingDesktop extends FakeDesktopPort {
   readonly commits: string[] = []
   hides = 0
   drags = 0
+  rejectNextDrag = false
+  dragFailureHandled = false
   selection = ''
 
   override translate(request: TranslationRequest): Promise<TranslationResult> {
@@ -29,6 +32,12 @@ class RecordingDesktop extends FakeDesktopPort {
 
   override startDragging(): Promise<void> {
     this.drags += 1
+    if (this.rejectNextDrag) {
+      this.rejectNextDrag = false
+      return observedDragRejection(() => {
+        this.dragFailureHandled = true
+      })
+    }
     return Promise.resolve()
   }
 
@@ -137,17 +146,53 @@ describe('TranslatorPage', () => {
     expect(desktop.hides).toBe(2)
   })
 
-  it('starts dragging from the full non-interactive title area only', async () => {
+  it('uses one explicit drag path for every repeated primary title press', async () => {
     const desktop = new RecordingDesktop()
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
-    fireEvent.pointerDown(screen.getByRole('heading', { name: '文本翻译' }), { button: 0 })
-    expect(desktop.drags).toBe(1)
-    const close = screen.getByRole('button', { name: '关闭翻译' })
-    fireEvent.pointerDown(close, { button: 0 })
-    fireEvent.click(close)
-    expect(desktop.drags).toBe(1)
-    expect(desktop.hides).toBe(1)
+    const heading = screen.getByRole('heading', { name: '文本翻译' })
+    const header = heading.closest('header')
+    expect(header).not.toBeNull()
+    expect(header).not.toHaveAttribute('data-tauri-drag-region')
+    expect(header?.closest('[data-tauri-drag-region]:not([data-tauri-drag-region="false"])')).toBeNull()
+    expect(header?.querySelector('[data-tauri-drag-region]:not([data-tauri-drag-region="false"])')).toBeNull()
+    for (let expected = 1; expected <= 3; expected += 1) {
+      fireEvent.pointerDown(heading, { button: 0 })
+      expect(desktop.drags).toBe(expected)
+    }
+  })
+
+  it('ignores non-primary presses, title actions and form controls', async () => {
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const heading = screen.getByRole('heading', { name: '文本翻译' })
+    fireEvent.pointerDown(heading, { button: 1 })
+    fireEvent.pointerDown(heading, { button: 2 })
+    for (const control of [
+      screen.getByRole('button', { name: '翻译历史' }),
+      screen.getByRole('button', { name: '关闭翻译' }),
+      screen.getByRole('textbox', { name: '原文' }),
+      screen.getByRole('textbox', { name: '译文' }),
+      screen.getByRole('combobox', { name: '翻译接口' }),
+      screen.getByRole('combobox', { name: '目标语言' }),
+    ]) {
+      fireEvent.pointerDown(control, { button: 0 })
+    }
+    expect(desktop.drags).toBe(0)
+  })
+
+  it('handles a rejected native drag and accepts the next press', async () => {
+    const desktop = new RecordingDesktop()
+    desktop.rejectNextDrag = true
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const heading = screen.getByRole('heading', { name: '文本翻译' })
+    fireEvent.pointerDown(heading, { button: 0 })
+    await act(async () => Promise.resolve())
+    expect(desktop.dragFailureHandled).toBe(true)
+    fireEvent.pointerDown(heading, { button: 0 })
+    expect(desktop.drags).toBe(2)
   })
 
   it('uses the OCR result card shell and landing animation', async () => {

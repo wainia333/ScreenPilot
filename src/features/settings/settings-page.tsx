@@ -20,6 +20,7 @@ import { TranslationSection } from './sections/translation-section'
 import { VisionSection } from './sections/vision-section'
 import type { AppSettings, SettingsExport } from './types'
 import type { PermissionStatus } from '../../desktop/contract'
+import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 
 type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
@@ -40,6 +41,7 @@ function sameSettings(left: AppSettings | null, right: AppSettings | null): bool
 
 export function SettingsPage() {
   const desktop = useDesktop()
+  const beginWindowDrag = useWindowDrag()
   const [section, setSection] = useState<Section>('general')
   const [saved, setSaved] = useState<AppSettings | null>(null)
   const [draft, setDraft] = useState<AppSettings | null>(null)
@@ -125,7 +127,7 @@ export function SettingsPage() {
   )
   if (loadingError !== null) {
     return (
-      <main className="load-state">
+      <main className="load-state" onPointerDown={beginWindowDrag}>
         <img src="/app-mark.png" alt="" />
         <h1>无法加载设置</h1>
         <p>{loadingError}</p>
@@ -141,7 +143,7 @@ export function SettingsPage() {
     )
   }
   if (draft === null) {
-    return <main className="load-state" aria-label="正在加载设置"><div className="spinner" /></main>
+    return <main className="load-state" aria-label="正在加载设置" onPointerDown={beginWindowDrag}><div className="spinner" /></main>
   }
   const content = {
     general: (
@@ -186,7 +188,7 @@ export function SettingsPage() {
   return (
     <main className="settings-window">
       <aside className="settings-sidebar">
-        <div className="settings-brand" onPointerDown={() => void desktop.startDragging()}>
+        <div className="settings-brand" onPointerDown={beginWindowDrag}>
           <img src="/app-mark.png" alt="" />
           <span>ScreenPilot</span>
         </div>
@@ -227,13 +229,12 @@ export function SettingsPage() {
         </div>
       </aside>
       <section className="settings-main">
-        <header className="settings-toolbar" onPointerDown={() => void desktop.startDragging()}>
+        <header className="settings-toolbar" onPointerDown={beginWindowDrag}>
           <h1>{navigation.find((item) => item.id === section)?.label}</h1>
           <button
             type="button"
             className="icon-button"
             aria-label="关闭设置"
-            onPointerDown={(event) => event.stopPropagation()}
             onClick={requestClose}
           >
             <X size={16} />

@@ -1,7 +1,8 @@
 import { Check, Clipboard, Clock3, Replace, Sparkles, Trash2, X } from 'lucide-react'
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useDesktop } from '../../desktop/use-desktop'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
+import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 
 type OptimizerHistory = {
@@ -21,12 +22,9 @@ function validHistory(value: unknown): value is OptimizerHistory {
   return typeof item.id === 'string' && typeof item.input === 'string' && typeof item.output === 'string' && typeof item.updatedAt === 'number'
 }
 
-function isWindowDragExcluded(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest('button, input, textarea, select, a, [contenteditable="true"], [data-tauri-drag-region="false"]') !== null
-}
-
 export function OptimizerPage() {
   const desktop = useDesktop()
+  const beginWindowDrag = useWindowDrag()
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -37,11 +35,6 @@ export function OptimizerPage() {
   const generation = useRef(0)
   const composing = useRef(false)
   const { ratio, beginResize } = useSplitRatio(splitRatioKey, goldenSectionRatio)
-  const beginHeaderDrag = (event: PointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || isWindowDragExcluded(event.target)) return
-    void desktop.startDragging()
-  }
-
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -80,17 +73,17 @@ export function OptimizerPage() {
       data-screenpilot-window-frame="true"
       data-screenpilot-ocr-card="true"
     >
-      <header className="ocr-result-header" data-tauri-drag-region onPointerDown={beginHeaderDrag}>
-        <div className="ocr-result-identity" data-tauri-drag-region>
-          <span className="ocr-result-mark" data-tauri-drag-region><Sparkles size={15} /></span>
-          <h1 data-tauri-drag-region>提示词优化</h1>
+      <header className="ocr-result-header" onPointerDown={beginWindowDrag}>
+        <div className="ocr-result-identity">
+          <span className="ocr-result-mark"><Sparkles size={15} /></span>
+          <h1>提示词优化</h1>
         </div>
-        <span className="ocr-result-status" aria-live="polite" data-tauri-drag-region>
+        <span className="ocr-result-status" aria-live="polite">
           {loading ? '优化中…' : input.trim().length > 0 ? 'Ctrl+Enter 优化' : '等待输入'}
         </span>
         <div className="ocr-result-header-actions">
-          <button type="button" className="ocr-header-button" aria-label="优化历史" data-tauri-drag-region="false" onClick={() => setHistoryOpen(!historyOpen)}><Clock3 size={16} /></button>
-          <button type="button" className="ocr-header-button" aria-label="关闭优化器" data-tauri-drag-region="false" onClick={() => void desktop.hideWindow()}><X size={14} /></button>
+          <button type="button" className="ocr-header-button" aria-label="优化历史" onClick={() => setHistoryOpen(!historyOpen)}><Clock3 size={16} /></button>
+          <button type="button" className="ocr-header-button" aria-label="关闭优化器" onClick={() => void desktop.hideWindow()}><X size={14} /></button>
         </div>
       </header>
       <div
@@ -134,7 +127,6 @@ export function OptimizerPage() {
           aria-valuemin={24}
           aria-valuemax={76}
           aria-valuenow={Math.round(ratio * 100)}
-          data-tauri-drag-region="false"
           onPointerDown={beginResize}
         >
           <span />

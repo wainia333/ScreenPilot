@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import type { PromptOptimizationRequest, PromptOptimizationResult } from '../../desktop/contract'
+import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { OptimizerPage } from './optimizer-page'
 
 class RecordingDesktop extends FakeDesktopPort {
   readonly optimizations: PromptOptimizationRequest[] = []
   hides = 0
   drags = 0
+  rejectNextDrag = false
+  dragFailureHandled = false
 
   override optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult> {
     this.optimizations.push(request)
@@ -25,6 +28,12 @@ class RecordingDesktop extends FakeDesktopPort {
 
   override startDragging(): Promise<void> {
     this.drags += 1
+    if (this.rejectNextDrag) {
+      this.rejectNextDrag = false
+      return observedDragRejection(() => {
+        this.dragFailureHandled = true
+      })
+    }
     return Promise.resolve()
   }
 }
@@ -49,16 +58,60 @@ describe('OptimizerPage', () => {
     expect(card.querySelector('.ocr-result-divider')).not.toBeNull()
     expect(card.querySelector('.translator-divider')).toBeNull()
     expect(screen.getByRole('separator', { name: '调整原始提示词和优化结果高度' })).toHaveAttribute('aria-valuenow', '38')
-    fireEvent.pointerDown(screen.getByRole('heading', { name: '提示词优化' }), { button: 0 })
-    expect(desktop.drags).toBe(1)
     const close = screen.getByRole('button', { name: '关闭优化器' })
-    fireEvent.pointerDown(close, { button: 0 })
     fireEvent.click(close)
-    expect(desktop.drags).toBe(1)
     expect(desktop.hides).toBe(1)
     screen.getByRole('textbox', { name: '原始提示词' }).focus()
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(desktop.hides).toBe(2)
+  })
+
+  it('uses one explicit drag path for every repeated primary title press', async () => {
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const heading = screen.getByRole('heading', { name: '提示词优化' })
+    const header = heading.closest('header')
+    expect(header).not.toBeNull()
+    expect(header).not.toHaveAttribute('data-tauri-drag-region')
+    expect(header?.closest('[data-tauri-drag-region]:not([data-tauri-drag-region="false"])')).toBeNull()
+    expect(header?.querySelector('[data-tauri-drag-region]:not([data-tauri-drag-region="false"])')).toBeNull()
+    for (let expected = 1; expected <= 3; expected += 1) {
+      fireEvent.pointerDown(heading, { button: 0 })
+      expect(desktop.drags).toBe(expected)
+    }
+  })
+
+  it('ignores non-primary presses, title actions and form controls', async () => {
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const heading = screen.getByRole('heading', { name: '提示词优化' })
+    fireEvent.pointerDown(heading, { button: 1 })
+    fireEvent.pointerDown(heading, { button: 2 })
+    for (const control of [
+      screen.getByRole('button', { name: '优化历史' }),
+      screen.getByRole('button', { name: '关闭优化器' }),
+      screen.getByRole('textbox', { name: '原始提示词' }),
+      screen.getByRole('textbox', { name: '优化结果' }),
+      screen.getByRole('button', { name: '优化' }),
+    ]) {
+      fireEvent.pointerDown(control, { button: 0 })
+    }
+    expect(desktop.drags).toBe(0)
+  })
+
+  it('handles a rejected native drag and accepts the next press', async () => {
+    const desktop = new RecordingDesktop()
+    desktop.rejectNextDrag = true
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const heading = screen.getByRole('heading', { name: '提示词优化' })
+    fireEvent.pointerDown(heading, { button: 0 })
+    await act(async () => Promise.resolve())
+    expect(desktop.dragFailureHandled).toBe(true)
+    fireEvent.pointerDown(heading, { button: 0 })
+    expect(desktop.drags).toBe(2)
   })
 
   it('requests only on demand and keeps editable output', async () => {
