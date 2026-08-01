@@ -1,0 +1,179 @@
+[data-screenpilot-prompt-bar="true"] > input:focus,
+[data-screenpilot-prompt-bar="true"] > input:focus-visible {
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+main[data-screenpilot-vision-adapter="true"] select:focus,
+main[data-screenpilot-vision-adapter="true"] select:focus-visible {
+  outline: none;
+  border-color: rgb(115 115 115 / 28%);
+  box-shadow: 0 0 0 2px var(--sp-select-focus);
+}
+
+[data-screenpilot-prompt-bar="true"] {
+  background-color: rgb(255 255 255 / 0.98) !important;
+  opacity: 1 !important;
+}
+
+[data-screenpilot-prompt-bar="true"] > input:not([aria-disabled="true"]) {
+  opacity: 1 !important;
+}
+
+[data-screenpilot-ready-prompt-panel="true"],
+[data-screenpilot-captured-prompt-panel="true"] {
+  opacity: 1 !important;
+}
+
+[data-screenpilot-window-frame="true"] {
+  border: 1px solid rgb(0 0 0 / 18%) !important;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%) !important;
+}
+
+[data-screenpilot-floating-answer-card="true"] {
+  height: var(--screenpilot-floating-result-height) !important;
+}
+
+[data-screenpilot-floating-answer-card="true"] > .h-full {
+  height: 100% !important;
+}
+
+:root[data-screenpilot-floating-translate-window="true"],
+:root[data-screenpilot-floating-translate-window="true"] body,
+:root[data-screenpilot-floating-translate-window="true"] #root {
+  background-color: transparent !important;
+}
+
+[data-screenpilot-floating-translate-card="true"] {
+  display: flex !important;
+  flex-direction: column;
+  height: 100vh !important;
+  max-height: none !important;
+}
+
+[data-screenpilot-floating-translate-card="true"] > [data-screenpilot-translation-body="true"] {
+  flex: 1;
+  max-height: none !important;
+  min-height: 0;
+}
+
+:root[data-screenpilot-floating-translate-pending="true"] [data-screenpilot-window-frame="true"] {
+  opacity: 0 !important;
+}
+
+[data-screenpilot-ocr-source="true"] {
+  max-height: var(--screenpilot-ocr-source-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+  scrollbar-color: rgb(0 0 0 / 16%) transparent;
+  scrollbar-width: thin;
+}
+
+[data-screenpilot-ocr-source="true"]::-webkit-scrollbar {
+  width: 8px;
+}
+
+[data-screenpilot-ocr-source="true"]::-webkit-scrollbar-thumb {
+  background-clip: padding-box;
+  background-color: rgb(0 0 0 / 16%);
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+.screenpilot-target-language-control {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.screenpilot-target-language-control label {
+  color: rgb(163 163 163);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.screenpilot-target-language-control select {
+  background: rgb(255 255 255 / 0.8);
+  border: 1px solid rgb(0 0 0 / 0.06);
+  border-radius: 6px;
+  color: rgb(115 115 115);
+  font-size: 10.5px;
+  font-weight: 500;
+  height: 20px;
+  max-width: 92px;
+  outline: none;
+  padding: 0 6px;
+}
+
+[data-screenpilot-target-language="true"] + select {
+  margin-left: 0 !important;
+}
+
+.screenpilot-target-result {
+  color: rgb(38 38 38);
+  font-size: 13px;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.screenpilot-target-result-error {
+  color: rgb(239 68 68);
+  font-size: 12.5px;
+  line-height: 24px;
+  white-space: pre-wrap;
+}
+
+[data-screenpilot-target-result="true"]:empty {
+  display: none;
+}
+
+[data-screenpilot-translation-override="true"] > [data-screenpilot-translated-heading="true"] ~ :not([data-screenpilot-target-result="true"]) {
+  display: none !important;
+}
+
+[data-screenpilot-translation-override="true"] > [data-screenpilot-translated-heading="true"] > button {
+  display: none !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-screenpilot-floating-translate-window="true"],
+  :root[data-screenpilot-floating-translate-window="true"] body,
+  :root[data-screenpilot-floating-translate-window="true"] #root {
+    background-color: transparent !important;
+  }
+
+  [data-screenpilot-prompt-bar="true"] {
+    background-color: rgb(23 23 23 / 0.98) !important;
+  }
+
+  [data-screenpilot-window-frame="true"] {
+    border-color: rgb(255 255 255 / 24%) !important;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%) !important;
+  }
+
+  [data-screenpilot-ocr-source="true"] {
+    scrollbar-color: rgb(255 255 255 / 18%) transparent;
+  }
+
+  [data-screenpilot-ocr-source="true"]::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 18%);
+  }
+
+  .screenpilot-target-language-control label {
+    color: rgb(115 115 115);
+  }
+
+  .screenpilot-target-language-control select {
+    background: rgb(23 23 23 / 0.7);
+    border-color: rgb(255 255 255 / 0.08);
+    color: rgb(163 163 163);
+  }
+
+  .screenpilot-target-result {
+    color: rgb(229 229 229);
+  }
+}

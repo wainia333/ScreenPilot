@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ScreenPilot",
+  "version": "0.1.0",
+  "identifier": "com.wainia.screenpilot",
+  "build": {
+    "beforeDevCommand": "npm run dev:ui",
+    "beforeBuildCommand": "npm run build:ui",
+    "devUrl": "http://127.0.0.1:5713",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ScreenPilot",
+        "width": 760,
+        "height": 620,
+        "minWidth": 680,
+        "minHeight": 520,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "create": false
+      },
+      {
+        "label": "translator",
+        "title": "ScreenPilot 文本翻译",
+        "url": "index.html",
+        "width": 680,
+        "height": 400,
+        "minWidth": 420,
+        "minHeight": 300,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src ipc: http://ipc.localhost https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "publisher": "Wainia",
+    "category": "Productivity",
+    "shortDescription": "ScreenPilot desktop screen assistant",
+    "longDescription": "ScreenPilot provides fast text translation, screen analysis, screenshot translation and prompt refinement.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png", "icons/icon.ico"]
+  }
+}

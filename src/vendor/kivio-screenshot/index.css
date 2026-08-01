@@ -1,0 +1,593 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   设计令牌
+   所有强调色 / 描边 / 圆角走这里，别再往组件里写死 #2563eb。
+   深色值统一在下面的 .dark 块里覆盖，两套主题不会各改各的跑偏。
+   --------------------------------------------------------------------------- */
+:root {
+  /* --kv-accent 是"填充"用色（按钮底、开关、指示条）；
+     --kv-accent-text 是"文字/图标"用色。深色模式下这两个必须分开：
+     能当按钮底的蓝，配白字够亮；但同一个蓝直接当深色背景上的文字就偏暗读不清。 */
+  --kv-accent: #2563eb;
+  --kv-accent-hover: #1d4ed8;
+  --kv-accent-active: #1e40af;
+  --kv-accent-contrast: #ffffff;
+  --kv-accent-text: #2563eb;
+  --kv-accent-soft: rgba(37, 99, 235, 0.09);
+  --kv-accent-ring: rgba(37, 99, 235, 0.35);
+
+  --kv-text: rgb(23, 23, 23);
+  --kv-text-muted: rgb(115, 115, 115);
+  --kv-text-faint: rgb(163, 163, 163);
+
+  --kv-surface: #ffffff;
+  --kv-surface-sunken: rgba(0, 0, 0, 0.03);
+  --kv-surface-hover: rgba(0, 0, 0, 0.05);
+  --kv-surface-active: rgba(0, 0, 0, 0.08);
+
+  --kv-border: rgba(0, 0, 0, 0.07);
+  --kv-border-strong: rgba(0, 0, 0, 0.12);
+  /* 浮层轮廓：这些面板不画投影，全靠这条描边和背景拉开距离，所以比一般描边更深 */
+  --kv-panel-edge: rgba(0, 0, 0, 0.18);
+  --kv-divider: rgba(0, 0, 0, 0.05);
+
+  --kv-scrollbar: rgba(0, 0, 0, 0.16);
+  --kv-scrollbar-hover: rgba(0, 0, 0, 0.34);
+
+  /* 圆角阶梯：控件 8 / 卡片 12 / 窗口 18。别再出现 6、10、14 这种中间值。 */
+  --kv-radius-control: 8px;
+  --kv-radius-card: 12px;
+  --kv-radius-window: 18px;
+
+  --kv-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dark {
+  --kv-accent: #3b82f6;
+  --kv-accent-hover: #2f76ef;
+  --kv-accent-active: #2563eb;
+  --kv-accent-contrast: #ffffff;
+  --kv-accent-text: #93c5fd;
+  --kv-accent-soft: rgba(96, 165, 250, 0.14);
+  --kv-accent-ring: rgba(96, 165, 250, 0.45);
+
+  --kv-text: rgb(245, 245, 245);
+  --kv-text-muted: rgb(163, 163, 163);
+  --kv-text-faint: rgb(115, 115, 115);
+
+  --kv-surface: #1c1c1e;
+  --kv-surface-sunken: rgba(255, 255, 255, 0.04);
+  --kv-surface-hover: rgba(255, 255, 255, 0.07);
+  --kv-surface-active: rgba(255, 255, 255, 0.11);
+
+  --kv-border: rgba(255, 255, 255, 0.09);
+  --kv-border-strong: rgba(255, 255, 255, 0.16);
+  --kv-panel-edge: rgba(255, 255, 255, 0.24);
+  --kv-divider: rgba(255, 255, 255, 0.06);
+
+  --kv-scrollbar: rgba(255, 255, 255, 0.18);
+  --kv-scrollbar-hover: rgba(255, 255, 255, 0.36);
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background-color: transparent;
+  background: transparent;
+}
+
+/* 选区配色跟随强调色，默认的系统蓝在深色主题下和背景撞得看不清。 */
+::selection {
+  background: var(--kv-accent-soft);
+  color: inherit;
+}
+
+/* 键盘可见焦点。
+   之前只有 input 有 focus 样式，按钮 / 侧栏导航 Tab 过去完全没有反馈，
+   纯键盘操作等于盲走。用 :focus-visible 所以鼠标点击不会出现难看的描边。 */
+:where(button, [role='switch'], [role='button'], a, select, summary):focus-visible {
+  outline: 2px solid var(--kv-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--kv-radius-control);
+}
+
+/* 窗口拖拽区光标。
+   Tauri 的 data-tauri-drag-region 只负责"按住能拖窗口"，不会改光标，
+   所以翻译窗 / 提示词优化器 / 设置页的顶部拖拽条一直是普通箭头，
+   只有 Vision 悬浮条因为自己写了 cursor-move 才有反馈。
+   在属性上统一兜住，新增拖拽区自动就有，不用逐个挂 class。 */
+[data-tauri-drag-region]:not([data-tauri-drag-region='false']) {
+  cursor: move;
+}
+
+/* 拖拽区里的可交互元素不该继承 move —— 设置页顶栏的关闭按钮就嵌在拖拽区里。 */
+[data-tauri-drag-region]:not([data-tauri-drag-region='false'])
+  :where(button, a, select, summary, [role='button'], [data-tauri-drag-region='false']) {
+  cursor: pointer;
+}
+[data-tauri-drag-region]:not([data-tauri-drag-region='false'])
+  :where(input, textarea) {
+  cursor: text;
+}
+
+#root {
+  height: 100%;
+  margin: 0;
+  background-color: transparent;
+  background: transparent;
+}
+
+/* 透明窗口外壳：填满 Tauri window。
+   这里不能留透明 padding，否则原生透明窗口的空白区域仍会拦截桌面点击。 */
+.window-container {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  background: transparent;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* 浮窗外壳。inset 高光那一条是 macOS 原生面板的关键细节：
+   顶边一道 1px 内亮边，面板才会"浮"起来而不是贴在桌面上。 */
+.window-frosted {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(250, 250, 252, 0.94) 100%);
+  -webkit-backdrop-filter: saturate(180%) blur(30px);
+  backdrop-filter: saturate(180%) blur(30px);
+  border-radius: var(--kv-radius-window);
+  /* 不用外投影划边界（投影会在透明圆角外侧留一圈淡灰晕），改用描边。
+     所以这里要比普通分隔线深一档，用 --kv-border-strong；深色值由 token 自己翻。
+     只保留内侧高光那一条 inset，它在元素内部，不会溢出到圆角外。 */
+  border: 1px solid var(--kv-panel-edge);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.dark .window-frosted {
+  background: linear-gradient(180deg, rgba(32, 32, 35, 0.94) 0%, rgba(23, 23, 26, 0.9) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* 滚动条。
+   原来 thumb 静止时是全透明，只有鼠标移到容器上才出现 —— 用户既看不出"这里能滚"，
+   也看不出滚到哪了。现在静止时保留一条淡痕，hover 加深，拖动时最深。 */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--kv-scrollbar) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--kv-scrollbar);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  min-height: 36px;
+  transition: background-color 140ms ease;
+}
+
+.custom-scrollbar:hover::-webkit-scrollbar-thumb {
+  background-color: var(--kv-scrollbar-hover);
+  border-width: 2.5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover,
+.custom-scrollbar::-webkit-scrollbar-thumb:active {
+  background-color: var(--kv-scrollbar-hover);
+  border-width: 2px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.settings-card {
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-divider);
+  border-radius: var(--kv-radius-card);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 6px 16px -10px rgba(15, 23, 42, 0.1);
+}
+
+.dark .settings-card {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 6px 18px -8px rgba(0, 0, 0, 0.55);
+}
+
+.settings-control {
+  background: var(--kv-surface-sunken);
+  border: 1px solid var(--kv-border);
+  color: var(--kv-text);
+  border-radius: var(--kv-radius-control);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+.settings-control::placeholder { color: var(--kv-text-faint); }
+.settings-control:hover:not(:disabled) { background: var(--kv-surface-hover); }
+.settings-control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+select.settings-control {
+  color-scheme: light;
+  cursor: pointer;
+}
+select.settings-control option,
+select.settings-control optgroup {
+  background: #ffffff;
+  color: rgb(15, 23, 42);
+}
+.settings-control:focus,
+.settings-control:focus-visible {
+  outline: none;
+  background: var(--kv-surface);
+  border-color: var(--kv-accent-ring);
+  box-shadow: 0 0 0 3px var(--kv-accent-soft);
+}
+
+.dark select.settings-control {
+  color-scheme: dark;
+}
+.dark select.settings-control option,
+.dark select.settings-control optgroup {
+  background: #1c1c1e;
+  color: rgb(245, 245, 245);
+}
+.dark .settings-control:focus,
+.dark .settings-control:focus-visible {
+  background: var(--kv-surface-hover);
+}
+
+/* 按钮样式放进 components 层：无 layer 的普通 CSS 会盖过 Tailwind 的 utilities 层，
+   那样 `kv-btn px-4` / `kv-btn h-8` / `kv-btn w-8 p-0` 这类微调就全都失效了。
+   放进 components 后 utilities 仍然优先，个别按钮还能就地覆盖尺寸。 */
+@layer components {
+  /* ---------------------------------------------------------------------------
+     按钮
+     原来每个按钮都是一长串手写 Tailwind，同一种按钮在不同页面 padding / 圆角 /
+     disabled 透明度都不一样。收敛成三档：主操作 / 次级描边 / 无框幽灵。
+     --------------------------------------------------------------------------- */
+  .kv-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: var(--kv-radius-control);
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      box-shadow 140ms ease,
+      transform 90ms ease;
+  }
+
+  .kv-btn:active:not(:disabled) {
+    transform: scale(0.975);
+  }
+
+  .kv-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .kv-btn-sm {
+    height: 26px;
+    padding: 0 9px;
+    font-size: 11.5px;
+    gap: 5px;
+  }
+
+  .kv-btn-primary {
+    background: var(--kv-accent);
+    color: var(--kv-accent-contrast);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.16);
+  }
+  .kv-btn-primary:hover:not(:disabled) { background: var(--kv-accent-hover); }
+  .kv-btn-primary:active:not(:disabled) { background: var(--kv-accent-active); }
+  /* 主按钮禁用时不能只靠降透明度：半透明的蓝还是蓝，读起来像"能点但淡了"。
+     直接换成中性灰填充，"现在不可用"才一眼可辨。 */
+  .kv-btn-primary:disabled {
+    background: var(--kv-surface-active);
+    color: var(--kv-text-faint);
+    box-shadow: none;
+    opacity: 1;
+  }
+
+  .kv-btn-outline {
+    background: transparent;
+    border-color: var(--kv-border-strong);
+    color: var(--kv-text-muted);
+  }
+  .kv-btn-outline:hover:not(:disabled) {
+    background: var(--kv-surface-hover);
+    color: var(--kv-text);
+  }
+  .kv-btn-outline:active:not(:disabled) { background: var(--kv-surface-active); }
+
+  .kv-btn-ghost {
+    background: transparent;
+    color: var(--kv-text-muted);
+  }
+  .kv-btn-ghost:hover:not(:disabled) {
+    background: var(--kv-surface-hover);
+    color: var(--kv-text);
+  }
+  .kv-btn-ghost:active:not(:disabled) { background: var(--kv-surface-active); }
+
+  /* 危险操作（删除 provider 等）。 */
+  .kv-btn-danger {
+    background: transparent;
+    color: rgb(225, 29, 72);
+  }
+  .kv-btn-danger:hover:not(:disabled) {
+    background: rgba(225, 29, 72, 0.1);
+    color: rgb(190, 18, 60);
+  }
+  .dark .kv-btn-danger { color: rgb(251, 113, 133); }
+  .dark .kv-btn-danger:hover:not(:disabled) {
+    background: rgba(251, 113, 133, 0.14);
+    color: rgb(253, 164, 175);
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ---------------------------------------------------------------------------
+   入场动画
+   设置页每个 tab、每个展开区块都挂着 `animate-in fade-in slide-in-from-*`，
+   但项目没装 tailwindcss-animate —— 这些 class 一直没有任何对应样式，
+   切 tab 是硬切的。这里按 tailwindcss-animate 的同名语义补上实现，
+   所以不用动任何 JSX 里已有的 class 组合。
+   --------------------------------------------------------------------------- */
+@keyframes kv-enter {
+  from {
+    opacity: var(--kv-enter-opacity, 1);
+    transform:
+      translate3d(var(--kv-enter-x, 0), var(--kv-enter-y, 0), 0)
+      scale(var(--kv-enter-scale, 1));
+  }
+}
+
+.animate-in {
+  animation-name: kv-enter;
+  animation-duration: 200ms;
+  animation-timing-function: var(--kv-ease);
+  animation-fill-mode: both;
+}
+
+.fade-in { --kv-enter-opacity: 0; }
+.zoom-in-95 { --kv-enter-scale: 0.95; }
+.slide-in-from-bottom-2 { --kv-enter-y: 0.5rem; }
+.slide-in-from-top-1 { --kv-enter-y: -0.25rem; }
+
+/* Tailwind 的 duration-* 只管 transition-duration，动画得单独接一下。 */
+.animate-in.duration-150 { animation-duration: 150ms; }
+.animate-in.duration-200 { animation-duration: 200ms; }
+.animate-in.duration-300 { animation-duration: 260ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in {
+    animation: none;
+  }
+}
+
+@keyframes vision-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-vision-rise {
+  animation: vision-rise 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@property --vision-jelly-x {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+
+@property --vision-jelly-y {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+
+@keyframes vision-jelly-pop {
+  0% {
+    --vision-jelly-x: 1;
+    --vision-jelly-y: 1;
+  }
+  34% {
+    --vision-jelly-x: 1.028;
+    --vision-jelly-y: 0.974;
+  }
+  58% {
+    --vision-jelly-x: 0.992;
+    --vision-jelly-y: 1.012;
+  }
+  78% {
+    --vision-jelly-x: 1.006;
+    --vision-jelly-y: 0.996;
+  }
+  100% {
+    --vision-jelly-x: 1;
+    --vision-jelly-y: 1;
+  }
+}
+
+.vision-jelly-pop {
+  animation: vision-jelly-pop 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: center center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vision-jelly-pop {
+    animation: none;
+  }
+
+  /* 按下缩放对前庭敏感用户不友好，关掉；颜色过渡保留（它是状态反馈，不是位移）。 */
+  .kv-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* Vision 整窗 fade-in：避免 webview show 那一帧 backdrop-filter 未合成时
+   .window-frosted 的 fallback 白底（rgba(255,255,255,0.98)）暴露成白闪。
+   仅 opacity，不动位置/缩放——窗口已经被后端 set_position 落位，再加几何动画会"跳一下"。 */
+@keyframes vision-frame-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-vision-frame-fade {
+  animation: vision-frame-fade 220ms ease-out both;
+}
+
+@keyframes sharex-marching-ants {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -15; }
+}
+
+.sharex-selection-dash {
+  animation: sharex-marching-ants 1s linear infinite;
+}
+
+.vision-readable-text :where(p) {
+  margin-top: 0;
+  margin-bottom: 0.4em;
+}
+
+.vision-readable-text.vision-readable-cjk :where(p) {
+  margin-bottom: 0.44em;
+}
+
+.vision-readable-text.vision-readable-latin :where(p) {
+  margin-bottom: 0.4em;
+}
+
+.vision-readable-text :where(p:last-child) {
+  margin-bottom: 0;
+}
+
+.translated-readable-block {
+  margin-bottom: 0.4em;
+}
+
+.vision-readable-cjk .translated-readable-block {
+  margin-bottom: 0.44em;
+}
+
+.vision-readable-latin .translated-readable-block {
+  margin-bottom: 0.4em;
+}
+
+.translated-readable-block:last-child {
+  margin-bottom: 0;
+}
+
+.translated-readable-block > :first-child {
+  margin-top: 0;
+}
+
+.translated-readable-block > :last-child {
+  margin-bottom: 0;
+}
+
+.vision-readable-text :where(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.vision-readable-text :where(th, td) {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 0.32em 0.55em;
+}
+
+.dark .vision-readable-text :where(th, td) {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.vision-readable-text :where(th) {
+  background: rgba(0, 0, 0, 0.025);
+  font-weight: 600;
+}
+
+.dark .vision-readable-text :where(th) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ocr-editable {
+  min-height: 1.48em;
+  max-height: none;
+  overflow-y: visible;
+  cursor: text;
+  border-radius: 8px;
+  padding: 0;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.ocr-editable:focus,
+.ocr-editable:focus-visible {
+  outline: none;
+  background: rgba(0, 0, 0, 0.018);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.055);
+}
+
+.dark .ocr-editable:focus,
+.dark .ocr-editable:focus-visible {
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.08);
+}
+
+.ocr-editable [data-ocr-paragraph] {
+  margin: 0 0 0.4em;
+  min-height: 1.35em;
+}
+
+.ocr-editable.vision-readable-cjk [data-ocr-paragraph] {
+  margin-bottom: 0.44em;
+}
+
+.ocr-editable.vision-readable-latin [data-ocr-paragraph] {
+  margin-bottom: 0.4em;
+}
+
+.ocr-editable [data-ocr-paragraph]:last-child {
+  margin-bottom: 0;
+}
