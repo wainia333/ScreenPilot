@@ -1,3 +1,4 @@
+use crate::application::lifecycle::TRANSLATOR_HEIGHT;
 use crate::application::state::AppState;
 use crate::domain::settings::{AppSettings, ModelSelection, OcrMethod, TranslationMethod};
 use crate::infrastructure::ai_http::{
@@ -622,11 +623,11 @@ fn apply_floating_window_chrome(window: &WebviewWindow) {
 fn apply_floating_window_chrome(_window: &WebviewWindow) {}
 
 fn floating_height_for_stage(height: f64, screenshot_translation: bool, positioned: bool) -> f64 {
-    if screenshot_translation && positioned {
-        height.min(224.0)
-    } else {
-        height
+    if !screenshot_translation {
+        return height;
     }
+
+    height.min(if positioned { 224.0 } else { TRANSLATOR_HEIGHT })
 }
 
 fn floating_size_matches(current_width: u32, current_height: u32, width: i32, height: i32) -> bool {
@@ -764,7 +765,10 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), Str
             ..rect
         };
         window
-            .set_resizable(vision_floating_resizable(rect.height))
+            .set_resizable(vision_floating_resizable(
+                screenshot_translation,
+                rect.height,
+            ))
             .map_err(|error| error.to_string())?;
         apply_floating_window_chrome(&window);
         apply_floating_rect(&window, &rect)?;
@@ -772,8 +776,8 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), Str
     Ok(())
 }
 
-fn vision_floating_resizable(height: f64) -> bool {
-    height > 96.0
+fn vision_floating_resizable(screenshot_translation: bool, height: f64) -> bool {
+    !screenshot_translation && height > 96.0
 }
 
 #[cfg(target_os = "windows")]
@@ -786,6 +790,15 @@ fn floating_window_pos_flags() -> windows::Win32::UI::WindowsAndMessaging::SET_W
 #[tauri::command]
 pub fn vision_fly_floating(app: AppHandle, rect: FloatingFlyRect) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("vision") {
+        let screenshot_translation = window
+            .url()
+            .map_err(|error| error.to_string())?
+            .fragment()
+            .is_some_and(|fragment| fragment.contains("mode=translate"));
+        let rect = FloatingFlyRect {
+            height: floating_height_for_stage(rect.height, screenshot_translation, true),
+            ..rect
+        };
         apply_floating_fly_rect(&window, &rect)?;
     }
     Ok(())
@@ -1535,19 +1548,35 @@ mod tests {
     }
 
     #[test]
-    fn only_allows_resizing_after_the_narrow_vision_bar_expands() {
-        assert!(!vision_floating_resizable(56.0));
-        assert!(!vision_floating_resizable(96.0));
-        assert!(vision_floating_resizable(97.0));
-        assert!(vision_floating_resizable(520.0));
+    fn vision_chat_only_allows_resizing_after_the_narrow_bar_expands() {
+        assert!(!vision_floating_resizable(false, 56.0));
+        assert!(!vision_floating_resizable(false, 96.0));
+        assert!(vision_floating_resizable(false, 97.0));
+        assert!(vision_floating_resizable(false, 520.0));
     }
 
     #[test]
-    fn screenshot_translation_starts_compact_and_keeps_measured_sizes() {
+    fn screenshot_translation_result_never_allows_window_resizing() {
+        for height in [56.0, 96.0, 97.0, 188.0, 224.0, 420.0, 520.0] {
+            assert!(!vision_floating_resizable(true, height));
+        }
+    }
+
+    #[test]
+    fn screenshot_translation_starts_compact_and_caps_measured_height() {
         assert_eq!(floating_height_for_stage(420.0, true, true), 224.0);
         assert_eq!(floating_height_for_stage(188.0, true, true), 188.0);
-        assert_eq!(floating_height_for_stage(420.0, true, false), 420.0);
+        assert_eq!(floating_height_for_stage(188.0, true, false), 188.0);
+        assert_eq!(
+            floating_height_for_stage(TRANSLATOR_HEIGHT, true, false),
+            TRANSLATOR_HEIGHT
+        );
+        assert_eq!(
+            floating_height_for_stage(TRANSLATOR_HEIGHT + 120.0, true, false),
+            TRANSLATOR_HEIGHT
+        );
         assert_eq!(floating_height_for_stage(420.0, false, true), 420.0);
+        assert_eq!(floating_height_for_stage(620.0, false, false), 620.0);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow, Webvie
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const TRANSLATOR_WIDTH: f64 = 680.0;
-const TRANSLATOR_HEIGHT: f64 = 400.0;
+pub(crate) const TRANSLATOR_HEIGHT: f64 = 400.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeatureSurface {

@@ -8,8 +8,9 @@ export async function installVisionTauriMock(
   page: Page,
   ocrSource = 'ScreenPilot Visual Test\n可见内容识别 · English OCR · E = mc²',
   keepFullscreenAfterCapture = true,
+  translatedText = 'ScreenPilot 视觉测试\n可见内容识别、英文 OCR 与公式 E = mc²',
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
@@ -169,7 +170,7 @@ export async function installVisionTauriMock(
         emit('vision-translate-stream', {
           imageId,
           kind: 'translated',
-          delta: 'ScreenPilot 视觉测试\n可见内容识别、英文 OCR 与公式 E = mc²',
+          delta: translatedResult,
         })
         emit('vision-translate-stream', { imageId, done: true, success: true })
         return { success: true }
@@ -186,12 +187,27 @@ export async function installVisionTauriMock(
       if (command === 'vision_set_hit_region') return true
       if (command === 'vision_set_floating') {
         const rect = args.rect as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | undefined
-        const positionedTranslation = location.hash.includes('mode=translate')
+        const screenshotTranslation = location.hash.includes('mode=translate')
+        const positionedTranslation = screenshotTranslation
           && Number.isFinite(Number(rect?.x))
           && Number.isFinite(Number(rect?.y))
+        const requestedHeight = Number(rect?.height)
         const floatingRect = {
           width: Number(rect?.width),
-          height: positionedTranslation ? Math.min(Number(rect?.height), 224) : Number(rect?.height),
+          height: screenshotTranslation
+            ? Math.min(requestedHeight, positionedTranslation ? 224 : 400)
+            : requestedHeight,
+        }
+        visionTestState.floatingRect = floatingRect
+        visionTestState.floatingRects.push(floatingRect)
+        return null
+      }
+      if (command === 'vision_fly_floating') {
+        const rect = args.rect as { width?: unknown; height?: unknown } | undefined
+        const requestedHeight = Number(rect?.height)
+        const floatingRect = {
+          width: Number(rect?.width),
+          height: location.hash.includes('mode=translate') ? Math.min(requestedHeight, 224) : requestedHeight,
         }
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)
@@ -219,5 +235,10 @@ export async function installVisionTauriMock(
         unregisterCallback: (id: number) => callbacks.delete(id),
       },
     })
-  }, { image: sampleImage, sourceText: ocrSource, keepFullscreen: keepFullscreenAfterCapture })
+  }, {
+    image: sampleImage,
+    sourceText: ocrSource,
+    keepFullscreen: keepFullscreenAfterCapture,
+    translatedResult: translatedText,
+  })
 }

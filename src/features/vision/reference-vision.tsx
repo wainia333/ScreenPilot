@@ -44,6 +44,8 @@ const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
 const languageHost = document.createElement('span')
 const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
+const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
+const OCR_FLOATING_MAX_HEIGHT = 400
 languageHost.dataset.screenpilotTargetLanguage = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
 
@@ -199,6 +201,9 @@ export default function ReferenceVisionAdapter() {
       if (methodSelect === null || heading === undefined || heading === null || body === undefined || body === null) {
         document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
         document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
+        document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {
+          card.removeAttribute('data-screenpilot-floating-translate-surface')
+        })
         return
       }
       const divider = heading.previousElementSibling
@@ -220,7 +225,30 @@ export default function ReferenceVisionAdapter() {
       const floatingTranslateSettled = floatingTranslateSurface
         && translateCard instanceof HTMLElement
         && settledTranslateCards.has(translateCard)
+      if (floatingTranslateSurface && translateCard instanceof HTMLElement) {
+        const header = translateCard.firstElementChild
+        const headerHeight = header instanceof HTMLElement ? header.getBoundingClientRect().height : 0
+        const desiredHeight = Math.min(
+          OCR_FLOATING_MAX_HEIGHT,
+          Math.ceil(headerHeight + body.scrollHeight),
+        )
+        if (translateRect !== null && desiredHeight > translateRect.height + 1) {
+          if (requestedTranslateHeights.get(translateCard) !== desiredHeight) {
+            requestedTranslateHeights.set(translateCard, desiredHeight)
+            void invoke('vision_set_floating', {
+              rect: { width: Math.ceil(translateRect.width), height: desiredHeight },
+            }).catch((error: unknown) => console.error('Failed to expand screenshot translation window', error))
+          }
+        } else {
+          requestedTranslateHeights.delete(translateCard)
+        }
+      }
       if (translateCard instanceof HTMLElement) {
+        setBooleanAttribute(
+          translateCard,
+          'data-screenpilot-floating-translate-surface',
+          floatingTranslateSurface,
+        )
         setBooleanAttribute(
           translateCard,
           'data-screenpilot-floating-translate-card',
@@ -238,12 +266,19 @@ export default function ReferenceVisionAdapter() {
         floatingTranslateSurface && !floatingTranslateSettled,
       )
       if (source instanceof HTMLElement && source.querySelector('.ocr-editable, .ocr-markdown') !== null) {
-        const availableHeight = Number.parseFloat(body.style.maxHeight)
-        const sourceHeight = Number.isFinite(availableHeight) ? Math.max(92, Math.floor(availableHeight * 0.42)) : 150
-        source.dataset.screenpilotOcrSource = 'true'
-        setCssPropertyIfChanged(source, '--screenpilot-ocr-source-max-height', `${String(sourceHeight)}px`)
+        const reachedHeightLimit = floatingTranslateSettled
+          && window.innerHeight >= OCR_FLOATING_MAX_HEIGHT - 1
+        if (reachedHeightLimit) {
+          const sourceHeight = Math.max(92, Math.floor(body.getBoundingClientRect().height * 0.42))
+          source.dataset.screenpilotOcrSource = 'true'
+          setCssPropertyIfChanged(source, '--screenpilot-ocr-source-max-height', `${String(sourceHeight)}px`)
+        } else {
+          source.removeAttribute('data-screenpilot-ocr-source')
+          clearCssProperty(source, '--screenpilot-ocr-source-max-height')
+        }
       }
       heading.dataset.screenpilotTranslatedHeading = 'true'
+      methodSelect.dataset.screenpilotTranslationMethod = 'true'
       if (languageHost.parentElement !== heading || languageHost.nextSibling !== methodSelect) {
         heading.insertBefore(languageHost, methodSelect)
       }
@@ -279,6 +314,9 @@ export default function ReferenceVisionAdapter() {
       window.removeEventListener('resize', applyAdapters)
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
+      document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {
+        card.removeAttribute('data-screenpilot-floating-translate-surface')
+      })
       languageHost.remove()
       resultHost.remove()
     }
@@ -338,7 +376,7 @@ export default function ReferenceVisionAdapter() {
       <ReferenceVision />
       {createPortal(
         <span className="screenpilot-target-language-control">
-          <label htmlFor="screenpilot-target-language">目标</label>
+          <label htmlFor="screenpilot-target-language">目标语言</label>
           <select
             id="screenpilot-target-language"
             aria-label="目标语言"

@@ -296,10 +296,56 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   await expectEdgeSafeFrame(page.locator('[data-screenpilot-window-frame="true"]', { has: page.getByText(/ScreenPilot 视觉测试/) }))
   const targetLanguage = page.getByRole('combobox', { name: '目标语言' })
   await expect(targetLanguage).toHaveValue('auto')
+  const targetLanguageLabel = page.getByText('目标语言', { exact: true })
+  const translationEngine = page.locator('select[data-screenpilot-translation-method="true"]')
+  await expect(targetLanguageLabel).toBeVisible()
+  await expect(translationEngine).toBeVisible()
+  const translatedHeading = page.locator('[data-screenpilot-translated-heading="true"]')
+  const geometry = await translatedHeading.evaluate((heading) => {
+    const label = heading.querySelector('.screenpilot-target-language-control label')
+    const language = heading.querySelector('#screenpilot-target-language')
+    const engine = heading.querySelector('select[data-screenpilot-translation-method="true"]')
+    if (!(label instanceof HTMLElement) || !(language instanceof HTMLElement) || !(engine instanceof HTMLElement)) return null
+    const rect = (element: Element) => {
+      const bounds = element.getBoundingClientRect()
+      return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+    }
+    return {
+      translatedHeadingBox: rect(heading),
+      targetLanguageLabelBox: rect(label),
+      targetLanguageBox: rect(language),
+      translationEngineBox: rect(engine),
+    }
+  })
+  expect(geometry).not.toBeNull()
+  if (geometry === null) throw new Error('OCR translation controls geometry is missing')
+  const { translatedHeadingBox, targetLanguageLabelBox, targetLanguageBox, translationEngineBox } = geometry
+  const centerY = (box: { y: number; height: number }) => box.y + box.height / 2
+  expect(Math.abs(centerY(targetLanguageLabelBox) - centerY(targetLanguageBox))).toBeLessThanOrEqual(1)
+  expect(Math.abs(centerY(targetLanguageBox) - centerY(translationEngineBox))).toBeLessThanOrEqual(1)
+  expect(targetLanguageLabelBox.x).toBeGreaterThan(translatedHeadingBox.x + translatedHeadingBox.width * 0.25)
+  expect(targetLanguageBox.x).toBeGreaterThan(targetLanguageLabelBox.x + targetLanguageLabelBox.width)
+  expect(translationEngineBox.x).toBeGreaterThan(targetLanguageBox.x + targetLanguageBox.width)
+  expect(Math.abs(translatedHeadingBox.x + translatedHeadingBox.width - translationEngineBox.x - translationEngineBox.width)).toBeLessThanOrEqual(1)
+  expect(targetLanguageBox.width).toBeCloseTo(translationEngineBox.width, 0)
+  expect(targetLanguageBox.height).toBeCloseTo(translationEngineBox.height, 0)
   const screenshotSelects = page.getByRole('combobox')
   await expect(screenshotSelects).toHaveCount(3)
   for (let index = 0; index < await screenshotSelects.count(); index += 1) {
-    await expectNeutralSelectFocus(screenshotSelects.nth(index))
+    const select = screenshotSelects.nth(index)
+    const style = await select.evaluate((element) => {
+      const computed = getComputedStyle(element)
+      const bounds = element.getBoundingClientRect()
+      return {
+        fontSize: computed.fontSize,
+        width: bounds.width,
+        height: bounds.height,
+      }
+    })
+    expect(style.fontSize).toBe('11.5px')
+    expect(style.width).toBeCloseTo(100, 0)
+    expect(style.height).toBeCloseTo(24, 0)
+    await expectNeutralSelectFocus(select)
   }
   await targetLanguage.selectOption('en')
   await expect(page.getByText(/编辑后译文\(en\)：ScreenPilot Visual Test/)).toBeVisible()
@@ -337,24 +383,19 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   await expect(page).toHaveScreenshot('screenshot-translation.png')
 })
 
-for (const mode of ['chat', 'translate'] as const) {
-  test(`${mode} card fills a floating window after native edge resize`, async ({ page }) => {
+test('chat card fills a floating window after native edge resize', async ({ page }) => {
     await installVisionTauriMock(page, undefined, false)
     await page.setViewportSize({ width: 1280, height: 720 })
-    await page.goto(`/?window=vision#vision?mode=${mode}`)
+    await page.goto('/?window=vision#vision?mode=chat')
     await waitForVisionSelection(page)
     await page.mouse.move(120, 160)
     await page.mouse.down()
     await page.mouse.move(620, 460, { steps: 8 })
     await page.mouse.up()
 
-    if (mode === 'chat') {
-      await page.getByPlaceholder('问点什么...').fill('What is visible?')
-      await page.locator('button:has(svg.lucide-arrow-up)').click()
-      await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
-    } else {
-      await expect(page.getByText('ScreenPilot Visual Test')).toBeVisible()
-    }
+    await page.getByPlaceholder('问点什么...').fill('What is visible?')
+    await page.locator('button:has(svg.lucide-arrow-up)').click()
+    await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
 
     await expect.poll(async () => page.evaluate(() => (
       window as typeof window & {
@@ -370,22 +411,19 @@ for (const mode of ['chat', 'translate'] as const) {
     const initialHeight = Math.round(floatingRect.height)
     await page.setViewportSize({ width, height: initialHeight })
 
-    const card = mode === 'chat'
-      ? page.locator('[data-screenpilot-floating-answer-card="true"]')
-      : page.locator('[data-screenpilot-floating-translate-card="true"]', { has: page.getByText('ScreenPilot Visual Test') })
+    const card = page.locator('[data-screenpilot-floating-answer-card="true"]')
     await expect(card).toBeVisible()
     const initialBox = await card.boundingBox()
     expect(initialBox).not.toBeNull()
 
     const resizedHeight = initialHeight + 160
     await page.setViewportSize({ width, height: resizedHeight })
-    if (initialBox === null) throw new Error(`${mode} initial resize geometry is missing`)
+    if (initialBox === null) throw new Error('chat initial resize geometry is missing')
     await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBe(resizedHeight)
     const resizedBox = await card.boundingBox()
-    if (resizedBox === null) throw new Error(`${mode} resized geometry is missing`)
+    if (resizedBox === null) throw new Error('chat resized geometry is missing')
     expect(resizedBox.height).toBeGreaterThan(initialBox.height + 100)
-  })
-}
+})
 
 test('OCR floating window follows measured text height without viewport resize feedback', async ({ page }) => {
   await installVisionTauriMock(page, 'Short OCR text.', false)
@@ -416,6 +454,7 @@ test('OCR floating window follows measured text height without viewport resize f
   if (provisionalRect === undefined) throw new Error('OCR provisional floating geometry is missing')
   expect(provisionalRect.height).toBeLessThanOrEqual(224)
   expect(provisionalRect.height).toBeGreaterThanOrEqual(96)
+  expect(initialFloatingSequence.every((rect) => rect.height <= 400)).toBe(true)
   await page.setViewportSize({
     width: Math.round(initialRect.width),
     height: Math.round(initialRect.height),
@@ -427,30 +466,19 @@ test('OCR floating window follows measured text height without viewport resize f
   const contentDrivenBox = await card.boundingBox()
   expect(contentDrivenBox).not.toBeNull()
   if (contentDrivenBox === null) throw new Error('OCR card geometry is missing')
+  expect(contentDrivenBox.height).toBeLessThan(400)
+  const shortSourceGeometry = await page.locator('.ocr-editable, .ocr-markdown').first().evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }))
+  expect(shortSourceGeometry.scrollHeight).toBeLessThanOrEqual(shortSourceGeometry.clientHeight + 1)
 
-  await page.evaluate(() => {
-    const state = (window as typeof window & {
-      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
-    }).__SCREENPILOT_TEST__
-    state.floatingRects.length = 0
-  })
-  await page.setViewportSize({ width: Math.round(initialRect.width), height: Math.round(initialRect.height) + 160 })
-  await page.waitForTimeout(250)
-  await expect(page.locator('html')).toHaveAttribute('data-screenpilot-floating-translate-window', 'true')
-  const resizedViewportBox = await card.boundingBox()
-  expect(resizedViewportBox).not.toBeNull()
-  if (resizedViewportBox === null) throw new Error('Resized OCR card geometry is missing')
-  expect(resizedViewportBox.height).toBeGreaterThan(contentDrivenBox.height + 140)
-  expect(Math.round(resizedViewportBox.height)).toBe(Math.round(initialRect.height) + 160)
-  const resizeFeedbackCount = await page.evaluate(() => (window as typeof window & {
-    __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
-  }).__SCREENPILOT_TEST__.floatingRects.length)
-  expect(resizeFeedbackCount).toBeLessThanOrEqual(1)
 })
 
 test('long OCR source scrolls independently without pushing translation below the card', async ({ page }) => {
   const longSource = Array.from({ length: 60 }, (_, index) => `OCR line ${String(index + 1)} with enough text to wrap inside the source pane.`).join('\n')
-  await installVisionTauriMock(page, longSource)
+  const longTranslation = Array.from({ length: 20 }, (_, index) => `译文第 ${String(index + 1)} 行，用于验证多行翻译结果会先撑高窗口。`).join('\n')
+  await installVisionTauriMock(page, longSource, false, longTranslation)
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto('/?window=vision#vision?mode=translate')
   await waitForVisionSelection(page)
@@ -459,6 +487,35 @@ test('long OCR source scrolls independently without pushing translation below th
   await page.mouse.move(620, 460, { steps: 8 })
   await page.mouse.up()
   await expect(page.getByText('OCR line 1 with enough text to wrap inside the source pane.')).toBeVisible()
+  await expect.poll(async () => page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBeGreaterThan(224)
+  const measuredRect = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect)
+  if (measuredRect === null) throw new Error('OCR measured floating geometry is missing')
+  expect(measuredRect.height).toBeLessThanOrEqual(400)
+  await page.setViewportSize({ width: Math.round(measuredRect.width), height: Math.round(measuredRect.height) })
+  await expect.poll(async () => page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(400)
+  const cappedRect = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect)
+  if (cappedRect === null) throw new Error('OCR capped floating geometry is missing')
+  await page.setViewportSize({ width: Math.round(cappedRect.width), height: Math.round(cappedRect.height) })
+  await expect(page.locator('html')).toHaveAttribute('data-screenpilot-floating-translate-window', 'true')
+  const measuredHeight = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)
+  expect(measuredHeight).toBeLessThanOrEqual(400)
+  const floatingSequence = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRects: { height: number }[] }
+  }).__SCREENPILOT_TEST__.floatingRects.slice())
+  expect(floatingSequence.length).toBeGreaterThanOrEqual(2)
+  expect(floatingSequence[0]?.height).toBeLessThanOrEqual(224)
+  expect(floatingSequence.every((rect) => rect.height <= 400)).toBe(true)
+  expect(Math.max(...floatingSequence.map((rect) => rect.height))).toBe(400)
   const source = page.locator('[data-screenpilot-ocr-source="true"]')
   await expect(source).toBeVisible()
   const geometry = await source.evaluate((element) => ({
@@ -466,6 +523,13 @@ test('long OCR source scrolls independently without pushing translation below th
     scrollHeight: element.scrollHeight,
   }))
   expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight)
+  const translationBody = page.locator('[data-screenpilot-translation-body="true"]')
+  const bodyGeometry = await translationBody.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }))
+  expect(bodyGeometry.scrollHeight).toBeGreaterThan(bodyGeometry.clientHeight)
+  await expect(page.getByText('译文第 20 行，用于验证多行翻译结果会先撑高窗口。')).toBeAttached()
   const translatedHeading = page.locator('[data-screenpilot-translated-heading="true"]')
   await expect(translatedHeading).toBeVisible()
   const headingBox = await translatedHeading.boundingBox()
