@@ -123,6 +123,11 @@ export class FakeDesktopPort implements DesktopPort {
     return Promise.resolve()
   }
 
+  openExternal(url: string): Promise<void> {
+    void url
+    return Promise.resolve()
+  }
+
   permissionStatus(): Promise<{ platform: 'windows'; screenCapture: boolean; accessibility: boolean; administrator: boolean }> {
     return Promise.resolve({ platform: 'windows', screenCapture: true, accessibility: true, administrator: false })
   }

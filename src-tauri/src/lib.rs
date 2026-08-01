@@ -38,6 +38,7 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .invoke_handler(tauri::generate_handler![
+            open_external,
             settings_load,
             startup_notice_take,
             settings_save,

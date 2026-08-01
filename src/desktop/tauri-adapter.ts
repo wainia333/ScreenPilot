@@ -55,6 +55,7 @@ export class TauriDesktopPort implements DesktopPort {
   hideWindow = () => command('window_hide')
   resizeWindow = (width: number, height: number) => getCurrentWindow().setSize(new LogicalSize(width, height))
   startDragging = () => getCurrentWindow().startDragging()
+  openExternal = (url: string) => command('open_external', { url })
   permissionStatus = () => invoke<PermissionStatus>('permissions_status')
   onRoute = (listener: (route: WindowRoute) => void) => event('screenpilot:route', listener)
   onWindowReset = (listener: (route: WindowRoute) => void) => event('screenpilot:reset', listener)

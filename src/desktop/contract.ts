@@ -62,6 +62,7 @@ export type DesktopPort = {
   hideWindow(): Promise<void>
   resizeWindow(width: number, height: number): Promise<void>
   startDragging(): Promise<void>
+  openExternal(url: string): Promise<void>
   permissionStatus(): Promise<PermissionStatus>
   onRoute(listener: (route: WindowRoute) => void): Promise<Unlisten>
   onWindowReset(listener: (route: WindowRoute) => void): Promise<Unlisten>

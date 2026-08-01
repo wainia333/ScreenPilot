@@ -282,6 +282,36 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await expect(page).toHaveScreenshot('vision-answer.png')
 })
 
+test('Vision markdown links open externally without navigating the app webview', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = '请查看 [**外部文档**](https://example.com/vision?source=screenpilot#answer)。'
+  })
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  await page.getByPlaceholder('问点什么...').fill('Provide a link.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+  const link = page.getByRole('link', { name: '外部文档' })
+  await expect(link).toBeVisible()
+  const before = page.url()
+  await link.click()
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { externalUrls: string[] }
+    }).__SCREENPILOT_TEST__
+    return state.externalUrls
+  })).toEqual(['https://example.com/vision?source=screenpilot#answer'])
+  expect(page.url()).toBe(before)
+})
+
 test('screenshot translation keeps editable source and nonblank thumbnail history', async ({ page }) => {
   await installVisionTauriMock(page)
   await page.setViewportSize({ width: 1280, height: 720 })

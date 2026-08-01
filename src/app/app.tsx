@@ -6,6 +6,7 @@ import { useDesktop } from '../desktop/use-desktop'
 import { OptimizerPage } from '../features/prompt-optimizer/optimizer-page'
 import { SettingsPage } from '../features/settings/settings-page'
 import { TranslatorPage } from '../features/translator/translator-page'
+import { ExternalLinkBridge } from './external-link-bridge'
 
 const ReferenceVision = lazy(() => import('../features/vision/reference-vision'))
 
@@ -76,6 +77,7 @@ function RouteContent() {
 export function App() {
   return (
     <DesktopProvider>
+      <ExternalLinkBridge />
       <RouteContent />
     </DesktopProvider>
   )

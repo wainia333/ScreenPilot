@@ -19,6 +19,8 @@ export async function installVisionTauriMock(
     const visionTestState = {
       showCount: 0,
       translationRequests: [] as { text: string; targetLanguage: string }[],
+      externalUrls: [] as string[],
+      answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
       floatingRect: null as { width: number; height: number } | null,
       floatingRects: [] as { width: number; height: number }[],
     }
@@ -124,6 +126,10 @@ export async function installVisionTauriMock(
         return null
       }
       if (command.startsWith('plugin:window|')) return null
+      if (command === 'open_external') {
+        visionTestState.externalUrls.push(String(args.url))
+        return null
+      }
       if (command === 'get_settings') return structuredClone(settings)
       if (command === 'save_settings') {
         Object.assign(settings, args.settings)
@@ -155,7 +161,7 @@ export async function installVisionTauriMock(
         emit('vision-stream', {
           imageId,
           kind: 'answer',
-          delta: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
+          delta: visionTestState.answerText,
         })
         emit('vision-stream', { imageId, kind: 'answer', delta: '', done: true, reason: 'done' })
         return { success: true }
