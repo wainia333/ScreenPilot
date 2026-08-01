@@ -2,18 +2,15 @@ import { FolderOpen } from 'lucide-react'
 import { SettingGroup, SettingRow, Segmented, SelectField, Toggle } from '../../../shared/ui/controls'
 import { ShortcutRecorder } from '../shortcut-recorder'
 import type { AppSettings, InterfaceLanguage, ThemeMode } from '../types'
-import type { PermissionStatus } from '../../../desktop/contract'
 
 export function GeneralSection({
   settings,
   onChange,
   onPickDirectory,
-  permissionStatus,
 }: {
   settings: AppSettings
   onChange: (settings: AppSettings) => void
   onPickDirectory: () => void
-  permissionStatus: PermissionStatus | null | undefined
 }) {
   const updateGeneral = (patch: Partial<AppSettings['general']>) =>
     onChange({ ...settings, general: { ...settings.general, ...patch } })
@@ -47,21 +44,6 @@ export function GeneralSection({
         </SettingRow>
       </SettingGroup>
       <SettingGroup title="运行行为">
-        <SettingRow label="当前权限" description="显示 ScreenPilot 当前进程的实际 Windows 权限">
-          <span
-            className="permission-status"
-            data-administrator={permissionStatus?.administrator ?? false}
-            role="status"
-          >
-            {permissionStatus === undefined
-              ? '正在检测权限'
-              : permissionStatus === null
-              ? '权限检测失败'
-              : permissionStatus.administrator
-                ? '管理员身份'
-                : '标准用户身份'}
-          </span>
-        </SettingRow>
         <SettingRow label="自动重试">
           <Toggle
             checked={settings.retry.enabled}

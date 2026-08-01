@@ -148,7 +148,6 @@ export function SettingsPage() {
       <GeneralSection
         settings={draft}
         onChange={setDraft}
-        permissionStatus={permissionStatus}
         onPickDirectory={() => {
           void desktop.pickDirectory().then((imageArchivePath) => {
             if (imageArchivePath !== null) {
@@ -208,6 +207,21 @@ export function SettingsPage() {
             )
           })}
         </nav>
+        <div
+          className="settings-permission-state"
+          data-administrator={permissionStatus?.administrator ?? false}
+          role="status"
+          aria-label="当前运行权限"
+        >
+          <span />
+          {permissionStatus === undefined
+            ? '权限：检测中'
+            : permissionStatus === null
+              ? '权限：检测失败'
+              : permissionStatus.administrator
+                ? '权限：管理员'
+                : '权限：普通用户'}
+        </div>
         <div className="settings-save-state" data-dirty={dirty}>
           <span />{dirty ? '有未保存更改' : '所有更改已保存'}
         </div>

@@ -32,14 +32,36 @@ async function expectNeutralSelectFocus(select: Locator) {
   await select.focus()
   const style = await select.evaluate((element) => {
     const computed = getComputedStyle(element)
+    const bounds = element.getBoundingClientRect()
+    const clippingAncestors: { element: string; containsSelect: boolean }[] = []
+    let ancestor = element.parentElement
+    while (ancestor !== null) {
+      const ancestorStyle = getComputedStyle(ancestor)
+      const isViewportRoot = ancestor === document.body || ancestor === document.documentElement || ancestor.id === 'root'
+      if (!isViewportRoot && [ancestorStyle.overflowX, ancestorStyle.overflowY].some((value) => (
+        value === 'auto' || value === 'clip' || value === 'hidden' || value === 'scroll'
+      ))) {
+        const ancestorBounds = ancestor.getBoundingClientRect()
+        clippingAncestors.push({
+          element: ancestor.className,
+          containsSelect: bounds.left >= ancestorBounds.left - 0.5
+            && bounds.top >= ancestorBounds.top - 0.5
+            && bounds.right <= ancestorBounds.right + 0.5
+            && bounds.bottom <= ancestorBounds.bottom + 0.5,
+        })
+      }
+      ancestor = ancestor.parentElement
+    }
     return {
       borderColor: computed.borderTopColor,
       boxShadow: computed.boxShadow,
       outlineStyle: computed.outlineStyle,
+      clippingAncestors,
     }
   })
   expect(style.outlineStyle).toBe('none')
-  expect(style.boxShadow).not.toBe('none')
+  expect(style.boxShadow).toContain('1px inset')
+  expect(style.clippingAncestors.every((ancestor) => ancestor.containsSelect), JSON.stringify(style.clippingAncestors)).toBe(true)
   expect(`${style.borderColor} ${style.boxShadow}`).not.toMatch(
     /rgb(?:a)?\(\s*(?:177\s*,\s*60\s*,\s*56|185\s*,\s*86\s*,\s*61|223\s*,\s*128\s*,\s*101|239\s*,\s*127\s*,\s*121)/u,
   )
@@ -49,7 +71,14 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await page.setViewportSize({ width: 760, height: 620 })
   await page.goto('/')
   await expect(page.getByRole('navigation', { name: '设置分区' })).toBeVisible()
-  await expect(page.getByRole('status')).toHaveText('标准用户身份')
+  const permissionStatus = page.getByRole('status', { name: '当前运行权限' })
+  await expect(permissionStatus).toHaveText('权限：普通用户')
+  await expect(permissionStatus.locator('xpath=following-sibling::*[1]')).toContainText('所有更改已保存')
+  const permissionDot = permissionStatus.locator('span')
+  const savedDot = page.locator('.settings-save-state span')
+  await expect(permissionStatus).toHaveCSS('font-size', '11px')
+  await expect(permissionDot).toHaveCSS('background-color', 'rgb(154, 107, 32)')
+  await expect(savedDot).toHaveCSS('background-color', 'rgb(52, 118, 86)')
   await expectEdgeSafeFrame(page.locator('.settings-window'))
   await expect(page.locator('.settings-footer').getByRole('button', { name: '保存' })).toBeVisible()
   await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(7)

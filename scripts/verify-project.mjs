@@ -4,6 +4,7 @@ import { extname, join, relative, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const referenceRoot = 'E:\\我的文档\\Kivio-modificated'
+const executionSpec = resolve(root, '..', 'ScreenPilot-大模型执行规范.md')
 const exactFiles = new Map([
   ['src/vendor/kivio-screenshot/Vision.tsx', ['src/Vision.tsx', '72F72EC9E40FD3D00A879430A46DF6D72919F3C47B7BD202DC6160395E761C02']],
   ['src/vendor/kivio-screenshot/api/tauri.ts', ['src/api/tauri.ts', 'D99BF577F7626CC9D18B3B9916F74BCD174DED41559967D94450E3AEC348EFF8']],
@@ -64,9 +65,10 @@ const markdown = projectFiles
   .filter((file) => extname(file).toLowerCase() === '.md')
   .map((file) => relative(root, file).replaceAll('\\', '/'))
   .filter((file) => !ignoredFiles.has(file))
-if (markdown.length !== 1 || markdown[0] !== 'ScreenPilot-大模型执行规范.md') {
+if (markdown.length !== 0) {
   failures.push(`Markdown 门禁不符：${markdown.join(', ')}`)
 }
+if (!existsSync(executionSpec)) failures.push(`缺少项目外执行规范：${executionSpec}`)
 
 for (const obsolete of [
   'src/features/vision/vision-page.tsx',
@@ -91,5 +93,5 @@ if (failures.length > 0) {
   failures.forEach((failure) => console.error(failure))
   process.exitCode = 1
 } else {
-  console.log('项目门禁通过：十份截图模式副本哈希一致，旧截图路径不存在，规范文件唯一。')
+  console.log('项目门禁通过：十份截图模式副本哈希一致，旧截图路径不存在，项目外规范文件存在。')
 }

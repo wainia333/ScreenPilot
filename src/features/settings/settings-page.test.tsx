@@ -62,9 +62,12 @@ describe('SettingsPage', () => {
 
   it('shows the current process administrator status', async () => {
     const standard = render(<DesktopProvider port={new ClosingDesktop()}><SettingsPage /></DesktopProvider>)
-    expect(await screen.findByRole('status')).toHaveTextContent('标准用户身份')
+    const standardStatus = await screen.findByRole('status', { name: '当前运行权限' })
+    expect(standardStatus).toHaveTextContent('权限：普通用户')
+    expect(standardStatus).not.toHaveTextContent('程序运行身份权限')
+    expect(standardStatus.nextElementSibling).toHaveClass('settings-save-state')
     standard.unmount()
     render(<DesktopProvider port={new AdministratorDesktop()}><SettingsPage /></DesktopProvider>)
-    expect(await screen.findByRole('status')).toHaveTextContent('管理员身份')
+    expect(await screen.findByRole('status', { name: '当前运行权限' })).toHaveTextContent('权限：管理员')
   })
 })
