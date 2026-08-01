@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
+import { DEFAULT_SETTINGS } from './defaults'
 import type { AppSettings } from './types'
 import { SettingsPage } from './settings-page'
 
@@ -151,6 +152,32 @@ describe('SettingsPage', () => {
     await act(async () => Promise.resolve())
     expect(screen.getByRole('button', { name: 'OCR' })).toBeVisible()
     expect(screen.queryByRole('button', { name: 'OCR/截图翻译' })).not.toBeInTheDocument()
+  })
+
+  it('keeps every model selector visible when non-AI interfaces are selected', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'local',
+        name: 'Local Provider',
+        baseUrl: 'http://127.0.0.1:11434/v1',
+        keyCount: 0,
+        availableModels: ['local:model'],
+        enabledModels: ['local:model'],
+      }],
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    expect(screen.getByRole('combobox', { name: '文本翻译 AI 模型' })).toHaveTextContent('Local Provider · local:model')
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    expect(screen.getByRole('combobox', { name: 'OCR 模型' })).toHaveTextContent('Local Provider · local:model')
+    expect(screen.getByRole('combobox', { name: '截图翻译模型' })).toHaveTextContent('Local Provider · local:model')
+    fireEvent.click(screen.getByRole('button', { name: 'Vision' }))
+    expect(screen.getByRole('combobox', { name: 'Vision 模型' })).toHaveTextContent('Local Provider · local:model')
+    fireEvent.click(screen.getByRole('button', { name: '提示词优化' }))
+    expect(screen.getByRole('combobox', { name: '提示词优化模型' })).toHaveTextContent('Local Provider · local:model')
   })
 
   it('shows the current process administrator status', async () => {

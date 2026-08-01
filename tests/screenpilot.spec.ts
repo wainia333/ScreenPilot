@@ -84,6 +84,10 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(7)
   await page.getByRole('button', { name: 'OCR', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'OCR', exact: true })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('chaoxing')
+  await expect(page.getByRole('combobox', { name: 'OCR 模型' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '截图翻译接口' })).toHaveValue('microsoft')
+  await expect(page.getByRole('combobox', { name: '截图翻译模型' })).toBeVisible()
   const credentialRows = page.locator('.adapter-credentials > section')
   await expect(credentialRows).toHaveCount(4)
   for (const row of await credentialRows.all()) {
@@ -94,6 +98,9 @@ test('settings supports seven sections, unsaved close choices and accessible lay
     expect(buttonBox.y + buttonBox.height / 2).toBeGreaterThan(rowBox.y + rowBox.height * 0.25)
     expect(buttonBox.y + buttonBox.height / 2).toBeLessThan(rowBox.y + rowBox.height * 0.75)
   }
+  await page.getByRole('button', { name: '翻译', exact: true }).click()
+  await expect(page.getByRole('combobox', { name: '翻译接口' })).toHaveValue('microsoft')
+  await expect(page.getByRole('combobox', { name: '文本翻译 AI 模型' })).toBeVisible()
   await page.getByRole('button', { name: '常规', exact: true }).click()
   await page.getByRole('radio', { name: '深色', exact: true }).click()
   await page.getByRole('button', { name: '关闭设置' }).click()
@@ -445,6 +452,13 @@ test('chat card fills a floating window after native edge resize', async ({ page
     await expect(card).toBeVisible()
     const initialBox = await card.boundingBox()
     expect(initialBox).not.toBeNull()
+
+    const minimumHeight = 244
+    await page.setViewportSize({ width, height: minimumHeight })
+    await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBe(minimumHeight)
+    const minimumBox = await card.boundingBox()
+    if (minimumBox === null) throw new Error('chat minimum resize geometry is missing')
+    expect(minimumBox.height).toBeGreaterThanOrEqual(176)
 
     const resizedHeight = initialHeight + 160
     await page.setViewportSize({ width, height: resizedHeight })

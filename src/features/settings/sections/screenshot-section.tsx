@@ -47,16 +47,14 @@ export function ScreenshotSection({
             onChange={(ocrMethod) => update({ ocrMethod })}
           />
         </SettingRow>
-        {current.ocrMethod === 'ai' ? (
-          <SettingRow label="OCR 模型">
-            <ModelField
-              value={current.ocrModel}
-              providers={settings.providers}
-              label="OCR 模型"
-              onChange={(ocrModel) => update({ ocrModel })}
-            />
-          </SettingRow>
-        ) : null}
+        <SettingRow label="OCR 模型">
+          <ModelField
+            value={current.ocrModel}
+            providers={settings.providers}
+            label="OCR 模型"
+            onChange={(ocrModel) => update({ ocrModel })}
+          />
+        </SettingRow>
         <SettingRow label="翻译接口">
           <SelectField
             value={current.translationMethod}
@@ -65,16 +63,14 @@ export function ScreenshotSection({
             onChange={(translationMethod) => update({ translationMethod })}
           />
         </SettingRow>
-        {current.translationMethod === 'ai' ? (
-          <SettingRow label="翻译模型">
-            <ModelField
-              value={current.translationModel}
-              providers={settings.providers}
-              label="截图翻译模型"
-              onChange={(translationModel) => update({ translationModel })}
-            />
-          </SettingRow>
-        ) : null}
+        <SettingRow label="翻译模型">
+          <ModelField
+            value={current.translationModel}
+            providers={settings.providers}
+            label="截图翻译模型"
+            onChange={(translationModel) => update({ translationModel })}
+          />
+        </SettingRow>
         <SettingRow label="显示识别原文">
           <Toggle checked={current.showSource} label="显示识别原文" onChange={(showSource) => update({ showSource })} />
         </SettingRow>

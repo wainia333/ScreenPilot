@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalUnit, Manager, PixelUnit, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowSizeConstraints,
+};
 use uuid::Uuid;
 use xcap::Monitor;
 
@@ -64,6 +67,27 @@ pub struct PermissionStatus {
     screen_capture: bool,
     accessibility: bool,
     administrator: bool,
+}
+
+const VISION_READY_BAR_HEIGHT: f64 = 56.0;
+const VISION_FLOATING_GAP: f64 = 8.0;
+const VISION_ANSWER_MIN_HEIGHT: f64 = 180.0;
+const VISION_CHAT_MIN_HEIGHT: f64 =
+    VISION_READY_BAR_HEIGHT + VISION_FLOATING_GAP + VISION_ANSWER_MIN_HEIGHT;
+
+fn set_vision_floating_size_constraints(
+    window: &WebviewWindow,
+    minimum_answer_height: bool,
+) -> Result<(), String> {
+    window
+        .set_size_constraints(WindowSizeConstraints {
+            min_width: None,
+            min_height: minimum_answer_height
+                .then(|| PixelUnit::new(LogicalUnit::new(VISION_CHAT_MIN_HEIGHT))),
+            max_width: None,
+            max_height: None,
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn current_screen_space(app: &AppHandle) -> Option<crate::vision::ScreenSpace> {
@@ -236,6 +260,7 @@ pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> 
         window
             .set_resizable(false)
             .map_err(|error| error.to_string())?;
+        set_vision_floating_size_constraints(&window, false)?;
         window
             .set_ignore_cursor_events(false)
             .map_err(|error| error.to_string())?;
@@ -525,6 +550,9 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
         if let Err(error) = window.set_resizable(false) {
             failures.push(error.to_string());
         }
+        if let Err(error) = set_vision_floating_size_constraints(&window, false) {
+            failures.push(error);
+        }
     }
     close_native_freeze(app);
     let state = app.state::<AppState>();
@@ -764,12 +792,11 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), Str
             height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
             ..rect
         };
+        let resizable = vision_floating_resizable(screenshot_translation, rect.height);
         window
-            .set_resizable(vision_floating_resizable(
-                screenshot_translation,
-                rect.height,
-            ))
+            .set_resizable(resizable)
             .map_err(|error| error.to_string())?;
+        set_vision_floating_size_constraints(&window, resizable)?;
         apply_floating_window_chrome(&window);
         apply_floating_rect(&window, &rect)?;
     }
@@ -1553,6 +1580,11 @@ mod tests {
         assert!(!vision_floating_resizable(false, 96.0));
         assert!(vision_floating_resizable(false, 97.0));
         assert!(vision_floating_resizable(false, 520.0));
+    }
+
+    #[test]
+    fn vision_chat_minimum_size_preserves_the_answer_surface() {
+        assert_eq!(VISION_CHAT_MIN_HEIGHT, 244.0);
     }
 
     #[test]

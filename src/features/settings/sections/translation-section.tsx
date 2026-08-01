@@ -37,16 +37,14 @@ export function TranslationSection({
             onChange={(method) => update({ method })}
           />
         </SettingRow>
-        {settings.translation.method === 'ai' ? (
-          <SettingRow label="AI 模型">
-            <ModelField
-              value={settings.translation.aiModel}
-              providers={settings.providers}
-              label="文本翻译 AI 模型"
-              onChange={(aiModel) => update({ aiModel })}
-            />
-          </SettingRow>
-        ) : null}
+        <SettingRow label="AI 模型">
+          <ModelField
+            value={settings.translation.aiModel}
+            providers={settings.providers}
+            label="文本翻译 AI 模型"
+            onChange={(aiModel) => update({ aiModel })}
+          />
+        </SettingRow>
       </SettingGroup>
       <SettingGroup title="大模型翻译系统提示词">
         <PromptField
