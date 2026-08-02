@@ -43,6 +43,69 @@ describe('sanitizeSettings', () => {
     expect(settings.vision.model).toBeNull()
   })
 
+  it('migrates missing AI switches only when the selected model is enabled', () => {
+    const settings = sanitizeSettings({
+      providers: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        baseUrl: 'https://api.example.com/v1',
+        availableModels: ['model-a'],
+        enabledModels: ['model-a'],
+      }],
+      translation: { method: 'ai', aiModel: { providerId: 'provider-a', model: 'model-a' } },
+      screenshotTranslation: {
+        ocrMethod: 'ai',
+        ocrModel: { providerId: 'provider-a', model: 'model-a' },
+        translationMethod: 'ai',
+        translationModel: { providerId: 'provider-a', model: 'missing' },
+      },
+    })
+    expect(settings.translation.aiEnabled).toBe(true)
+    expect(settings.translation.method).toBe('ai')
+    expect(settings.screenshotTranslation.ocrAiEnabled).toBe(true)
+    expect(settings.screenshotTranslation.ocrMethod).toBe('ai')
+    expect(settings.screenshotTranslation.translationAiEnabled).toBe(false)
+    expect(settings.screenshotTranslation.translationModel).toBeNull()
+    expect(settings.screenshotTranslation.translationMethod).toBe('microsoft')
+  })
+
+  it('falls back from AI methods when a switch is turned off or a model is disabled', () => {
+    const settings = sanitizeSettings({
+      providers: [{
+        id: 'provider-a',
+        name: 'Provider A',
+        baseUrl: 'https://api.example.com/v1',
+        availableModels: ['model-a'],
+        enabledModels: ['model-a'],
+      }],
+      translation: {
+        aiEnabled: false,
+        method: 'ai',
+        aiModel: { providerId: 'provider-a', model: 'model-a' },
+      },
+      screenshotTranslation: {
+        ocrAiEnabled: false,
+        ocrMethod: 'ai',
+        ocrModel: { providerId: 'provider-a', model: 'model-a' },
+        translationAiEnabled: true,
+        translationMethod: 'ai',
+        translationModel: { providerId: 'provider-a', model: 'model-a' },
+      },
+    })
+    expect(settings.translation.method).toBe('microsoft')
+    expect(settings.screenshotTranslation.ocrMethod).toBe('chaoxing')
+    expect(settings.screenshotTranslation.translationMethod).toBe('ai')
+    const provider = settings.providers[0]
+    expect(provider).toBeDefined()
+    if (provider === undefined) throw new Error('provider missing')
+    const withoutModel = sanitizeSettings({
+      ...settings,
+      providers: [{ ...provider, enabledModels: [] }],
+    })
+    expect(withoutModel.screenshotTranslation.translationMethod).toBe('microsoft')
+    expect(withoutModel.screenshotTranslation.translationModel).toBeNull()
+  })
+
   it('deduplicates provider models', () => {
     const settings = sanitizeSettings({
       providers: [

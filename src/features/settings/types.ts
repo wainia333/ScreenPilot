@@ -56,6 +56,7 @@ export type RetrySettings = {
 export type TranslationSettings = {
   targetLanguage: string
   method: TranslationMethod
+  aiEnabled: boolean
   aiModel: ModelSelection | null
   prompt: string
 }
@@ -63,8 +64,10 @@ export type TranslationSettings = {
 export type ScreenshotTranslationSettings = {
   enabled: boolean
   targetLanguage: string
+  ocrAiEnabled: boolean
   ocrMethod: OcrMethod
   translationMethod: TranslationMethod
+  translationAiEnabled: boolean
   ocrModel: ModelSelection | null
   translationModel: ModelSelection | null
   showSource: boolean

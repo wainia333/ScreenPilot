@@ -9,8 +9,17 @@ import './vision-adapter.css'
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 
 type ReferenceSettings = {
+  translationAiEnabled?: boolean
+  translatorProviderId?: string
+  translatorModel?: string
   screenshotTranslation: Record<string, unknown> & {
     targetLanguage?: TargetLanguage
+    ocrAiEnabled?: boolean
+    translationAiEnabled?: boolean
+    providerId?: string
+    model?: string
+    translateProviderId?: string
+    translateModel?: string
   }
   [key: string]: unknown
 }
@@ -111,6 +120,8 @@ export default function ReferenceVisionAdapter() {
   const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '' })
   const sourceRef = useRef({ imageId: '', text: '' })
   const requestSequenceRef = useRef(0)
+  const aiAvailabilityRef = useRef({ ocr: true, translation: true })
+  const aiAvailabilityLoadedRef = useRef(false)
 
   const clearOverride = useCallback(() => {
     requestSequenceRef.current += 1
@@ -122,7 +133,27 @@ export default function ReferenceVisionAdapter() {
     void invoke<ReferenceSettings>('get_settings').then((settings) => {
       const configured = settings.screenshotTranslation.targetLanguage
       if (active && isTargetLanguage(configured)) setTargetLanguage(configured)
-    }).catch((error: unknown) => console.error('Failed to load screenshot target language', error))
+      const screenshot = settings.screenshotTranslation
+      aiAvailabilityRef.current = {
+        ocr: screenshot.ocrAiEnabled === true
+          && typeof screenshot.providerId === 'string'
+          && screenshot.providerId.length > 0
+          && typeof screenshot.model === 'string'
+          && screenshot.model.length > 0,
+        translation: screenshot.translationAiEnabled === true
+          && typeof screenshot.translateProviderId === 'string'
+          && screenshot.translateProviderId.length > 0
+          && typeof screenshot.translateModel === 'string'
+          && screenshot.translateModel.length > 0,
+      }
+      aiAvailabilityLoadedRef.current = true
+      window.dispatchEvent(new Event('screenpilot-ai-availability'))
+    }).catch((error: unknown) => {
+      aiAvailabilityRef.current = { ocr: false, translation: false }
+      aiAvailabilityLoadedRef.current = true
+      window.dispatchEvent(new Event('screenpilot-ai-availability'))
+      console.error('Failed to load screenshot target language', error)
+    })
     return () => {
       active = false
     }
@@ -196,6 +227,21 @@ export default function ReferenceVisionAdapter() {
       }
 
       const methodSelect = findTranslationMethodSelect()
+      const availability = aiAvailabilityRef.current
+      document.querySelectorAll<HTMLSelectElement>('select').forEach((select) => {
+        const ocr = select.querySelector('option[value="chaoxing"]') !== null
+        const translation = select.querySelector('option[value="microsoft"]') !== null
+          && select.querySelector('option[value="google"]') !== null
+        const allowed = !aiAvailabilityLoadedRef.current
+          || (ocr ? availability.ocr : translation ? availability.translation : true)
+        if (!allowed) {
+          select.querySelector('option[value="ai"]')?.remove()
+          if (select.value === 'ai') {
+            select.value = ocr ? 'chaoxing' : 'microsoft'
+            select.dispatchEvent(new Event('change', { bubbles: true }))
+          }
+        }
+      })
       const heading = methodSelect?.parentElement
       const body = heading?.parentElement
       if (methodSelect === null || heading === undefined || heading === null || body === undefined || body === null) {
@@ -307,11 +353,13 @@ export default function ReferenceVisionAdapter() {
     document.addEventListener('input', handleInput)
     document.addEventListener('change', handleChange)
     window.addEventListener('resize', applyAdapters)
+    window.addEventListener('screenpilot-ai-availability', applyAdapters)
     return () => {
       observer.disconnect()
       document.removeEventListener('input', handleInput)
       document.removeEventListener('change', handleChange)
       window.removeEventListener('resize', applyAdapters)
+      window.removeEventListener('screenpilot-ai-availability', applyAdapters)
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
       document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {

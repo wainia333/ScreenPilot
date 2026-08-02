@@ -4,6 +4,7 @@ import { AdapterCredentials } from '../adapter-credentials'
 import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings, OcrMethod, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
+import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
 
 export function ScreenshotSection({
   settings,
@@ -14,7 +15,18 @@ export function ScreenshotSection({
 }) {
   const current = settings.screenshotTranslation
   const update = (patch: Partial<AppSettings['screenshotTranslation']>) =>
-    onChange({ ...settings, screenshotTranslation: { ...current, ...patch } })
+    onChange(normalizeAiAvailability({ ...settings, screenshotTranslation: { ...current, ...patch } }))
+  const ocrHasValidModel = isValidModelSelection(current.ocrModel, settings.providers)
+  const translationHasValidModel = isValidModelSelection(current.translationModel, settings.providers)
+  const canUseOcrAi = current.ocrAiEnabled && ocrHasValidModel
+  const canUseTranslationAi = current.translationAiEnabled && translationHasValidModel
+  const ocrMethod = current.ocrMethod === 'ai' && !canUseOcrAi
+    ? DEFAULT_SETTINGS.screenshotTranslation.ocrMethod
+    : current.ocrMethod
+  const translationMethod = current.translationMethod === 'ai' && !canUseTranslationAi
+    ? DEFAULT_SETTINGS.screenshotTranslation.translationMethod
+    : current.translationMethod
+  const methods = translationMethodOptions.filter((option) => option.value !== 'ai' || canUseTranslationAi)
   return (
     <>
       <SettingGroup title="截图翻译">
@@ -35,12 +47,29 @@ export function ScreenshotSection({
             onChange={(targetLanguage) => update({ targetLanguage })}
           />
         </SettingRow>
+        <SettingRow label="开启大模型 OCR">
+          <Toggle
+            checked={current.ocrAiEnabled}
+            label="开启大模型 OCR"
+            onChange={(ocrAiEnabled) => update({ ocrAiEnabled })}
+          />
+        </SettingRow>
+        {current.ocrAiEnabled ? (
+          <SettingRow label="OCR 模型">
+            <ModelField
+              value={current.ocrModel}
+              providers={settings.providers}
+              label="OCR 模型"
+              onChange={(ocrModel) => update({ ocrModel })}
+            />
+          </SettingRow>
+        ) : null}
         <SettingRow label="OCR 接口">
           <SelectField<OcrMethod>
-            value={current.ocrMethod}
+            value={ocrMethod}
             label="OCR 接口"
             options={[
-              { value: 'ai', label: 'AI 视觉 OCR' },
+              ...(canUseOcrAi ? [{ value: 'ai' as const, label: 'AI 视觉 OCR' }] : []),
               { value: 'baidu', label: '百度 OCR' },
               { value: 'chaoxing', label: '学习通 OCR' },
               { value: 'system', label: '系统 OCR' },
@@ -48,28 +77,29 @@ export function ScreenshotSection({
             onChange={(ocrMethod) => update({ ocrMethod })}
           />
         </SettingRow>
-        <SettingRow label="OCR 模型">
-          <ModelField
-            value={current.ocrModel}
-            providers={settings.providers}
-            label="OCR 模型"
-            onChange={(ocrModel) => update({ ocrModel })}
+        <SettingRow label="开启大模型翻译">
+          <Toggle
+            checked={current.translationAiEnabled}
+            label="开启大模型翻译"
+            onChange={(translationAiEnabled) => update({ translationAiEnabled })}
           />
         </SettingRow>
+        {current.translationAiEnabled ? (
+          <SettingRow label="翻译模型">
+            <ModelField
+              value={current.translationModel}
+              providers={settings.providers}
+              label="截图翻译模型"
+              onChange={(translationModel) => update({ translationModel })}
+            />
+          </SettingRow>
+        ) : null}
         <SettingRow label="翻译接口">
           <SelectField
-            value={current.translationMethod}
+            value={translationMethod}
             label="截图翻译接口"
-            options={translationMethodOptions}
+            options={methods}
             onChange={(translationMethod) => update({ translationMethod })}
-          />
-        </SettingRow>
-        <SettingRow label="翻译模型">
-          <ModelField
-            value={current.translationModel}
-            providers={settings.providers}
-            label="截图翻译模型"
-            onChange={(translationModel) => update({ translationModel })}
           />
         </SettingRow>
         <SettingRow label="显示识别原文">

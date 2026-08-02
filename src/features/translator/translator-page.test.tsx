@@ -137,6 +137,23 @@ describe('TranslatorPage', () => {
 
   it('preserves providers and AI settings when a stale translator window changes method', async () => {
     const desktop = new RecordingDesktop()
+    const initialProvider = {
+      id: 'provider-before-translator-load',
+      name: 'Initial provider',
+      baseUrl: 'https://initial.example.com/v1',
+      keyCount: 1,
+      availableModels: ['initial-model'],
+      enabledModels: ['initial-model'],
+    }
+    await desktop.saveSettings({
+      ...(await desktop.loadSettings()),
+      translation: {
+        ...(await desktop.loadSettings()).translation,
+        aiEnabled: true,
+        aiModel: { providerId: initialProvider.id, model: 'initial-model' },
+      },
+      providers: [initialProvider],
+    })
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const latest = await desktop.loadSettings()
@@ -152,6 +169,7 @@ describe('TranslatorPage', () => {
       ...latest,
       translation: {
         ...latest.translation,
+        aiEnabled: true,
         aiModel: { providerId: provider.id, model: 'latest-model' },
         prompt: 'latest custom translation prompt',
       },

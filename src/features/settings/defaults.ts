@@ -45,14 +45,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   translation: {
     targetLanguage: 'auto',
     method: 'microsoft',
+    aiEnabled: false,
     aiModel: null,
     prompt: DEFAULT_TRANSLATION_PROMPT,
   },
   screenshotTranslation: {
     enabled: true,
     targetLanguage: 'auto',
+    ocrAiEnabled: false,
     ocrMethod: 'chaoxing',
     translationMethod: 'microsoft',
+    translationAiEnabled: false,
     ocrModel: null,
     translationModel: null,
     showSource: true,

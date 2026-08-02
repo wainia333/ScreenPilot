@@ -152,6 +152,8 @@ pub struct RetrySettings {
 pub struct TranslationSettings {
     pub target_language: String,
     pub method: TranslationMethod,
+    #[serde(default)]
+    pub ai_enabled: bool,
     pub ai_model: Option<ModelSelection>,
     pub prompt: String,
 }
@@ -162,8 +164,12 @@ pub struct ScreenshotTranslationSettings {
     pub enabled: bool,
     #[serde(default = "default_screenshot_target_language")]
     pub target_language: String,
+    #[serde(default)]
+    pub ocr_ai_enabled: bool,
     pub ocr_method: OcrMethod,
     pub translation_method: TranslationMethod,
+    #[serde(default)]
+    pub translation_ai_enabled: bool,
     pub ocr_model: Option<ModelSelection>,
     pub translation_model: Option<ModelSelection>,
     pub show_source: bool,
@@ -241,14 +247,17 @@ impl Default for AppSettings {
             translation: TranslationSettings {
                 target_language: "auto".into(),
                 method: TranslationMethod::Microsoft,
+                ai_enabled: false,
                 ai_model: None,
                 prompt: TRANSLATION_PROMPT.into(),
             },
             screenshot_translation: ScreenshotTranslationSettings {
                 enabled: true,
                 target_language: default_screenshot_target_language(),
+                ocr_ai_enabled: false,
                 ocr_method: OcrMethod::Chaoxing,
                 translation_method: TranslationMethod::Microsoft,
+                translation_ai_enabled: false,
                 ocr_model: None,
                 translation_model: None,
                 show_source: true,
@@ -285,6 +294,73 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn migrate_missing_ai_toggles(&mut self, raw: &serde_json::Value) {
+        let providers = &self.providers;
+        let translation = raw
+            .get("translation")
+            .and_then(serde_json::Value::as_object);
+        if !translation.is_some_and(|value| value.contains_key("aiEnabled")) {
+            self.translation.ai_enabled = self
+                .translation
+                .ai_model
+                .as_ref()
+                .is_some_and(|selection| valid_model_selection(providers, selection));
+        }
+        let screenshot = raw
+            .get("screenshotTranslation")
+            .and_then(serde_json::Value::as_object);
+        if !screenshot.is_some_and(|value| value.contains_key("ocrAiEnabled")) {
+            self.screenshot_translation.ocr_ai_enabled = self
+                .screenshot_translation
+                .ocr_model
+                .as_ref()
+                .is_some_and(|selection| valid_model_selection(providers, selection));
+        }
+        if !screenshot.is_some_and(|value| value.contains_key("translationAiEnabled")) {
+            self.screenshot_translation.translation_ai_enabled = self
+                .screenshot_translation
+                .translation_model
+                .as_ref()
+                .is_some_and(|selection| valid_model_selection(providers, selection));
+        }
+        self.normalize_ai_options();
+    }
+
+    pub fn normalize_ai_options(&mut self) {
+        if !valid_optional_model_selection(&self.providers, &mut self.translation.ai_model) {
+            self.translation.ai_model = None;
+        }
+        if !valid_optional_model_selection(
+            &self.providers,
+            &mut self.screenshot_translation.ocr_model,
+        ) {
+            self.screenshot_translation.ocr_model = None;
+        }
+        if !valid_optional_model_selection(
+            &self.providers,
+            &mut self.screenshot_translation.translation_model,
+        ) {
+            self.screenshot_translation.translation_model = None;
+        }
+        if self.translation.method == TranslationMethod::Ai
+            && !(self.translation.ai_enabled && self.translation.ai_model.is_some())
+        {
+            self.translation.method = TranslationMethod::Microsoft;
+        }
+        if self.screenshot_translation.ocr_method == OcrMethod::Ai
+            && !(self.screenshot_translation.ocr_ai_enabled
+                && self.screenshot_translation.ocr_model.is_some())
+        {
+            self.screenshot_translation.ocr_method = OcrMethod::Chaoxing;
+        }
+        if self.screenshot_translation.translation_method == TranslationMethod::Ai
+            && !(self.screenshot_translation.translation_ai_enabled
+                && self.screenshot_translation.translation_model.is_some())
+        {
+            self.screenshot_translation.translation_method = TranslationMethod::Microsoft;
+        }
+    }
+
     pub fn migrate_prompt_defaults(&mut self) {
         if self.translation.prompt == LEGACY_TRANSLATION_PROMPT {
             self.translation.prompt = TRANSLATION_PROMPT.into();
@@ -362,6 +438,22 @@ fn default_screenshot_target_language() -> String {
     "auto".into()
 }
 
+fn valid_model_selection(providers: &[ProviderSettings], selection: &ModelSelection) -> bool {
+    providers
+        .iter()
+        .find(|provider| provider.id == selection.provider_id)
+        .is_some_and(|provider| provider.enabled_models.contains(&selection.model))
+}
+
+fn valid_optional_model_selection(
+    providers: &[ProviderSettings],
+    selection: &mut Option<ModelSelection>,
+) -> bool {
+    selection
+        .as_ref()
+        .is_some_and(|value| valid_model_selection(providers, value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +465,9 @@ mod tests {
         assert_eq!(json["schemaVersion"], 1);
         assert_eq!(json["shortcuts"]["promptOptimizer"], "Control+Alt+P");
         assert_eq!(json["screenshotTranslation"]["ocrMethod"], "chaoxing");
+        assert_eq!(json["translation"]["aiEnabled"], false);
+        assert_eq!(json["screenshotTranslation"]["ocrAiEnabled"], false);
+        assert_eq!(json["screenshotTranslation"]["translationAiEnabled"], false);
         assert_eq!(json["screenshotTranslation"]["targetLanguage"], "auto");
         assert!(json["screenshotTranslation"]["ocrPrompt"]
             .as_str()
@@ -449,5 +544,81 @@ mod tests {
             settings.prompt_optimizer.optimize_prompt,
             "custom optimizer prompt"
         );
+    }
+
+    #[test]
+    fn migrates_legacy_ai_toggles_from_enabled_models() {
+        let mut settings = AppSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "provider".into(),
+            name: "Provider".into(),
+            base_url: "https://example.com/v1".into(),
+            key_count: 0,
+            available_models: vec!["model".into()],
+            enabled_models: vec!["model".into()],
+        });
+        settings.translation.method = TranslationMethod::Ai;
+        settings.translation.ai_model = Some(ModelSelection {
+            provider_id: "provider".into(),
+            model: "model".into(),
+        });
+        settings.screenshot_translation.ocr_method = OcrMethod::Ai;
+        settings.screenshot_translation.ocr_model = settings.translation.ai_model.clone();
+        settings.screenshot_translation.translation_method = TranslationMethod::Ai;
+        settings.screenshot_translation.translation_model = settings.translation.ai_model.clone();
+        let mut raw = serde_json::to_value(&settings).expect("serialize");
+        raw.get_mut("translation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("translation object")
+            .remove("aiEnabled");
+        raw.get_mut("screenshotTranslation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("screenshot object")
+            .remove("ocrAiEnabled");
+        raw.get_mut("screenshotTranslation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("screenshot object")
+            .remove("translationAiEnabled");
+        let mut restored = serde_json::from_value::<AppSettings>(raw.clone()).expect("deserialize");
+        restored.migrate_missing_ai_toggles(&raw);
+        assert!(restored.translation.ai_enabled);
+        assert!(restored.screenshot_translation.ocr_ai_enabled);
+        assert!(restored.screenshot_translation.translation_ai_enabled);
+        assert_eq!(restored.translation.method, TranslationMethod::Ai);
+        assert_eq!(restored.screenshot_translation.ocr_method, OcrMethod::Ai);
+        assert_eq!(
+            restored.screenshot_translation.translation_method,
+            TranslationMethod::Ai
+        );
+    }
+
+    #[test]
+    fn normalizes_ai_methods_after_provider_model_removal() {
+        let mut settings = AppSettings::default();
+        settings.translation.ai_enabled = true;
+        settings.translation.method = TranslationMethod::Ai;
+        settings.translation.ai_model = Some(ModelSelection {
+            provider_id: "missing".into(),
+            model: "model".into(),
+        });
+        settings.screenshot_translation.ocr_ai_enabled = true;
+        settings.screenshot_translation.ocr_method = OcrMethod::Ai;
+        settings.screenshot_translation.ocr_model = settings.translation.ai_model.clone();
+        settings.screenshot_translation.translation_ai_enabled = true;
+        settings.screenshot_translation.translation_method = TranslationMethod::Ai;
+        settings.screenshot_translation.translation_model = settings.translation.ai_model.clone();
+        settings.normalize_ai_options();
+        assert_eq!(settings.translation.method, TranslationMethod::Microsoft);
+        assert_eq!(
+            settings.screenshot_translation.ocr_method,
+            OcrMethod::Chaoxing
+        );
+        assert_eq!(
+            settings.screenshot_translation.translation_method,
+            TranslationMethod::Microsoft
+        );
+        assert!(settings.translation.ai_model.is_none());
+        assert!(settings.screenshot_translation.ocr_model.is_none());
+        assert!(settings.screenshot_translation.translation_model.is_none());
     }
 }

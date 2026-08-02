@@ -910,7 +910,8 @@ pub fn take_vision_selection(state: State<'_, AppState>) -> String {
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
-    let settings = state.current()?;
+    let mut settings = state.current()?;
+    settings.normalize_ai_options();
     let providers = settings
         .providers
         .iter()
@@ -945,6 +946,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
         "launchAtStartupAsAdmin": settings.general.launch_at_startup_as_administrator,
         "translatorProviderId": translator_provider,
         "translatorModel": translator_model,
+        "translationAiEnabled": settings.translation.ai_enabled,
         "translatorPrompt": settings.translation.prompt,
         "providers": providers,
         "retryEnabled": settings.retry.enabled,
@@ -956,7 +958,9 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
             "providerId": ocr_provider,
             "model": ocr_model,
             "ocrMethod": settings.screenshot_translation.ocr_method,
+            "ocrAiEnabled": settings.screenshot_translation.ocr_ai_enabled,
             "translationMethod": settings.screenshot_translation.translation_method,
+            "translationAiEnabled": settings.screenshot_translation.translation_ai_enabled,
             "translateProviderId": translate_provider,
             "translateModel": translate_model,
             "baiduOcr": {
@@ -1064,6 +1068,7 @@ fn apply_screenshot_settings_patch(
             .and_then(Value::as_str),
         screenshot.get("translateModel").and_then(Value::as_str),
     );
+    current.normalize_ai_options();
     current.validate()
 }
 
@@ -1296,7 +1301,8 @@ pub async fn vision_translate_text(
 }
 
 async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String, String> {
-    let settings = state.current()?;
+    let mut settings = state.current()?;
+    settings.normalize_ai_options();
     match settings.screenshot_translation.ocr_method {
         OcrMethod::Ai => {
             let selection = settings
@@ -1335,7 +1341,8 @@ async fn translate_source(
     source: &str,
     requested_target_language: Option<&str>,
 ) -> Result<String, String> {
-    let settings = state.current()?;
+    let mut settings = state.current()?;
+    settings.normalize_ai_options();
     let target_language =
         requested_target_language.unwrap_or(&settings.screenshot_translation.target_language);
     validate_screenshot_target_language(target_language)?;

@@ -69,6 +69,19 @@ function modelSelection(value: unknown): ModelSelection | null {
   return providerId.length > 0 && model.length > 0 ? { providerId, model } : null
 }
 
+export function isValidModelSelection(
+  selection: ModelSelection | null,
+  providers: ProviderSettings[],
+): selection is ModelSelection {
+  if (selection === null) return false
+  const provider = providers.find((item) => item.id === selection.providerId)
+  return provider?.enabledModels.includes(selection.model) ?? false
+}
+
+function legacyAiEnabled(value: unknown, selection: ModelSelection | null, providers: ProviderSettings[]): boolean {
+  return typeof value === 'boolean' ? value : isValidModelSelection(selection, providers)
+}
+
 function provider(value: unknown, index: number): ProviderSettings | null {
   const data = record(value)
   const id = text(data.id, `provider-${index + 1}`, 80).trim()
@@ -101,8 +114,13 @@ export function sanitizeSettings(value: unknown): AppSettings {
     : []
   const providerIds = new Set(providers.map((item) => item.id))
   const validModel = (selection: ModelSelection | null) =>
-    selection !== null && providerIds.has(selection.providerId) ? selection : null
-  return {
+    selection !== null && providerIds.has(selection.providerId) && isValidModelSelection(selection, providers)
+      ? selection
+      : null
+  const translationModel = validModel(modelSelection(translation.aiModel))
+  const ocrModel = validModel(modelSelection(screenshot.ocrModel))
+  const screenshotTranslationModel = validModel(modelSelection(screenshot.translationModel))
+  const sanitized: AppSettings = {
     schemaVersion: 1,
     theme: choice(root.theme, themes, DEFAULT_SETTINGS.theme),
     language: choice(root.language, languages, DEFAULT_SETTINGS.language),
@@ -140,7 +158,8 @@ export function sanitizeSettings(value: unknown): AppSettings {
         DEFAULT_SETTINGS.translation.targetLanguage,
       ),
       method: choice(translation.method, translationMethods, DEFAULT_SETTINGS.translation.method),
-      aiModel: validModel(modelSelection(translation.aiModel)),
+      aiEnabled: legacyAiEnabled(translation.aiEnabled, translationModel, providers),
+      aiModel: translationModel,
       prompt: text(translation.prompt, DEFAULT_SETTINGS.translation.prompt),
     },
     screenshotTranslation: {
@@ -150,14 +169,20 @@ export function sanitizeSettings(value: unknown): AppSettings {
         screenshotTargetLanguages,
         DEFAULT_SETTINGS.screenshotTranslation.targetLanguage,
       ),
+      ocrAiEnabled: legacyAiEnabled(screenshot.ocrAiEnabled, ocrModel, providers),
       ocrMethod: choice(screenshot.ocrMethod, ocrMethods, DEFAULT_SETTINGS.screenshotTranslation.ocrMethod),
       translationMethod: choice(
         screenshot.translationMethod,
         translationMethods,
         DEFAULT_SETTINGS.screenshotTranslation.translationMethod,
       ),
-      ocrModel: validModel(modelSelection(screenshot.ocrModel)),
-      translationModel: validModel(modelSelection(screenshot.translationModel)),
+      translationAiEnabled: legacyAiEnabled(
+        screenshot.translationAiEnabled,
+        screenshotTranslationModel,
+        providers,
+      ),
+      ocrModel,
+      translationModel: screenshotTranslationModel,
       showSource: flag(screenshot.showSource, DEFAULT_SETTINGS.screenshotTranslation.showSource),
       keepFullscreen: false,
       stream: flag(screenshot.stream, DEFAULT_SETTINGS.screenshotTranslation.stream),
@@ -198,6 +223,57 @@ export function sanitizeSettings(value: unknown): AppSettings {
       optimizePrompt: text(optimizer.optimizePrompt, DEFAULT_SETTINGS.promptOptimizer.optimizePrompt),
     },
     providers,
+  }
+  return normalizeAiAvailability(sanitized)
+}
+
+export function normalizeAiAvailability(settings: AppSettings): AppSettings {
+  const translationModel = isValidModelSelection(settings.translation.aiModel, settings.providers)
+    ? settings.translation.aiModel
+    : null
+  const ocrModel = isValidModelSelection(settings.screenshotTranslation.ocrModel, settings.providers)
+    ? settings.screenshotTranslation.ocrModel
+    : null
+  const screenshotTranslationModel = isValidModelSelection(
+    settings.screenshotTranslation.translationModel,
+    settings.providers,
+  )
+    ? settings.screenshotTranslation.translationModel
+    : null
+  const translationMethod = settings.translation.method === 'ai'
+    && !(settings.translation.aiEnabled && translationModel)
+    ? DEFAULT_SETTINGS.translation.method
+    : settings.translation.method
+  const ocrMethod = settings.screenshotTranslation.ocrMethod === 'ai'
+    && !(settings.screenshotTranslation.ocrAiEnabled && ocrModel)
+    ? DEFAULT_SETTINGS.screenshotTranslation.ocrMethod
+    : settings.screenshotTranslation.ocrMethod
+  const screenshotTranslationMethod = settings.screenshotTranslation.translationMethod === 'ai'
+    && !(settings.screenshotTranslation.translationAiEnabled && screenshotTranslationModel)
+    ? DEFAULT_SETTINGS.screenshotTranslation.translationMethod
+    : settings.screenshotTranslation.translationMethod
+  if (
+    translationModel === settings.translation.aiModel
+    && ocrModel === settings.screenshotTranslation.ocrModel
+    && screenshotTranslationModel === settings.screenshotTranslation.translationModel
+    && translationMethod === settings.translation.method
+    && ocrMethod === settings.screenshotTranslation.ocrMethod
+    && screenshotTranslationMethod === settings.screenshotTranslation.translationMethod
+  ) return settings
+  return {
+    ...settings,
+    translation: {
+      ...settings.translation,
+      method: translationMethod,
+      aiModel: translationModel,
+    },
+    screenshotTranslation: {
+      ...settings.screenshotTranslation,
+      ocrMethod,
+      ocrModel,
+      translationMethod: screenshotTranslationMethod,
+      translationModel: screenshotTranslationModel,
+    },
   }
 }
 

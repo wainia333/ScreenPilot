@@ -45,6 +45,8 @@ pub fn settings_save(
 ) -> Result<SettingsSaveResult, String> {
     let _settings_write = state.lock_settings_write()?;
     let previous = state.current()?;
+    let mut settings = settings;
+    settings.normalize_ai_options();
     let mut effects = RuntimeSettingsEffects {
         app: &app,
         state: &state,
@@ -96,6 +98,7 @@ fn apply_translation_settings_patch(
     if let Some(target_language) = patch.target_language {
         settings.translation.target_language = target_language;
     }
+    settings.normalize_ai_options();
     settings.validate()
 }
 
@@ -166,11 +169,15 @@ pub async fn settings_import(app: AppHandle) -> Result<Option<SettingsExport>, S
     };
     let path = file.into_path().map_err(|error| error.to_string())?;
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let export = serde_json::from_slice::<SettingsExport>(&bytes)
+    let raw_export = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|error| format!("Settings import is invalid: {error}"))?;
+    let mut export = serde_json::from_value::<SettingsExport>(raw_export.clone())
         .map_err(|error| format!("Settings import is invalid: {error}"))?;
     if export.export_type != "screenpilot-settings-export" || export.schema_version != 1 {
         return Err("Settings import type or schema is unsupported".into());
     }
+    let raw_settings = raw_export.get("settings").cloned().unwrap_or_default();
+    export.settings.migrate_missing_ai_toggles(&raw_settings);
     export.settings.validate()?;
     Ok(Some(export))
 }
@@ -314,6 +321,7 @@ mod tests {
             provider_id: "custom".into(),
             model: "model-a".into(),
         });
+        settings.translation.ai_enabled = true;
         let providers = settings.providers.clone();
         let model = settings.translation.ai_model.clone();
         apply_translation_settings_patch(

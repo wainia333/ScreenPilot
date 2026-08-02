@@ -1,8 +1,9 @@
-import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow } from '../../../shared/ui/controls'
+import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
+import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
 
 export function TranslationSection({
   settings,
@@ -12,7 +13,13 @@ export function TranslationSection({
   onChange: (settings: AppSettings) => void
 }) {
   const update = (patch: Partial<AppSettings['translation']>) =>
-    onChange({ ...settings, translation: { ...settings.translation, ...patch } })
+    onChange(normalizeAiAvailability({ ...settings, translation: { ...settings.translation, ...patch } }))
+  const hasValidModel = isValidModelSelection(settings.translation.aiModel, settings.providers)
+  const canUseAi = settings.translation.aiEnabled && hasValidModel
+  const method = settings.translation.method === 'ai' && !canUseAi
+    ? DEFAULT_SETTINGS.translation.method
+    : settings.translation.method
+  const methods = translationMethodOptions.filter((option) => option.value !== 'ai' || canUseAi)
   return (
     <>
       <SettingGroup title="翻译行为">
@@ -30,20 +37,29 @@ export function TranslationSection({
             onChange={(targetLanguage) => update({ targetLanguage })}
           />
         </SettingRow>
-        <SettingRow label="翻译接口">
-          <SelectField
-            value={settings.translation.method}
-            label="翻译接口"
-            options={translationMethodOptions}
-            onChange={(method) => update({ method })}
+        <SettingRow label="开启大模型翻译">
+          <Toggle
+            checked={settings.translation.aiEnabled}
+            label="开启大模型翻译"
+            onChange={(aiEnabled) => update({ aiEnabled })}
           />
         </SettingRow>
-        <SettingRow label="AI 模型">
-          <ModelField
-            value={settings.translation.aiModel}
-            providers={settings.providers}
-            label="文本翻译 AI 模型"
-            onChange={(aiModel) => update({ aiModel })}
+        {settings.translation.aiEnabled ? (
+          <SettingRow label="AI 模型">
+            <ModelField
+              value={settings.translation.aiModel}
+              providers={settings.providers}
+              label="文本翻译 AI 模型"
+              onChange={(aiModel) => update({ aiModel })}
+            />
+          </SettingRow>
+        ) : null}
+        <SettingRow label="翻译接口">
+          <SelectField
+            value={method}
+            label="翻译接口"
+            options={methods}
+            onChange={(method) => update({ method })}
           />
         </SettingRow>
       </SettingGroup>

@@ -161,9 +161,16 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await page.getByRole('button', { name: 'OCR', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'OCR', exact: true })).toBeVisible()
   await expect(page.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('chaoxing')
+  await expect(page.getByRole('combobox', { name: 'OCR 模型' })).toHaveCount(0)
+  await expect(page.getByRole('option', { name: 'AI 视觉 OCR' })).toHaveCount(0)
+  await page.getByRole('switch', { name: '开启大模型 OCR' }).click()
   await expect(page.getByRole('combobox', { name: 'OCR 模型' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'AI 视觉 OCR' })).toHaveCount(0)
   await expect(page.getByRole('combobox', { name: '截图翻译接口' })).toHaveValue('microsoft')
+  await expect(page.getByRole('combobox', { name: '截图翻译模型' })).toHaveCount(0)
+  await page.getByRole('switch', { name: '开启大模型翻译' }).click()
   await expect(page.getByRole('combobox', { name: '截图翻译模型' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'AI', exact: true })).toHaveCount(0)
   const credentialRows = page.locator('.adapter-credentials > section')
   await expect(credentialRows).toHaveCount(4)
   for (const row of await credentialRows.all()) {
@@ -176,7 +183,10 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   }
   await page.getByRole('button', { name: '翻译', exact: true }).click()
   await expect(page.getByRole('combobox', { name: '翻译接口' })).toHaveValue('microsoft')
+  await expect(page.getByRole('combobox', { name: '文本翻译 AI 模型' })).toHaveCount(0)
+  await page.getByRole('switch', { name: '开启大模型翻译' }).click()
   await expect(page.getByRole('combobox', { name: '文本翻译 AI 模型' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'AI', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: '常规', exact: true }).click()
   await page.getByRole('radio', { name: '深色', exact: true }).click()
   await page.getByRole('button', { name: '关闭设置' }).click()
@@ -200,6 +210,92 @@ test('settings cancel restores the loaded draft without closing the page', async
   await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
   await expect(cancel).toBeDisabled()
   await expect(page.getByRole('heading', { name: '常规', exact: true })).toBeVisible()
+})
+
+test('settings footer actions keep matching dimensions across disabled and enabled states', async ({ page }) => {
+  await page.goto('/')
+  const footer = page.locator('.settings-footer')
+  const cancel = footer.getByRole('button', { name: '取消' })
+  const measure = async () => footer.evaluate((element) => {
+    const [cancelElement, saveElement] = Array.from(element.querySelectorAll('button'))
+    if (cancelElement === undefined || saveElement === undefined) throw new Error('settings footer buttons missing')
+    const read = (button: HTMLButtonElement) => {
+      const computed = getComputedStyle(button)
+      const bounds = button.getBoundingClientRect()
+      return {
+        width: bounds.width,
+        height: bounds.height,
+        minWidth: computed.minWidth,
+        paddingTop: computed.paddingTop,
+        paddingRight: computed.paddingRight,
+        paddingBottom: computed.paddingBottom,
+        paddingLeft: computed.paddingLeft,
+        fontSize: computed.fontSize,
+      }
+    }
+    return { cancel: read(cancelElement), save: read(saveElement) }
+  })
+  const disabled = await measure()
+  expect(disabled.cancel).toEqual(disabled.save)
+  await expect(cancel).toBeDisabled()
+  await page.getByRole('radio', { name: '深色', exact: true }).click()
+  await expect(cancel).toBeEnabled()
+  const enabled = await measure()
+  expect(enabled.cancel).toEqual(enabled.save)
+  expect(enabled.cancel).toEqual(disabled.cancel)
+})
+
+test('settings cancel hover preserves disabled colors and changes only when enabled', async ({ page }) => {
+  await page.goto('/')
+  const footer = page.locator('.settings-footer')
+  const cancel = footer.getByRole('button', { name: '取消' })
+  const save = footer.getByRole('button', { name: '保存' })
+  const readStyle = async (button: Locator) => button.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    const bounds = element.getBoundingClientRect()
+    return {
+      backgroundColor: computed.backgroundColor,
+      borderColor: computed.borderTopColor,
+      color: computed.color,
+      cursor: computed.cursor,
+      opacity: computed.opacity,
+      width: bounds.width,
+      height: bounds.height,
+    }
+  })
+  const assertDisabledHover = async () => {
+    await expect(cancel).toBeDisabled()
+    const before = await readStyle(cancel)
+    await cancel.hover()
+    const after = await readStyle(cancel)
+    expect(after).toEqual(before)
+    expect(after.cursor).toBe('not-allowed')
+    const saveStyle = await readStyle(save)
+    expect({ width: after.width, height: after.height }).toEqual({ width: saveStyle.width, height: saveStyle.height })
+  }
+
+  await assertDisabledHover()
+  await page.getByRole('radio', { name: '深色', exact: true }).click()
+  await save.click()
+  await assertDisabledHover()
+
+  await page.getByRole('switch', { name: '自动上屏' }).click()
+  await expect(cancel).toBeEnabled()
+  const darkEnabledBefore = await readStyle(cancel)
+  await cancel.hover()
+  const darkEnabledAfter = await readStyle(cancel)
+  expect(darkEnabledAfter.backgroundColor).not.toBe(darkEnabledBefore.backgroundColor)
+  expect(darkEnabledAfter.width).toBe(darkEnabledBefore.width)
+  expect(darkEnabledAfter.height).toBe(darkEnabledBefore.height)
+
+  await page.getByRole('radio', { name: '系统', exact: true }).click()
+  await expect(cancel).toBeEnabled()
+  const enabledBefore = await readStyle(cancel)
+  await cancel.hover()
+  const enabledAfter = await readStyle(cancel)
+  expect(enabledAfter.width).toBe(enabledBefore.width)
+  expect(enabledAfter.height).toBe(enabledBefore.height)
+  expect(enabledAfter.backgroundColor).not.toBe(enabledBefore.backgroundColor)
 })
 
 test('provider key drafts use the global footer save and cancel actions', async ({ page }) => {

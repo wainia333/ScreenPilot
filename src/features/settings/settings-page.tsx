@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDesktop } from '../../desktop/use-desktop'
-import { validateSettings } from './sanitize'
+import { normalizeAiAvailability, sanitizeSettings, validateSettings } from './sanitize'
 import { AboutSection } from './sections/about-section'
 import { GeneralSection } from './sections/general-section'
 import { OptimizerSection } from './sections/optimizer-section'
@@ -130,8 +130,9 @@ export function SettingsPage() {
         desktop.takeStartupNotice(),
         desktop.permissionStatus().catch(() => null),
       ])
-      setSaved(settings)
-      setDraft(settings)
+      const normalized = normalizeAiAvailability(settings)
+      setSaved(normalized)
+      setDraft(normalized)
       setProviderKeyDrafts({})
       setPermissionStatus(permissions)
       if (startupNotice !== null) setStatus(startupNotice)
@@ -203,7 +204,7 @@ export function SettingsPage() {
   }, [dirty, hide, saving])
   const restoreDraft = useCallback(() => {
     if (saved === null) return
-    setDraft(structuredClone(saved))
+    setDraft(normalizeAiAvailability(structuredClone(saved)))
     setProviderKeyDrafts({})
     setStatus(null)
     setPendingImport(null)
@@ -224,7 +225,7 @@ export function SettingsPage() {
   }, [dialog, requestClose])
   const applyImport = useCallback(
     (value: SettingsExport) => {
-      setDraft(value.settings)
+      setDraft(sanitizeSettings(value.settings))
       setProviderKeyDrafts(
         value.includesSecrets
           ? normalizeProviderKeyDrafts(structuredClone(value.secrets ?? {}))
@@ -274,14 +275,14 @@ export function SettingsPage() {
         }}
       />
     ),
-    translation: <TranslationSection settings={draft} onChange={setDraft} />,
-    screenshot: <ScreenshotSection settings={draft} onChange={setDraft} />,
-    vision: <VisionSection settings={draft} onChange={setDraft} />,
-    optimizer: <OptimizerSection settings={draft} onChange={setDraft} />,
+    translation: <TranslationSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
+    screenshot: <ScreenshotSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
+    vision: <VisionSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
+    optimizer: <OptimizerSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
     providers: (
       <ProvidersSection
         settings={draft}
-        onChange={(update) => setDraft((current) => current === null ? current : update(current))}
+        onChange={(update) => setDraft((current) => current === null ? current : normalizeAiAvailability(update(current)))}
         keyDrafts={providerKeyDrafts}
         onKeyDraftChange={(providerId, keys) =>
           setProviderKeyDrafts((current) => ({
@@ -388,7 +389,7 @@ export function SettingsPage() {
         <footer className="settings-footer">
           <button
             type="button"
-            className="secondary-button"
+            className="secondary-button settings-footer-button"
             disabled={!dirty || saving}
             onClick={cancel}
           >
@@ -396,7 +397,7 @@ export function SettingsPage() {
           </button>
           <button
             type="button"
-            className="primary-button"
+            className="primary-button settings-footer-button"
             disabled={!dirty || issues.length > 0 || saving}
             onClick={() => void save()}
           >

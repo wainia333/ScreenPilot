@@ -4,6 +4,8 @@ import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 import { translationMethodOptions } from '../settings/translation-methods'
 import type { AppSettings, TranslationMethod } from '../settings/types'
+import { isValidModelSelection, normalizeAiAvailability } from '../settings/sanitize'
+import { DEFAULT_SETTINGS } from '../settings/defaults'
 import type { TranslationSettingsPatch } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
@@ -168,7 +170,7 @@ export function TranslatorPage() {
   const updateTranslationSettings = (patch: TranslationSettingsPatch) => {
     if (settings === null) return
     const translation = { ...settings.translation, ...patch }
-    const next = { ...settings, translation }
+    const next = normalizeAiAvailability({ ...settings, translation })
     immediateRequest.current = translationRequestKey(input, next)
     generation.current += 1
     setOutput('')
@@ -193,6 +195,13 @@ export function TranslatorPage() {
     await desktop.commitText(text, settings?.general.autoPaste ?? false)
     await desktop.hideWindow()
   }
+  const canUseAi = settings !== null
+    && settings.translation.aiEnabled
+    && isValidModelSelection(settings.translation.aiModel, settings.providers)
+  const selectedMethod = settings?.translation.method === 'ai' && !canUseAi
+    ? DEFAULT_SETTINGS.translation.method
+    : settings?.translation.method ?? 'microsoft'
+  const availableMethods = translationMethodOptions.filter((option) => option.value !== 'ai' || canUseAi)
   return (
     <main
       key={arrivalCycle}
@@ -284,7 +293,7 @@ export function TranslatorPage() {
             </select>
             <select
               aria-label="翻译接口"
-              value={settings?.translation.method ?? 'microsoft'}
+              value={selectedMethod}
               disabled={settings === null}
               onChange={(event) => {
                 if (settings === null) return
@@ -292,7 +301,7 @@ export function TranslatorPage() {
                 updateTranslationSettings({ method })
               }}
             >
-              {translationMethodOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+              {availableMethods.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
             </select>
           </div>
           {loading ? <div className="ocr-result-skeleton"><span /><span /><span /></div> : null}

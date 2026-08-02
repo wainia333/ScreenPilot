@@ -49,8 +49,12 @@ pub async fn translator_translate(
     }
     let target_language = translation::resolve_target_language(text, &request.target_language);
     let target_language_name = translation_target_language_name(target_language)?;
-    let settings = state.current()?;
+    let mut settings = state.current()?;
+    settings.normalize_ai_options();
     let translated = if request.method == "ai" {
+        if !settings.translation.ai_enabled {
+            return Err("AI translation is disabled in settings".into());
+        }
         let selection = settings
             .translation
             .ai_model

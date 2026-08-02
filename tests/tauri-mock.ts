@@ -34,6 +34,7 @@ export async function installVisionTauriMock(
       launchAtStartupAsAdmin: false,
       translatorProviderId: 'test-provider',
       translatorModel: 'test-model',
+      translationAiEnabled: true,
       translatorPrompt: '',
       providers: [{
         id: 'test-provider',
@@ -51,8 +52,10 @@ export async function installVisionTauriMock(
         hotkey: 'F4',
         providerId: 'test-provider',
         model: 'test-model',
+        ocrAiEnabled: true,
         ocrMethod: 'chaoxing',
         translationMethod: 'microsoft',
+        translationAiEnabled: true,
         translateProviderId: 'test-provider',
         translateModel: 'test-model',
         directTranslate: false,

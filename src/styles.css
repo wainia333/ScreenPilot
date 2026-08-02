@@ -303,6 +303,14 @@ select:focus-visible {
   background: var(--sp-surface);
 }
 
+.settings-footer .settings-footer-button {
+  width: 78px;
+  min-width: 78px;
+  flex: 0 0 78px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
 .setting-group {
   margin: 0 0 20px;
 }
@@ -560,14 +568,24 @@ select:focus-visible {
   background: var(--sp-surface);
 }
 
-.secondary-button:hover,
-.icon-button:hover {
+.secondary-button:hover:not(:disabled),
+.icon-button:hover:not(:disabled) {
   background: var(--sp-sidebar);
 }
 
 .secondary-button:disabled {
-  cursor: default;
+  cursor: not-allowed;
   opacity: 0.45;
+}
+
+.secondary-button:disabled:hover,
+.secondary-button:disabled:active,
+.secondary-button:disabled:focus,
+.secondary-button:disabled:focus-visible {
+  background: var(--sp-surface);
+  border-color: var(--sp-border-strong);
+  outline: none;
+  box-shadow: none;
 }
 
 .text-button {

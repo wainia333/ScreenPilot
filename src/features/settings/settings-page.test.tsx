@@ -135,7 +135,11 @@ describe('SettingsPage', () => {
     render(<DesktopProvider port={new ClosingDesktop()}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const save = screen.getByRole('button', { name: '保存' })
+    const cancel = screen.getByRole('button', { name: '取消' })
     expect(save.closest('footer')).toHaveClass('settings-footer')
+    expect(save).toHaveClass('settings-footer-button')
+    expect(cancel).toHaveClass('settings-footer-button')
+    expect(save.classList.contains('settings-footer-button')).toBe(cancel.classList.contains('settings-footer-button'))
   })
 
   it('cancels draft changes without saving and restores the loaded baseline', async () => {
@@ -143,9 +147,11 @@ describe('SettingsPage', () => {
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const cancel = screen.getByRole('button', { name: '取消' })
+    expect(cancel).toHaveClass('secondary-button', 'settings-footer-button')
     expect(cancel).toBeDisabled()
     fireEvent.click(screen.getByRole('radio', { name: '深色' }))
     expect(cancel).toBeEnabled()
+    expect(cancel).toHaveClass('secondary-button', 'settings-footer-button')
     fireEvent.click(cancel)
     expect(screen.getByRole('radio', { name: '系统' })).toBeChecked()
     expect(cancel).toBeDisabled()
@@ -161,6 +167,8 @@ describe('SettingsPage', () => {
     const save = screen.getByRole('button', { name: '保存' })
     const cancel = screen.getByRole('button', { name: '取消' })
     fireEvent.click(save)
+    expect(screen.getByRole('button', { name: '保存中…' })).toHaveClass('settings-footer-button')
+    expect(cancel).toHaveClass('settings-footer-button')
     expect(cancel).toBeDisabled()
     fireEvent.click(screen.getByRole('radio', { name: '系统' }))
     await act(async () => {
@@ -361,7 +369,7 @@ describe('SettingsPage', () => {
     expect(screen.queryByRole('button', { name: 'OCR/截图翻译' })).not.toBeInTheDocument()
   })
 
-  it('keeps every model selector visible when non-AI interfaces are selected', async () => {
+  it('gates AI interfaces and model selectors by independent switches and selections', async () => {
     const desktop = new ClosingDesktop()
     await desktop.saveSettings({
       ...structuredClone(DEFAULT_SETTINGS),
@@ -377,14 +385,157 @@ describe('SettingsPage', () => {
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     fireEvent.click(screen.getByRole('button', { name: '翻译' }))
-    expect(screen.getByRole('combobox', { name: '文本翻译 AI 模型' })).toHaveTextContent('Local Provider · local:model')
+    expect(screen.queryByRole('combobox', { name: '文本翻译 AI 模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'AI' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    const translationModel = screen.getByRole('combobox', { name: '文本翻译 AI 模型' })
+    expect(translationModel).toHaveTextContent('Local Provider · local:model')
+    expect(screen.queryByRole('option', { name: 'AI' })).not.toBeInTheDocument()
+    fireEvent.change(translationModel, { target: { value: JSON.stringify({ providerId: 'local', model: 'local:model' }) } })
+    expect(screen.getByRole('option', { name: 'AI' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
-    expect(screen.getByRole('combobox', { name: 'OCR 模型' })).toHaveTextContent('Local Provider · local:model')
-    expect(screen.getByRole('combobox', { name: '截图翻译模型' })).toHaveTextContent('Local Provider · local:model')
+    expect(screen.queryByRole('combobox', { name: 'OCR 模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '截图翻译模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'AI 视觉 OCR' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'AI' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型 OCR' }))
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    const ocrModel = screen.getByRole('combobox', { name: 'OCR 模型' })
+    const screenshotTranslationModel = screen.getByRole('combobox', { name: '截图翻译模型' })
+    fireEvent.change(ocrModel, { target: { value: JSON.stringify({ providerId: 'local', model: 'local:model' }) } })
+    fireEvent.change(screenshotTranslationModel, { target: { value: JSON.stringify({ providerId: 'local', model: 'local:model' }) } })
+    expect(screen.getByRole('option', { name: 'AI 视觉 OCR' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'AI' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Vision' }))
     expect(screen.getByRole('combobox', { name: 'Vision 模型' })).toHaveTextContent('Local Provider · local:model')
     fireEvent.click(screen.getByRole('button', { name: '提示词优化' }))
     expect(screen.getByRole('combobox', { name: '提示词优化模型' })).toHaveTextContent('Local Provider · local:model')
+  })
+
+  it('keeps each enabled AI model row directly before its interface row', async () => {
+    render(<DesktopProvider port={new ClosingDesktop()}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    const rowFor = (group: HTMLElement, label: string) => {
+      const row = Array.from(group.querySelectorAll<HTMLElement>('.setting-row')).find(
+        (candidate) => candidate.querySelector('.setting-row__label')?.textContent === label,
+      )
+      if (row === undefined) throw new Error(`setting row missing: ${label}`)
+      return row
+    }
+    const activeGroup = (heading: string) => {
+      const group = screen.getByRole('heading', { name: heading }).closest<HTMLElement>('.setting-group')
+      if (group === null) throw new Error(`setting group missing: ${heading}`)
+      return group
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    let translationGroup = activeGroup('翻译行为')
+    let translationToggleRow = rowFor(translationGroup, '开启大模型翻译')
+    let translationInterfaceRow = rowFor(translationGroup, '翻译接口')
+    expect(translationToggleRow.nextElementSibling).toBe(translationInterfaceRow)
+    expect(screen.queryByRole('combobox', { name: '文本翻译 AI 模型' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    translationGroup = activeGroup('翻译行为')
+    translationToggleRow = rowFor(translationGroup, '开启大模型翻译')
+    const translationModelRow = screen.getByRole('combobox', { name: '文本翻译 AI 模型' }).closest<HTMLElement>('.setting-row')
+    translationInterfaceRow = rowFor(translationGroup, '翻译接口')
+    expect(translationModelRow).not.toBeNull()
+    expect(translationToggleRow.nextElementSibling).toBe(translationModelRow)
+    expect(translationModelRow?.nextElementSibling).toBe(translationInterfaceRow)
+
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    let screenshotGroup = activeGroup('截图翻译')
+    let ocrToggleRow = rowFor(screenshotGroup, '开启大模型 OCR')
+    let ocrInterfaceRow = rowFor(screenshotGroup, 'OCR 接口')
+    let screenshotTranslationToggleRow = rowFor(screenshotGroup, '开启大模型翻译')
+    let screenshotTranslationInterfaceRow = rowFor(screenshotGroup, '翻译接口')
+    expect(ocrToggleRow.nextElementSibling).toBe(ocrInterfaceRow)
+    expect(screenshotTranslationToggleRow.nextElementSibling).toBe(screenshotTranslationInterfaceRow)
+    expect(screen.queryByRole('combobox', { name: 'OCR 模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '截图翻译模型' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型 OCR' }))
+    screenshotGroup = activeGroup('截图翻译')
+    ocrToggleRow = rowFor(screenshotGroup, '开启大模型 OCR')
+    ocrInterfaceRow = rowFor(screenshotGroup, 'OCR 接口')
+    const ocrModelRow = screen.getByRole('combobox', { name: 'OCR 模型' }).closest<HTMLElement>('.setting-row')
+    expect(ocrModelRow).not.toBeNull()
+    expect(ocrToggleRow.nextElementSibling).toBe(ocrModelRow)
+    expect(ocrModelRow?.nextElementSibling).toBe(ocrInterfaceRow)
+
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    screenshotGroup = activeGroup('截图翻译')
+    screenshotTranslationToggleRow = rowFor(screenshotGroup, '开启大模型翻译')
+    screenshotTranslationInterfaceRow = rowFor(screenshotGroup, '翻译接口')
+    const screenshotTranslationModelRow = screen
+      .getByRole('combobox', { name: '截图翻译模型' })
+      .closest<HTMLElement>('.setting-row')
+    expect(screenshotTranslationModelRow).not.toBeNull()
+    expect(screenshotTranslationToggleRow.nextElementSibling).toBe(screenshotTranslationModelRow)
+    expect(screenshotTranslationModelRow?.nextElementSibling).toBe(screenshotTranslationInterfaceRow)
+  })
+
+  it('persists switch fallbacks, restores on cancel, and clears deleted models', async () => {
+    const desktop = new ClosingDesktop()
+    const provider = {
+      id: 'ai-provider',
+      name: 'AI Provider',
+      baseUrl: 'https://example.com/v1',
+      keyCount: 0,
+      availableModels: ['model-a'],
+      enabledModels: ['model-a'],
+    }
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [provider],
+      translation: {
+        ...DEFAULT_SETTINGS.translation,
+        aiEnabled: true,
+        method: 'ai',
+        aiModel: { providerId: provider.id, model: 'model-a' },
+      },
+      screenshotTranslation: {
+        ...DEFAULT_SETTINGS.screenshotTranslation,
+        ocrAiEnabled: true,
+        ocrMethod: 'ai',
+        ocrModel: { providerId: provider.id, model: 'model-a' },
+        translationAiEnabled: true,
+        translationMethod: 'ai',
+        translationModel: { providerId: provider.id, model: 'model-a' },
+      },
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    expect(screen.getByRole('combobox', { name: '翻译接口' })).toHaveValue('microsoft')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    const saved = await desktop.loadSettings()
+    expect(saved.translation.aiEnabled).toBe(false)
+    expect(saved.translation.method).toBe('microsoft')
+    fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
+    expect(screen.getByRole('combobox', { name: '文本翻译 AI 模型' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('combobox', { name: '文本翻译 AI 模型' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: 'model-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    expect(screen.queryByRole('option', { name: 'AI 视觉 OCR' })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('chaoxing')
+    const footerSave = document.querySelector<HTMLButtonElement>('.settings-footer .primary-button')
+    expect(footerSave).not.toBeNull()
+    if (footerSave === null) throw new Error('settings save button missing')
+    fireEvent.click(footerSave)
+    await act(async () => Promise.resolve())
+    const afterRemoval = await desktop.loadSettings()
+    expect(afterRemoval.screenshotTranslation.ocrModel).toBeNull()
+    expect(afterRemoval.screenshotTranslation.translationModel).toBeNull()
+    expect(afterRemoval.screenshotTranslation.ocrMethod).toBe('chaoxing')
+    expect(afterRemoval.screenshotTranslation.translationMethod).toBe('microsoft')
   })
 
   it('does not overwrite provider edits when a model fetch finishes late', async () => {
