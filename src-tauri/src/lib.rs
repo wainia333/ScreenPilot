@@ -42,6 +42,7 @@ pub fn run() {
             settings_load,
             startup_notice_take,
             settings_save,
+            translation_settings_update,
             settings_export,
             settings_import,
             directory_pick,

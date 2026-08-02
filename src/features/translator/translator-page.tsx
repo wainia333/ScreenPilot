@@ -4,6 +4,7 @@ import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 import { translationMethodOptions } from '../settings/translation-methods'
 import type { AppSettings, TranslationMethod } from '../settings/types'
+import type { TranslationSettingsPatch } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 
@@ -164,10 +165,9 @@ export function TranslatorPage() {
     }, delay)
     return () => window.clearTimeout(timer)
   }, [desktop, input, settings])
-  const updateTranslationSettings = (
-    translation: AppSettings['translation'],
-  ) => {
+  const updateTranslationSettings = (patch: TranslationSettingsPatch) => {
     if (settings === null) return
+    const translation = { ...settings.translation, ...patch }
     const next = { ...settings, translation }
     immediateRequest.current = translationRequestKey(input, next)
     generation.current += 1
@@ -175,7 +175,7 @@ export function TranslatorPage() {
     setLoading(false)
     setError(null)
     setSettings(next)
-    void desktop.saveSettings(next).catch((reason: unknown) => setError(String(reason)))
+    void desktop.updateTranslationSettings(patch).catch((reason: unknown) => setError(String(reason)))
   }
   const updateInput = (value: string) => {
     setInput(value)
@@ -277,10 +277,7 @@ export function TranslatorPage() {
               disabled={settings === null}
               onChange={(event) => {
                 if (settings === null) return
-                updateTranslationSettings({
-                  ...settings.translation,
-                  targetLanguage: event.target.value,
-                })
+                updateTranslationSettings({ targetLanguage: event.target.value })
               }}
             >
               {targetLanguageOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
@@ -292,7 +289,7 @@ export function TranslatorPage() {
               onChange={(event) => {
                 if (settings === null) return
                 const method = event.target.value as TranslationMethod
-                updateTranslationSettings({ ...settings.translation, method })
+                updateTranslationSettings({ method })
               }}
             >
               {translationMethodOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}

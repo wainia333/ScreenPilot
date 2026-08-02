@@ -4,7 +4,7 @@ import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { DEFAULT_SETTINGS } from './defaults'
-import type { AppSettings } from './types'
+import type { AppSettings, ProviderSettings } from './types'
 import { SettingsPage } from './settings-page'
 
 class ClosingDesktop extends FakeDesktopPort {
@@ -49,6 +49,17 @@ class AdministratorDesktop extends ClosingDesktop {
       screenCapture: true,
       accessibility: true,
       administrator: true,
+    })
+  }
+}
+
+class DeferredProviderDesktop extends ClosingDesktop {
+  resolveModels: ((models: string[]) => void) | null = null
+
+  override fetchProviderModels(provider: ProviderSettings): Promise<string[]> {
+    void provider
+    return new Promise((resolve) => {
+      this.resolveModels = resolve
     })
   }
 }
@@ -178,6 +189,34 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('combobox', { name: 'Vision 模型' })).toHaveTextContent('Local Provider · local:model')
     fireEvent.click(screen.getByRole('button', { name: '提示词优化' }))
     expect(screen.getByRole('combobox', { name: '提示词优化模型' })).toHaveTextContent('Local Provider · local:model')
+  })
+
+  it('does not overwrite provider edits when a model fetch finishes late', async () => {
+    const desktop = new DeferredProviderDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'custom',
+        name: 'Original name',
+        baseUrl: 'https://example.com/v1',
+        keyCount: 0,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '拉取模型' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '提供商名称' }), {
+      target: { value: 'Edited while fetching' },
+    })
+    await act(async () => {
+      desktop.resolveModels?.(['model-a'])
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '提供商名称' })).toHaveValue('Edited while fetching')
+    expect(screen.getByRole('button', { name: 'model-a' })).toBeVisible()
   })
 
   it('shows the current process administrator status', async () => {

@@ -2,6 +2,7 @@ use crate::application::lifecycle::{register_changed_shortcuts, update_tray};
 use crate::application::state::AppState;
 use crate::domain::settings::{
     save_transaction, AppSettings, ProviderSettings, SettingsEffects, SettingsExport,
+    TranslationMethod,
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::provider_http;
@@ -42,6 +43,7 @@ pub fn settings_save(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<SettingsSaveResult, String> {
+    let _settings_write = state.lock_settings_write()?;
     let previous = state.current()?;
     let mut effects = RuntimeSettingsEffects {
         app: &app,
@@ -64,6 +66,49 @@ pub fn settings_save(
         ]),
         settings,
     })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslationSettingsPatch {
+    #[serde(default)]
+    method: Option<TranslationMethod>,
+    #[serde(default)]
+    target_language: Option<String>,
+}
+
+fn apply_translation_settings_patch(
+    settings: &mut AppSettings,
+    patch: TranslationSettingsPatch,
+) -> Result<(), String> {
+    if patch
+        .target_language
+        .as_deref()
+        .is_some_and(|target_language| {
+            !matches!(target_language, "auto" | "zh-CN" | "en" | "ja" | "ko")
+        })
+    {
+        return Err("Text translation target language is unsupported".into());
+    }
+    if let Some(method) = patch.method {
+        settings.translation.method = method;
+    }
+    if let Some(target_language) = patch.target_language {
+        settings.translation.target_language = target_language;
+    }
+    settings.validate()
+}
+
+#[tauri::command]
+pub fn translation_settings_update(
+    state: State<'_, AppState>,
+    patch: TranslationSettingsPatch,
+) -> Result<(), String> {
+    let _settings_write = state.lock_settings_write()?;
+    let mut settings = state.current()?;
+    apply_translation_settings_patch(&mut settings, patch)?;
+    state.store.save(&settings)?;
+    state.replace(&settings)
 }
 
 #[tauri::command]
@@ -246,6 +291,53 @@ fn startup_settings_changed(previous: &AppSettings, next: &AppSettings) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_patch_preserves_provider_and_model_selection() {
+        let mut settings = AppSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "custom".into(),
+            name: "Custom".into(),
+            base_url: "https://example.com/v1".into(),
+            key_count: 1,
+            available_models: vec!["model-a".into()],
+            enabled_models: vec!["model-a".into()],
+        });
+        settings.translation.ai_model = Some(crate::domain::settings::ModelSelection {
+            provider_id: "custom".into(),
+            model: "model-a".into(),
+        });
+        let providers = settings.providers.clone();
+        let model = settings.translation.ai_model.clone();
+        apply_translation_settings_patch(
+            &mut settings,
+            TranslationSettingsPatch {
+                method: Some(TranslationMethod::Ai),
+                target_language: Some("ja".into()),
+            },
+        )
+        .expect("valid translation patch");
+        assert_eq!(settings.providers, providers);
+        assert_eq!(settings.translation.ai_model, model);
+        assert_eq!(settings.translation.method, TranslationMethod::Ai);
+        assert_eq!(settings.translation.target_language, "ja");
+    }
+
+    #[test]
+    fn translation_patch_rejects_unknown_target_language_without_mutating() {
+        let mut settings = AppSettings::default();
+        let before = settings.clone();
+        let error = apply_translation_settings_patch(
+            &mut settings,
+            TranslationSettingsPatch {
+                method: None,
+                target_language: Some("xx".into()),
+            },
+        )
+        .expect_err("unsupported language should fail");
+        assert_eq!(error, "Text translation target language is unsupported");
+        assert_eq!(settings, before);
+    }
 
     #[test]
     fn only_synchronizes_startup_after_a_startup_setting_changes() {

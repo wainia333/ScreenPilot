@@ -135,6 +135,44 @@ describe('TranslatorPage', () => {
     expect(desktop.translations.at(-1)?.targetLanguage).toBe('ja')
   })
 
+  it('preserves providers and AI settings when a stale translator window changes method', async () => {
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const latest = await desktop.loadSettings()
+    const provider = {
+      id: 'provider-after-translator-load',
+      name: 'Latest provider',
+      baseUrl: 'https://example.com/v1',
+      keyCount: 1,
+      availableModels: ['latest-model'],
+      enabledModels: ['latest-model'],
+    }
+    await desktop.saveSettings({
+      ...latest,
+      translation: {
+        ...latest.translation,
+        aiModel: { providerId: provider.id, model: 'latest-model' },
+        prompt: 'latest custom translation prompt',
+      },
+      providers: [provider],
+    })
+
+    fireEvent.change(screen.getByRole('combobox', { name: '翻译接口' }), {
+      target: { value: 'ai' },
+    })
+    await act(async () => Promise.resolve())
+
+    const saved = await desktop.loadSettings()
+    expect(saved.providers).toEqual([provider])
+    expect(saved.translation.aiModel).toEqual({
+      providerId: provider.id,
+      model: 'latest-model',
+    })
+    expect(saved.translation.prompt).toBe('latest custom translation prompt')
+    expect(saved.translation.method).toBe('ai')
+  })
+
   it('closes from the title button and Escape regardless of focus', async () => {
     const desktop = new RecordingDesktop()
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)

@@ -1025,7 +1025,17 @@ fn secret_at(values: &[String], index: usize) -> &str {
 
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), String> {
+    let _settings_write = state.lock_settings_write()?;
     let mut current = state.current()?;
+    apply_screenshot_settings_patch(&mut current, &settings)?;
+    state.store.save(&current)?;
+    state.replace(&current)
+}
+
+fn apply_screenshot_settings_patch(
+    current: &mut AppSettings,
+    settings: &Value,
+) -> Result<(), String> {
     let screenshot = settings
         .get("screenshotTranslation")
         .ok_or("Screenshot settings are missing")?;
@@ -1054,9 +1064,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), 
             .and_then(Value::as_str),
         screenshot.get("translateModel").and_then(Value::as_str),
     );
-    current.validate()?;
-    state.store.save(&current)?;
-    state.replace(&current)
+    current.validate()
 }
 
 fn update_model_selection(
@@ -1592,6 +1600,40 @@ mod tests {
         for height in [56.0, 96.0, 97.0, 188.0, 224.0, 420.0, 520.0] {
             assert!(!vision_floating_resizable(true, height));
         }
+    }
+
+    #[test]
+    fn legacy_screenshot_patch_preserves_current_providers() {
+        let mut settings = AppSettings::default();
+        settings
+            .providers
+            .push(crate::domain::settings::ProviderSettings {
+                id: "custom".into(),
+                name: "Custom".into(),
+                base_url: "https://example.com/v1".into(),
+                key_count: 1,
+                available_models: vec!["model-a".into()],
+                enabled_models: vec!["model-a".into()],
+            });
+        let providers = settings.providers.clone();
+        let payload = serde_json::json!({
+            "providers": [],
+            "screenshotTranslation": {
+                "translationMethod": "ai",
+                "translateProviderId": "custom",
+                "translateModel": "model-a"
+            }
+        });
+        apply_screenshot_settings_patch(&mut settings, &payload)
+            .expect("valid legacy screenshot patch");
+        assert_eq!(settings.providers, providers);
+        assert_eq!(
+            settings.screenshot_translation.translation_model,
+            Some(ModelSelection {
+                provider_id: "custom".into(),
+                model: "model-a".into(),
+            })
+        );
     }
 
     #[test]

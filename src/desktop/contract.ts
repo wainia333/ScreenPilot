@@ -29,6 +29,10 @@ export type SettingsSaveResult = {
   appliedShortcuts: Record<string, string>
 }
 
+export type TranslationSettingsPatch = Partial<
+  Pick<AppSettings['translation'], 'method' | 'targetLanguage'>
+>
+
 export type ProviderConnectionResult = {
   success: boolean
   error: string | null
@@ -47,6 +51,7 @@ export type DesktopPort = {
   loadSettings(): Promise<AppSettings>
   takeStartupNotice(): Promise<string | null>
   saveSettings(settings: AppSettings): Promise<SettingsSaveResult>
+  updateTranslationSettings(patch: TranslationSettingsPatch): Promise<void>
   exportSettings(includeSecrets: boolean): Promise<boolean>
   importSettings(): Promise<SettingsExport | null>
   pickDirectory(): Promise<string | null>

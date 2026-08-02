@@ -3,7 +3,7 @@ use crate::infrastructure::images::ImageStore;
 use crate::infrastructure::settings_store::SettingsStore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 pub struct AppState {
     pub settings: RwLock<AppSettings>,
@@ -15,6 +15,7 @@ pub struct AppState {
     reference_vision_cancelled: AtomicBool,
     surface_generation: AtomicU64,
     surface_transition: Mutex<()>,
+    settings_write: Mutex<()>,
     translator_selection: Mutex<String>,
     vision_selection: Mutex<String>,
     startup_notice: Mutex<Option<String>>,
@@ -38,6 +39,7 @@ impl AppState {
             reference_vision_cancelled: AtomicBool::new(false),
             surface_generation: AtomicU64::new(0),
             surface_transition: Mutex::new(()),
+            settings_write: Mutex::new(()),
             translator_selection: Mutex::new(String::new()),
             vision_selection: Mutex::new(String::new()),
             startup_notice: Mutex::new(None),
@@ -102,6 +104,12 @@ impl AppState {
             .write()
             .map_err(|_| "Settings state is unavailable")? = settings.clone();
         Ok(())
+    }
+
+    pub fn lock_settings_write(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.settings_write
+            .lock()
+            .map_err(|_| "Settings write state is unavailable".into())
     }
 
     pub fn set_translator_selection(&self, value: String) {

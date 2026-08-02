@@ -79,12 +79,13 @@ export function SettingsPage() {
   const issues = useMemo(() => (draft === null ? [] : validateSettings(draft)), [draft])
   const save = useCallback(async (): Promise<boolean> => {
     if (draft === null || issues.length > 0 || saving) return false
+    const submitted = draft
     setSaving(true)
     setStatus(null)
     try {
-      const result = await desktop.saveSettings(draft)
+      const result = await desktop.saveSettings(submitted)
       setSaved(result.settings)
-      setDraft(result.settings)
+      setDraft((current) => sameSettings(current, submitted) ? result.settings : current)
       setStatus('设置已保存并立即生效')
       return true
     } catch (error) {
@@ -153,7 +154,10 @@ export function SettingsPage() {
         onPickDirectory={() => {
           void desktop.pickDirectory().then((imageArchivePath) => {
             if (imageArchivePath !== null) {
-              setDraft({ ...draft, general: { ...draft.general, imageArchivePath } })
+              setDraft((current) => current === null ? current : ({
+                ...current,
+                general: { ...current.general, imageArchivePath },
+              }))
             }
           })
         }}
@@ -163,7 +167,12 @@ export function SettingsPage() {
     screenshot: <ScreenshotSection settings={draft} onChange={setDraft} />,
     vision: <VisionSection settings={draft} onChange={setDraft} />,
     optimizer: <OptimizerSection settings={draft} onChange={setDraft} />,
-    providers: <ProvidersSection settings={draft} onChange={setDraft} />,
+    providers: (
+      <ProvidersSection
+        settings={draft}
+        onChange={(update) => setDraft((current) => current === null ? current : update(current))}
+      />
+    ),
     about: (
       <AboutSection
         onExport={(includeSecrets) => {

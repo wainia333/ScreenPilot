@@ -6,6 +6,7 @@ import type {
   PromptOptimizationRequest,
   PromptOptimizationResult,
   SettingsSaveResult,
+  TranslationSettingsPatch,
   TranslationRequest,
   TranslationResult,
   Unlisten,
@@ -43,6 +44,14 @@ export class FakeDesktopPort implements DesktopPort {
       settings: structuredClone(this.settings),
       appliedShortcuts: { ...this.settings.shortcuts },
     })
+  }
+
+  updateTranslationSettings(patch: TranslationSettingsPatch): Promise<void> {
+    this.settings = sanitizeSettings({
+      ...this.settings,
+      translation: { ...this.settings.translation, ...patch },
+    })
+    return Promise.resolve()
   }
 
   exportSettings(includeSecrets: boolean): Promise<boolean> {

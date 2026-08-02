@@ -5,6 +5,7 @@ import { SettingGroup, TextField } from '../../../shared/ui/controls'
 import type { AppSettings, ProviderSettings } from '../types'
 
 type ProviderStatus = { tone: 'neutral' | 'success' | 'error'; message: string }
+type SettingsUpdater = (update: (current: AppSettings) => AppSettings) => void
 
 function newProvider(): ProviderSettings {
   return {
@@ -22,19 +23,23 @@ export function ProvidersSection({
   onChange,
 }: {
   settings: AppSettings
-  onChange: (settings: AppSettings) => void
+  onChange: SettingsUpdater
 }) {
   const desktop = useDesktop()
   const [keys, setKeys] = useState<Record<string, string>>({})
   const [manualModels, setManualModels] = useState<Record<string, string>>({})
   const [statuses, setStatuses] = useState<Record<string, ProviderStatus>>({})
-  const updateProvider = (id: string, patch: Partial<ProviderSettings>) =>
-    onChange({
-      ...settings,
-      providers: settings.providers.map((provider) =>
-        provider.id === id ? { ...provider, ...patch } : provider,
-      ),
-    })
+  const updateProvider = (
+    id: string,
+    patch: Partial<ProviderSettings> | ((current: ProviderSettings) => Partial<ProviderSettings>),
+  ) => onChange((current) => ({
+    ...current,
+    providers: current.providers.map((provider) =>
+      provider.id === id
+        ? { ...provider, ...(typeof patch === 'function' ? patch(provider) : patch) }
+        : provider,
+    ),
+  }))
   const setStatus = (id: string, status: ProviderStatus) =>
     setStatuses((current) => ({ ...current, [id]: status }))
   const keyLines = (id: string) =>
@@ -52,7 +57,10 @@ export function ProvidersSection({
         <button
           type="button"
           className="secondary-button"
-          onClick={() => onChange({ ...settings, providers: [...settings.providers, newProvider()] })}
+          onClick={() => onChange((current) => ({
+            ...current,
+            providers: [...current.providers, newProvider()],
+          }))}
         >
           <Plus size={15} />新增
         </button>
@@ -118,10 +126,10 @@ export function ProvidersSection({
                   onClick={async () => {
                     try {
                       const models = await desktop.fetchProviderModels(provider)
-                      updateProvider(provider.id, {
+                      updateProvider(provider.id, (current) => ({
                         availableModels: models,
-                        enabledModels: provider.enabledModels.filter((model) => models.includes(model)),
-                      })
+                        enabledModels: current.enabledModels.filter((model) => models.includes(model)),
+                      }))
                       setStatus(provider.id, { tone: 'success', message: `获取到 ${models.length} 个模型` })
                     } catch (error) {
                       setStatus(provider.id, { tone: 'error', message: String(error) })
@@ -149,10 +157,10 @@ export function ProvidersSection({
                   aria-label={`删除 ${provider.name}`}
                   onClick={async () => {
                     await desktop.deleteProviderKeys(provider.id)
-                    onChange({
-                      ...settings,
-                      providers: settings.providers.filter((item) => item.id !== provider.id),
-                    })
+                    onChange((current) => ({
+                      ...current,
+                      providers: current.providers.filter((item) => item.id !== provider.id),
+                    }))
                   }}
                 >
                   <Trash2 size={15} />

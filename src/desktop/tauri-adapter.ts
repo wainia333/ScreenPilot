@@ -8,6 +8,7 @@ import type {
   PromptOptimizationRequest,
   PromptOptimizationResult,
   SettingsSaveResult,
+  TranslationSettingsPatch,
   TranslationRequest,
   TranslationResult,
   Unlisten,
@@ -37,6 +38,8 @@ export class TauriDesktopPort implements DesktopPort {
   loadSettings = () => invoke<AppSettings>('settings_load')
   takeStartupNotice = () => invoke<string | null>('startup_notice_take')
   saveSettings = (settings: AppSettings) => invoke<SettingsSaveResult>('settings_save', { settings })
+  updateTranslationSettings = (patch: TranslationSettingsPatch) =>
+    command('translation_settings_update', { patch })
   exportSettings = (includeSecrets: boolean) => invoke<boolean>('settings_export', { includeSecrets })
   importSettings = () => invoke<SettingsExport | null>('settings_import')
   pickDirectory = () => invoke<string | null>('directory_pick')
