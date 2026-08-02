@@ -67,6 +67,78 @@ async function expectNeutralSelectFocus(select: Locator) {
   )
 }
 
+async function settingsNavigationIndicator(button: Locator) {
+  return button.evaluate((element) => {
+    const computed = getComputedStyle(element, '::after')
+    const buttonComputed = getComputedStyle(element)
+    const accentProbe = document.createElement('span')
+    accentProbe.style.color = 'var(--sp-accent)'
+    document.body.append(accentProbe)
+    const accentColor = getComputedStyle(accentProbe).color
+    accentProbe.remove()
+    const matrix = computed.transform === 'none'
+      ? new DOMMatrixReadOnly()
+      : new DOMMatrixReadOnly(computed.transform)
+    const bounds = element.getBoundingClientRect()
+    const icon = element.querySelector('svg')
+    const iconBounds = icon?.getBoundingClientRect()
+    return {
+      accentColor,
+      backgroundColor: computed.backgroundColor,
+      buttonHeight: bounds.height,
+      buttonWidth: bounds.width,
+      content: computed.content,
+      height: Number.parseFloat(computed.height),
+      iconLeft: iconBounds === undefined ? Number.POSITIVE_INFINITY : iconBounds.left - bounds.left,
+      labelLeft: (() => {
+        const label = element.querySelector('span')
+        const labelBounds = label?.getBoundingClientRect()
+        return labelBounds === undefined ? Number.POSITIVE_INFINITY : labelBounds.left - bounds.left
+      })(),
+      left: Number.parseFloat(computed.left),
+      opacity: Number(computed.opacity),
+      paddingLeft: Number.parseFloat(buttonComputed.paddingLeft),
+      top: Number.parseFloat(computed.top),
+      translateX: matrix.e,
+      scaleY: matrix.d,
+      animationDuration: computed.animationDuration,
+      animationName: computed.animationName,
+      animationTimingFunction: computed.animationTimingFunction,
+      transformOriginX: Number.parseFloat(computed.transformOrigin),
+      transformOriginY: Number.parseFloat(computed.transformOrigin.split(' ')[1] ?? '0'),
+      width: Number.parseFloat(computed.width),
+    }
+  })
+}
+
+async function settingsNavigationKeyframes(page: Page) {
+  return page.evaluate(() => {
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules: CSSRuleList
+      try {
+        rules = sheet.cssRules
+      } catch {
+        continue
+      }
+      for (const rule of Array.from(rules)) {
+        if (!('name' in rule) || !('cssRules' in rule)) continue
+        const keyframes = rule as CSSKeyframesRule
+        if (keyframes.name !== 'screenpilot-settings-sidebar-indicator-pop') continue
+        return Array.from(keyframes.cssRules).map((frame) => {
+          const keyframe = frame as CSSKeyframeRule
+          return {
+            left: keyframe.style.left,
+            offset: keyframe.keyText,
+            opacity: keyframe.style.opacity,
+            transform: keyframe.style.transform,
+          }
+        })
+      }
+    }
+    return []
+  })
+}
+
 test('settings supports seven sections, unsaved close choices and accessible layout', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await page.goto('/')
@@ -110,6 +182,67 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await dialog.getByRole('button', { name: '继续编辑' }).click()
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('settings-dark.png')
+})
+
+test('settings navigation indicator pops in from the left as a contained solid arc', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.goto('/')
+  const navigation = page.getByRole('navigation', { name: '设置分区' })
+  const general = navigation.getByRole('button', { name: '常规', exact: true })
+  const translation = navigation.getByRole('button', { name: '翻译', exact: true })
+  const inactive = await settingsNavigationIndicator(translation)
+  expect(inactive.content).toBe('""')
+  expect(inactive.backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
+  expect(inactive.backgroundColor).not.toBe(inactive.accentColor)
+  expect(inactive.paddingLeft).toBe(16)
+  expect(inactive.iconLeft).toBeGreaterThanOrEqual(16)
+  expect(inactive.labelLeft - inactive.iconLeft).toBeGreaterThanOrEqual(25)
+  expect(inactive.height).toBeGreaterThanOrEqual(14)
+  expect(inactive.height).toBeLessThanOrEqual(20)
+  expect(inactive.width).toBe(4)
+  expect(inactive.opacity).toBe(0)
+  expect(inactive.animationName).toBe('none')
+  expect(inactive.left).toBe(4)
+  expect(inactive.translateX).toBe(0)
+  expect(inactive.scaleY).toBeLessThan(1)
+  expect(inactive.left).toBeGreaterThanOrEqual(0)
+  expect(inactive.top).toBeGreaterThanOrEqual(0)
+  expect(inactive.left + inactive.width).toBeLessThanOrEqual(inactive.iconLeft - 1)
+  expect(inactive.width).toBeLessThan(inactive.buttonWidth)
+  expect(inactive.top + inactive.height).toBeLessThanOrEqual(inactive.buttonHeight)
+  expect(inactive.transformOriginX).toBeCloseTo(inactive.width / 2, 1)
+  expect(inactive.transformOriginY).toBeCloseTo(inactive.height / 2, 1)
+  const keyframes = await settingsNavigationKeyframes(page)
+  expect(keyframes).toHaveLength(4)
+  expect(keyframes.find((frame) => frame.offset === '42%')?.left).toBe('7px')
+  expect(keyframes.find((frame) => frame.offset === '100%')?.left).toBe('4px')
+  expect(keyframes.map((frame) => frame.transform)).toEqual(expect.arrayContaining(['scaleY(0.76)', 'scaleY(1.06)', 'scaleY(0.98)', 'scaleY(1)']))
+  await translation.click()
+  await expect(translation).toHaveAttribute('aria-current', 'page')
+  await expect(general).not.toHaveAttribute('aria-current', 'page')
+  await expect.poll(async () => (await settingsNavigationIndicator(translation)).opacity).toBe(1)
+  await expect.poll(async () => (await settingsNavigationIndicator(translation)).scaleY).toBe(1)
+  await expect.poll(async () => (await settingsNavigationIndicator(translation)).translateX).toBe(0)
+  const active = await settingsNavigationIndicator(translation)
+  expect(active.animationName).toBe('screenpilot-settings-sidebar-indicator-pop')
+  expect(active.left).toBe(4)
+  expect(active.left + active.width).toBeLessThanOrEqual(active.iconLeft - 4)
+  expect(7 + active.width).toBeLessThanOrEqual(active.iconLeft - 4)
+  expect(active.left + active.width).toBeLessThanOrEqual(active.buttonWidth)
+  expect(7 + active.width).toBeLessThanOrEqual(active.buttonWidth)
+  expect(active.buttonWidth).toBe(inactive.buttonWidth)
+  await expect.poll(async () => (await settingsNavigationIndicator(general)).opacity).toBe(0)
+  await expect.poll(async () => (await settingsNavigationIndicator(general)).left).toBe(4)
+})
+
+test('settings navigation indicator shortens motion when reduced motion is requested', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.goto('/')
+  const translation = page.getByRole('navigation', { name: '设置分区' }).getByRole('button', { name: '翻译', exact: true })
+  const reduced = await settingsNavigationIndicator(translation)
+  expect(Number.parseFloat(reduced.animationDuration)).toBeLessThan(0.001)
+  await translation.click()
+  await expect.poll(async () => (await settingsNavigationIndicator(translation)).opacity).toBe(1)
 })
 
 test('select controls do not show a red focus outline when opened', async ({ page }) => {
