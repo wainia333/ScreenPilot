@@ -5,9 +5,11 @@ import { SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 export function AboutSection({
   onExport,
   onImport,
+  disabled = false,
 }: {
   onExport: (includeSecrets: boolean) => void
   onImport: () => void
+  disabled?: boolean
 }) {
   const [includeSecrets, setIncludeSecrets] = useState(false)
   return (
@@ -24,10 +26,10 @@ export function AboutSection({
           <Toggle checked={includeSecrets} label="导出包含 API Key" onChange={setIncludeSecrets} />
         </SettingRow>
         <div className="about-actions">
-          <button type="button" className="secondary-button" onClick={() => onExport(includeSecrets)}>
+          <button type="button" className="secondary-button" disabled={disabled} onClick={() => onExport(includeSecrets)}>
             <Download size={15} />导出配置
           </button>
-          <button type="button" className="secondary-button" onClick={onImport}>
+          <button type="button" className="secondary-button" disabled={disabled} onClick={onImport}>
             <Upload size={15} />导入配置
           </button>
         </div>

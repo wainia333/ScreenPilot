@@ -6,6 +6,7 @@ import type {
   PromptOptimizationRequest,
   PromptOptimizationResult,
   SettingsSaveResult,
+  ProviderKeyChanges,
   TranslationSettingsPatch,
   TranslationRequest,
   TranslationResult,
@@ -23,6 +24,8 @@ type FakeListeners = {
 export class FakeDesktopPort implements DesktopPort {
   private settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
   private readonly keys = new Map<string, string[]>()
+  readonly providerKeySaveCalls: ProviderKeyChanges[] = []
+  providerKeySaveError: string | null = null
   private readonly listeners: FakeListeners = {
     route: new Set(),
     reset: new Set(),
@@ -65,6 +68,15 @@ export class FakeDesktopPort implements DesktopPort {
 
   pickDirectory(): Promise<string | null> {
     return Promise.resolve('C:\\Users\\ScreenPilot\\Pictures')
+  }
+
+  saveProviderKeyChanges(changes: ProviderKeyChanges): Promise<void> {
+    this.providerKeySaveCalls.push(structuredClone(changes))
+    if (this.providerKeySaveError !== null) return Promise.reject(new Error(this.providerKeySaveError))
+    Object.entries(changes).forEach(([providerId, keys]) => {
+      this.keys.set(providerId, keys.filter((key) => key.trim().length > 0))
+    })
+    return Promise.resolve()
   }
 
   setProviderKeys(providerId: string, keys: string[]): Promise<void> {

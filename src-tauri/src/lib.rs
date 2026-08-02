@@ -46,6 +46,7 @@ pub fn run() {
             settings_export,
             settings_import,
             directory_pick,
+            credentials_set_provider_keys_batch,
             credentials_set_provider_keys,
             credentials_provider_key_count,
             credentials_delete_provider_keys,

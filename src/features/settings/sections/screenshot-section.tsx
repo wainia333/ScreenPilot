@@ -1,8 +1,9 @@
-import { PromptField, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
+import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import { AdapterCredentials } from '../adapter-credentials'
 import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings, OcrMethod, ThinkingEffort } from '../types'
+import { DEFAULT_SETTINGS } from '../defaults'
 
 export function ScreenshotSection({
   settings,
@@ -96,10 +97,34 @@ export function ScreenshotSection({
           </SettingRow>
         ) : null}
       </SettingGroup>
-      <SettingGroup title="OCR 提示词">
-        <PromptField value={current.ocrPrompt} label="OCR 提示词" onChange={(ocrPrompt) => update({ ocrPrompt })} />
+      <SettingGroup
+        title="OCR 提示词"
+        titleAction={
+          <PromptResetButton
+            value={current.ocrPrompt}
+            label="OCR 提示词"
+            defaultValue={DEFAULT_SETTINGS.screenshotTranslation.ocrPrompt}
+            onChange={(ocrPrompt) => update({ ocrPrompt })}
+          />
+        }
+      >
+        <PromptField
+          value={current.ocrPrompt}
+          label="OCR 提示词"
+          onChange={(ocrPrompt) => update({ ocrPrompt })}
+        />
       </SettingGroup>
-      <SettingGroup title="截图翻译提示词">
+      <SettingGroup
+        title="截图翻译提示词"
+        titleAction={
+          <PromptResetButton
+            value={current.translationPrompt}
+            label="截图翻译提示词"
+            defaultValue={DEFAULT_SETTINGS.screenshotTranslation.translationPrompt}
+            onChange={(translationPrompt) => update({ translationPrompt })}
+          />
+        }
+      >
         <PromptField
           value={current.translationPrompt}
           label="截图翻译提示词"

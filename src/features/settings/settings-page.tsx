@@ -19,7 +19,7 @@ import { ScreenshotSection } from './sections/screenshot-section'
 import { TranslationSection } from './sections/translation-section'
 import { VisionSection } from './sections/vision-section'
 import type { AppSettings, SettingsExport } from './types'
-import type { PermissionStatus } from '../../desktop/contract'
+import type { PermissionStatus, ProviderKeyChanges } from '../../desktop/contract'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 
 type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
@@ -39,19 +39,89 @@ function sameSettings(left: AppSettings | null, right: AppSettings | null): bool
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
+function sameProviderKeyDrafts(left: ProviderKeyChanges, right: ProviderKeyChanges): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function normalizeProviderKeys(keys: string[]): string[] {
+  return keys.map((key) => key.trim()).filter(Boolean)
+}
+
+function normalizeProviderKeyDrafts(drafts: ProviderKeyChanges): ProviderKeyChanges {
+  return Object.fromEntries(
+    Object.entries(drafts).map(([providerId, keys]) => [providerId, normalizeProviderKeys(keys)]),
+  )
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  return '未知错误'
+}
+
+function credentialErrorMessage(error: unknown, changes: ProviderKeyChanges): string {
+  return Object.values(changes).reduce(
+    (message, keys) => keys.reduce(
+      (current, key) => key.length === 0 ? current : current.split(key).join('***'),
+      message,
+    ),
+    errorMessage(error),
+  )
+}
+
+function providerKeyChanges(
+  saved: AppSettings | null,
+  draft: AppSettings,
+  keyDrafts: ProviderKeyChanges,
+): ProviderKeyChanges {
+  const changes: ProviderKeyChanges = {}
+  const currentIds = new Set(draft.providers.map((provider) => provider.id))
+  Object.entries(keyDrafts).forEach(([providerId, keys]) => {
+    if (currentIds.has(providerId)) changes[providerId] = [...keys]
+  })
+  saved?.providers.forEach((provider) => {
+    if (!currentIds.has(provider.id)) changes[provider.id] = []
+  })
+  return changes
+}
+
+function applyProviderKeyCounts(settings: AppSettings, keyDrafts: ProviderKeyChanges): AppSettings {
+  return {
+    ...settings,
+    providers: settings.providers.map((provider) => (
+      Object.prototype.hasOwnProperty.call(keyDrafts, provider.id)
+        ? { ...provider, keyCount: keyDrafts[provider.id]?.length ?? 0 }
+        : provider
+    )),
+  }
+}
+
+function mergeSavedProviderKeyCounts(current: AppSettings, saved: AppSettings): AppSettings {
+  const savedProviders = new Map(saved.providers.map((provider) => [provider.id, provider.keyCount]))
+  return {
+    ...current,
+    providers: current.providers.map((provider) => (
+      savedProviders.has(provider.id)
+        ? { ...provider, keyCount: savedProviders.get(provider.id) ?? provider.keyCount }
+        : provider
+    )),
+  }
+}
+
 export function SettingsPage() {
   const desktop = useDesktop()
   const beginWindowDrag = useWindowDrag()
   const [section, setSection] = useState<Section>('general')
   const [saved, setSaved] = useState<AppSettings | null>(null)
   const [draft, setDraft] = useState<AppSettings | null>(null)
+  const [providerKeyDrafts, setProviderKeyDrafts] = useState<ProviderKeyChanges>({})
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [dialog, setDialog] = useState<DialogState>('none')
   const [pendingImport, setPendingImport] = useState<SettingsExport | null>(null)
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>()
-  const dirty = !sameSettings(saved, draft)
+  const dirty = !sameSettings(saved, draft) || Object.keys(providerKeyDrafts).length > 0
   const load = useCallback(async () => {
     setLoadingError(null)
     try {
@@ -62,6 +132,7 @@ export function SettingsPage() {
       ])
       setSaved(settings)
       setDraft(settings)
+      setProviderKeyDrafts({})
       setPermissionStatus(permissions)
       if (startupNotice !== null) setStatus(startupNotice)
     } catch (error) {
@@ -79,13 +150,40 @@ export function SettingsPage() {
   const issues = useMemo(() => (draft === null ? [] : validateSettings(draft)), [draft])
   const save = useCallback(async (): Promise<boolean> => {
     if (draft === null || issues.length > 0 || saving) return false
-    const submitted = draft
+    const keyDraftSnapshot = structuredClone(providerKeyDrafts)
+    const submitted = applyProviderKeyCounts(structuredClone(draft), keyDraftSnapshot)
+    const changes = providerKeyChanges(saved, submitted, keyDraftSnapshot)
     setSaving(true)
     setStatus(null)
     try {
       const result = await desktop.saveSettings(submitted)
+      if (Object.keys(changes).length > 0) {
+        try {
+          await desktop.saveProviderKeyChanges(changes)
+        } catch (error) {
+          let rollbackError: unknown = null
+          if (saved !== null) {
+            try {
+              await desktop.saveSettings(saved)
+            } catch (restoreError) {
+              rollbackError = restoreError
+            }
+          }
+          const credentialError = credentialErrorMessage(error, changes)
+          const suffix = rollbackError === null ? '' : `；设置回滚失败：${credentialErrorMessage(rollbackError, changes)}`
+          setStatus(`保存失败：凭据保存失败：${credentialError}${suffix}`)
+          return false
+        }
+      }
       setSaved(result.settings)
-      setDraft((current) => sameSettings(current, submitted) ? result.settings : current)
+      setDraft((current) => {
+        if (current === null) return current
+        const currentSubmitted = applyProviderKeyCounts(current, keyDraftSnapshot)
+        return sameSettings(currentSubmitted, submitted)
+          ? result.settings
+          : mergeSavedProviderKeyCounts(current, result.settings)
+      })
+      setProviderKeyDrafts((current) => sameProviderKeyDrafts(current, keyDraftSnapshot) ? {} : current)
       setStatus('设置已保存并立即生效')
       return true
     } catch (error) {
@@ -94,14 +192,27 @@ export function SettingsPage() {
     } finally {
       setSaving(false)
     }
-  }, [desktop, draft, issues.length, saving])
+  }, [desktop, draft, issues.length, providerKeyDrafts, saved, saving])
   const hide = useCallback(() => {
     void desktop.hideWindow()
   }, [desktop])
   const requestClose = useCallback(() => {
+    if (saving) return
     if (dirty) setDialog('close')
     else hide()
-  }, [dirty, hide])
+  }, [dirty, hide, saving])
+  const restoreDraft = useCallback(() => {
+    if (saved === null) return
+    setDraft(structuredClone(saved))
+    setProviderKeyDrafts({})
+    setStatus(null)
+    setPendingImport(null)
+    setDialog('none')
+  }, [saved])
+  const cancel = useCallback(() => {
+    if (saving) return
+    restoreDraft()
+  }, [restoreDraft, saving])
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || dialog !== 'none') return
@@ -112,19 +223,19 @@ export function SettingsPage() {
     return () => window.removeEventListener('keydown', listener)
   }, [dialog, requestClose])
   const applyImport = useCallback(
-    async (value: SettingsExport) => {
-      if (value.includesSecrets && value.secrets !== undefined) {
-        await Promise.all(
-          Object.entries(value.secrets).map(([providerId, keys]) => desktop.setProviderKeys(providerId, keys)),
-        )
-      }
+    (value: SettingsExport) => {
       setDraft(value.settings)
+      setProviderKeyDrafts(
+        value.includesSecrets
+          ? normalizeProviderKeyDrafts(structuredClone(value.secrets ?? {}))
+          : {},
+      )
       setSection('general')
       setStatus('配置已载入，保存后才会应用')
       setPendingImport(null)
       setDialog('none')
     },
-    [desktop],
+    [],
   )
   if (loadingError !== null) {
     return (
@@ -171,10 +282,27 @@ export function SettingsPage() {
       <ProvidersSection
         settings={draft}
         onChange={(update) => setDraft((current) => current === null ? current : update(current))}
+        keyDrafts={providerKeyDrafts}
+        onKeyDraftChange={(providerId, keys) =>
+          setProviderKeyDrafts((current) => ({
+            ...current,
+            [providerId]: normalizeProviderKeys(keys),
+          }))
+        }
+        onKeyDraftRemove={(providerId) =>
+          setProviderKeyDrafts((current) => {
+            if (!Object.prototype.hasOwnProperty.call(current, providerId)) return current
+            return Object.fromEntries(
+              Object.entries(current).filter(([id]) => id !== providerId),
+            )
+          })
+        }
+        saving={saving}
       />
     ),
     about: (
       <AboutSection
+        disabled={saving}
         onExport={(includeSecrets) => {
           void desktop.exportSettings(includeSecrets).then((exported) => {
             setStatus(exported ? '配置已导出' : null)
@@ -187,7 +315,7 @@ export function SettingsPage() {
               setPendingImport(value)
               setDialog('import')
             } else {
-              void applyImport(value)
+              applyImport(value)
             }
           })
         }}
@@ -244,6 +372,7 @@ export function SettingsPage() {
             type="button"
             className="icon-button"
             aria-label="关闭设置"
+            disabled={saving}
             onClick={requestClose}
           >
             <X size={16} />
@@ -257,6 +386,14 @@ export function SettingsPage() {
           {content[section]}
         </div>
         <footer className="settings-footer">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!dirty || saving}
+            onClick={cancel}
+          >
+            取消
+          </button>
           <button
             type="button"
             className="primary-button"
@@ -276,14 +413,15 @@ export function SettingsPage() {
               <button
                 type="button"
                 className="primary-button"
+                disabled={saving}
                 onClick={() => void save().then((savedNow) => savedNow && hide())}
               >
                 保存并关闭
               </button>
-              <button type="button" className="secondary-button" onClick={() => { setDraft(saved); hide() }}>
+              <button type="button" className="secondary-button" disabled={saving} onClick={() => { restoreDraft(); hide() }}>
                 放弃更改
               </button>
-              <button type="button" className="text-button" onClick={() => setDialog('none')}>
+              <button type="button" className="text-button" disabled={saving} onClick={() => setDialog('none')}>
                 继续编辑
               </button>
             </div>
@@ -296,10 +434,10 @@ export function SettingsPage() {
             <h2 id="import-dialog-title">覆盖当前未保存内容？</h2>
             <p>导入会替换当前编辑中的设置，但仍需点击保存才会应用。</p>
             <div>
-              <button type="button" className="primary-button" onClick={() => void applyImport(pendingImport)}>
+              <button type="button" className="primary-button" disabled={saving} onClick={() => applyImport(pendingImport)}>
                 继续导入
               </button>
-              <button type="button" className="text-button" onClick={() => { setPendingImport(null); setDialog('none') }}>
+              <button type="button" className="text-button" disabled={saving} onClick={() => { setPendingImport(null); setDialog('none') }}>
                 取消
               </button>
             </div>

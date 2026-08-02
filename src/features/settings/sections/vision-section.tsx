@@ -1,6 +1,7 @@
-import { PromptField, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
+import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import type { AppSettings, MessageOrder, ThinkingEffort } from '../types'
+import { DEFAULT_SETTINGS } from '../defaults'
 
 export function VisionSection({
   settings,
@@ -74,11 +75,39 @@ export function VisionSection({
           />
         </SettingRow>
       </SettingGroup>
-      <SettingGroup title="系统提示词">
-        <PromptField value={current.systemPrompt} label="Vision 系统提示词" onChange={(systemPrompt) => update({ systemPrompt })} />
+      <SettingGroup
+        title="系统提示词"
+        titleAction={
+          <PromptResetButton
+            value={current.systemPrompt}
+            label="Vision 系统提示词"
+            defaultValue={DEFAULT_SETTINGS.vision.systemPrompt}
+            onChange={(systemPrompt) => update({ systemPrompt })}
+          />
+        }
+      >
+        <PromptField
+          value={current.systemPrompt}
+          label="Vision 系统提示词"
+          onChange={(systemPrompt) => update({ systemPrompt })}
+        />
       </SettingGroup>
-      <SettingGroup title="问答提示词">
-        <PromptField value={current.questionPrompt} label="Vision 问答提示词" onChange={(questionPrompt) => update({ questionPrompt })} />
+      <SettingGroup
+        title="问答提示词"
+        titleAction={
+          <PromptResetButton
+            value={current.questionPrompt}
+            label="Vision 问答提示词"
+            defaultValue={DEFAULT_SETTINGS.vision.questionPrompt}
+            onChange={(questionPrompt) => update({ questionPrompt })}
+          />
+        }
+      >
+        <PromptField
+          value={current.questionPrompt}
+          label="Vision 问答提示词"
+          onChange={(questionPrompt) => update({ questionPrompt })}
+        />
       </SettingGroup>
     </>
   )

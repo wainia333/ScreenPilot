@@ -297,6 +297,7 @@ select:focus-visible {
   flex: 0 0 50px;
   align-items: center;
   justify-content: flex-end;
+  gap: 8px;
   padding: 0 18px;
   border-top: 1px solid var(--sp-border);
   background: var(--sp-surface);
@@ -306,11 +307,24 @@ select:focus-visible {
   margin: 0 0 20px;
 }
 
-.setting-group h2 {
+.setting-group__heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin: 0 0 7px 2px;
+}
+
+.setting-group__heading h2 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   color: var(--sp-text-muted);
   font-size: 11px;
   font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .setting-group__body {
@@ -452,12 +466,39 @@ select:focus-visible {
   color: var(--sp-accent);
 }
 
+.prompt-reset-button {
+  min-height: 24px;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--sp-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sp-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.prompt-reset-button:hover:not(:disabled) {
+  border-color: var(--sp-border-strong);
+  background: var(--sp-sidebar);
+  color: var(--sp-text);
+}
+
+.prompt-reset-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .prompt-field {
   display: block;
-  min-height: 100px;
+  min-height: 150px;
   padding: 10px 12px;
   border: 0;
   border-radius: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   resize: vertical;
   line-height: 1.55;
   user-select: text;
@@ -522,6 +563,11 @@ select:focus-visible {
 .secondary-button:hover,
 .icon-button:hover {
   background: var(--sp-sidebar);
+}
+
+.secondary-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .text-button {

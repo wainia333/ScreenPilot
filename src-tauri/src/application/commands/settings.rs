@@ -197,6 +197,13 @@ pub fn credentials_set_provider_keys(provider_id: String, keys: Vec<String>) -> 
 }
 
 #[tauri::command]
+pub fn credentials_set_provider_keys_batch(
+    changes: HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    CredentialVault::set_provider_keys_batch(&changes)
+}
+
+#[tauri::command]
 pub fn credentials_provider_key_count(provider_id: String) -> Result<usize, String> {
     CredentialVault::provider_key_count(&provider_id)
 }

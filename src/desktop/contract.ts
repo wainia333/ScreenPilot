@@ -29,6 +29,8 @@ export type SettingsSaveResult = {
   appliedShortcuts: Record<string, string>
 }
 
+export type ProviderKeyChanges = Record<string, string[]>
+
 export type TranslationSettingsPatch = Partial<
   Pick<AppSettings['translation'], 'method' | 'targetLanguage'>
 >
@@ -55,6 +57,7 @@ export type DesktopPort = {
   exportSettings(includeSecrets: boolean): Promise<boolean>
   importSettings(): Promise<SettingsExport | null>
   pickDirectory(): Promise<string | null>
+  saveProviderKeyChanges(changes: ProviderKeyChanges): Promise<void>
   setProviderKeys(providerId: string, keys: string[]): Promise<void>
   providerKeyCount(providerId: string): Promise<number>
   deleteProviderKeys(providerId: string): Promise<void>

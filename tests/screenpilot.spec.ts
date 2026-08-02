@@ -154,6 +154,10 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await expectEdgeSafeFrame(page.locator('.settings-window'))
   await expect(page.locator('.settings-footer').getByRole('button', { name: '保存' })).toBeVisible()
   await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(7)
+  const settingsFooter = page.locator('.settings-footer')
+  const cancelSettings = settingsFooter.getByRole('button', { name: '取消' })
+  await expect(cancelSettings).toBeVisible()
+  await expect(cancelSettings).toBeDisabled()
   await page.getByRole('button', { name: 'OCR', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'OCR', exact: true })).toBeVisible()
   await expect(page.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('chaoxing')
@@ -182,6 +186,110 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await dialog.getByRole('button', { name: '继续编辑' }).click()
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('settings-dark.png')
+})
+
+test('settings cancel restores the loaded draft without closing the page', async ({ page }) => {
+  await page.goto('/')
+  const footer = page.locator('.settings-footer')
+  const cancel = footer.getByRole('button', { name: '取消' })
+  await expect(cancel).toBeDisabled()
+  await page.getByRole('radio', { name: '深色', exact: true }).click()
+  await expect(cancel).toBeEnabled()
+  await cancel.click()
+  await expect(page.getByRole('radio', { name: '系统', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
+  await expect(cancel).toBeDisabled()
+  await expect(page.getByRole('heading', { name: '常规', exact: true })).toBeVisible()
+})
+
+test('provider key drafts use the global footer save and cancel actions', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await page.goto('/')
+  await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+  const footer = page.locator('.settings-footer')
+  const save = footer.getByRole('button', { name: '保存' })
+  const cancel = footer.getByRole('button', { name: '取消' })
+  await expect(page.getByRole('button', { name: /保存密钥|保存秘钥/u })).toHaveCount(0)
+  await page.getByRole('button', { name: '新增' }).click()
+  const firstKeys = page.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })
+  await firstKeys.fill('browser-secret')
+  await expect(save).toBeEnabled()
+  await expect(cancel).toBeEnabled()
+  await cancel.click()
+  await expect(page.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })).toHaveCount(0)
+  await expect(save).toBeDisabled()
+
+  await page.getByRole('button', { name: '新增' }).click()
+  const keys = page.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })
+  await keys.fill('browser-secret-one')
+  await save.click()
+  await expect(save).toBeDisabled()
+  await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
+  await expect(page.getByText('设置已保存并立即生效')).toBeVisible()
+  await keys.fill('browser-secret-two')
+  await save.click()
+  await expect(save).toBeDisabled()
+  await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
+  await keys.fill('browser-secret-discarded')
+  await cancel.click()
+  await expect(keys).toHaveValue('')
+  await expect(save).toBeDisabled()
+  expect(pageErrors).toEqual([])
+})
+
+test('prompt reset controls stay beside original titles without overlap', async ({ page }) => {
+  await page.setViewportSize({ width: 620, height: 620 })
+  await page.goto('/')
+  const expectedPromptGroups = { 翻译: 1, OCR: 2, Vision: 2, 提示词优化: 2 }
+  for (const [section, expectedCount] of Object.entries(expectedPromptGroups)) {
+    await page.getByRole('button', { name: section, exact: true }).click()
+    const groups = page.locator('.setting-group:has(textarea.prompt-field)')
+    await expect(groups).toHaveCount(expectedCount)
+    for (const group of await groups.all()) {
+      const geometry = await group.evaluate((element) => {
+        const box = (candidate: Element | null) => {
+          if (candidate === null) return undefined
+          const rect = candidate.getBoundingClientRect()
+          return { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top }
+        }
+        const textarea = element.querySelector('textarea.prompt-field')
+        const heading = element.querySelector('.setting-group__heading')
+        const title = heading?.querySelector('h2') ?? null
+        const reset = heading?.querySelector('.prompt-reset-button') ?? null
+        return {
+          shell: box(element),
+          heading: box(heading),
+          title: box(title),
+          reset: box(reset),
+          textarea: box(textarea),
+          promptShells: element.querySelectorAll('.prompt-field-shell').length,
+          promptLabels: element.querySelectorAll('.prompt-field-label').length,
+          minHeight: textarea === null ? '' : getComputedStyle(textarea).minHeight,
+          height: textarea === null ? 0 : textarea.getBoundingClientRect().height,
+          textareaScrollWidth: textarea === null ? 0 : textarea.scrollWidth,
+          textareaClientWidth: textarea === null ? 0 : textarea.clientWidth,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+        }
+      })
+      if (geometry.shell === undefined || geometry.heading === undefined || geometry.title === undefined || geometry.reset === undefined || geometry.textarea === undefined) {
+        throw new Error('prompt field geometry is missing')
+      }
+      expect(geometry.promptShells).toBe(0)
+      expect(geometry.promptLabels).toBe(0)
+      expect(geometry.title.right).toBeLessThanOrEqual(geometry.reset.left + 0.5)
+      expect(geometry.reset.left).toBeGreaterThanOrEqual(geometry.heading.left)
+      expect(geometry.reset.right).toBeLessThanOrEqual(geometry.heading.right + 0.5)
+      expect(geometry.textarea.top).toBeGreaterThanOrEqual(geometry.heading.bottom - 0.5)
+      expect(geometry.textarea.left).toBeGreaterThanOrEqual(geometry.shell.left)
+      expect(geometry.textarea.right).toBeLessThanOrEqual(geometry.shell.right + 0.5)
+      expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1)
+      expect(geometry.textareaScrollWidth).toBeLessThanOrEqual(geometry.textareaClientWidth + 1)
+      expect(geometry.minHeight).toBe('150px')
+      expect(geometry.height).toBe(150)
+    }
+  }
 })
 
 test('settings navigation indicator pops in from the left as a contained solid arc', async ({ page }) => {

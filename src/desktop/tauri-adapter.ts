@@ -5,6 +5,7 @@ import type { AppSettings, ProviderSettings, SettingsExport } from '../features/
 import type {
   DesktopPort,
   PermissionStatus,
+  ProviderKeyChanges,
   PromptOptimizationRequest,
   PromptOptimizationResult,
   SettingsSaveResult,
@@ -43,6 +44,8 @@ export class TauriDesktopPort implements DesktopPort {
   exportSettings = (includeSecrets: boolean) => invoke<boolean>('settings_export', { includeSecrets })
   importSettings = () => invoke<SettingsExport | null>('settings_import')
   pickDirectory = () => invoke<string | null>('directory_pick')
+  saveProviderKeyChanges = (changes: ProviderKeyChanges) =>
+    command('credentials_set_provider_keys_batch', { changes })
   setProviderKeys = (providerId: string, keys: string[]) =>
     command('credentials_set_provider_keys', { providerId, keys })
   providerKeyCount = (providerId: string) => invoke<number>('credentials_provider_key_count', { providerId })

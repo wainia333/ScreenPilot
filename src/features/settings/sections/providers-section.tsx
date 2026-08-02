@@ -1,6 +1,7 @@
 import { Check, Download, Plus, Trash2, Wifi } from 'lucide-react'
 import { useState } from 'react'
 import { useDesktop } from '../../../desktop/use-desktop'
+import type { ProviderKeyChanges } from '../../../desktop/contract'
 import { SettingGroup, TextField } from '../../../shared/ui/controls'
 import type { AppSettings, ProviderSettings } from '../types'
 
@@ -18,15 +19,29 @@ function newProvider(): ProviderSettings {
   }
 }
 
+function redactKeyError(message: string, keys: string[]): string {
+  return keys.reduce(
+    (current, key) => key.length === 0 ? current : current.split(key).join('***'),
+    message,
+  )
+}
+
 export function ProvidersSection({
   settings,
   onChange,
+  keyDrafts,
+  onKeyDraftChange,
+  onKeyDraftRemove,
+  saving,
 }: {
   settings: AppSettings
   onChange: SettingsUpdater
+  keyDrafts: ProviderKeyChanges
+  onKeyDraftChange: (providerId: string, keys: string[]) => void
+  onKeyDraftRemove: (providerId: string) => void
+  saving: boolean
 }) {
   const desktop = useDesktop()
-  const [keys, setKeys] = useState<Record<string, string>>({})
   const [manualModels, setManualModels] = useState<Record<string, string>>({})
   const [statuses, setStatuses] = useState<Record<string, ProviderStatus>>({})
   const updateProvider = (
@@ -43,10 +58,7 @@ export function ProvidersSection({
   const setStatus = (id: string, status: ProviderStatus) =>
     setStatuses((current) => ({ ...current, [id]: status }))
   const keyLines = (id: string) =>
-    (keys[id] ?? '')
-      .split(/\r?\n/u)
-      .map((key) => key.trim())
-      .filter(Boolean)
+    keyDrafts[id] ?? []
   return (
     <>
       <div className="section-heading">
@@ -57,6 +69,7 @@ export function ProvidersSection({
         <button
           type="button"
           className="secondary-button"
+          disabled={saving}
           onClick={() => onChange((current) => ({
             ...current,
             providers: [...current.providers, newProvider()],
@@ -82,6 +95,7 @@ export function ProvidersSection({
                 <TextField
                   value={provider.name}
                   label="提供商名称"
+                  disabled={saving}
                   onChange={(name) => updateProvider(provider.id, { name })}
                 />
               </label>
@@ -91,6 +105,7 @@ export function ProvidersSection({
                   value={provider.baseUrl}
                   label="提供商 Base URL"
                   type="url"
+                  disabled={saving}
                   onChange={(baseUrl) => updateProvider(provider.id, { baseUrl })}
                 />
               </label>
@@ -98,11 +113,18 @@ export function ProvidersSection({
                 <span>API Keys</span>
                 <textarea
                   className="key-field"
-                  value={keys[provider.id] ?? ''}
+                  value={(keyDrafts[provider.id] ?? []).join('\n')}
                   aria-label={`${provider.name} API Keys`}
                   placeholder={provider.keyCount > 0 ? `已安全保存 ${provider.keyCount} 个密钥` : '每行一个密钥'}
+                  disabled={saving}
                   onChange={(event) =>
-                    setKeys((current) => ({ ...current, [provider.id]: event.target.value }))
+                    onKeyDraftChange(
+                      provider.id,
+                      event.target.value
+                        .split(/\r?\n/u)
+                        .map((key) => key.trim())
+                        .filter(Boolean),
+                    )
                   }
                 />
               </label>
@@ -110,19 +132,7 @@ export function ProvidersSection({
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={async () => {
-                    const values = keyLines(provider.id)
-                    await desktop.setProviderKeys(provider.id, values)
-                    updateProvider(provider.id, { keyCount: values.length })
-                    setKeys((current) => ({ ...current, [provider.id]: '' }))
-                    setStatus(provider.id, { tone: 'success', message: `已保存 ${values.length} 个密钥` })
-                  }}
-                >
-                  <Check size={14} />保存密钥
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
+                  disabled={saving}
                   onClick={async () => {
                     try {
                       const models = await desktop.fetchProviderModels(provider)
@@ -141,11 +151,15 @@ export function ProvidersSection({
                 <button
                   type="button"
                   className="secondary-button"
+                  disabled={saving}
                   onClick={async () => {
-                    const result = await desktop.testProvider(provider, keyLines(provider.id))
+                    const values = keyLines(provider.id)
+                    const result = await desktop.testProvider(provider, values)
                     setStatus(provider.id, {
                       tone: result.success ? 'success' : 'error',
-                      message: result.success ? '连接成功' : (result.error ?? '连接失败'),
+                      message: result.success
+                        ? '连接成功'
+                        : redactKeyError(result.error ?? '连接失败', values),
                     })
                   }}
                 >
@@ -155,8 +169,9 @@ export function ProvidersSection({
                   type="button"
                   className="icon-button danger-button"
                   aria-label={`删除 ${provider.name}`}
-                  onClick={async () => {
-                    await desktop.deleteProviderKeys(provider.id)
+                  disabled={saving}
+                  onClick={() => {
+                    onKeyDraftRemove(provider.id)
                     onChange((current) => ({
                       ...current,
                       providers: current.providers.filter((item) => item.id !== provider.id),
@@ -176,6 +191,7 @@ export function ProvidersSection({
                   value={manualModels[provider.id] ?? ''}
                   label={`${provider.name} 手动模型名`}
                   placeholder="手动添加模型，例如 local:vision"
+                  disabled={saving}
                   onChange={(value) =>
                     setManualModels((current) => ({ ...current, [provider.id]: value }))
                   }
@@ -183,6 +199,7 @@ export function ProvidersSection({
                 <button
                   type="button"
                   className="secondary-button"
+                  disabled={saving}
                   onClick={() => {
                     const model = (manualModels[provider.id] ?? '').trim()
                     if (model.length === 0) return
@@ -204,6 +221,7 @@ export function ProvidersSection({
                       data-enabled={enabled}
                       aria-pressed={enabled}
                       key={model}
+                      disabled={saving}
                       onClick={() =>
                         updateProvider(provider.id, {
                           enabledModels: enabled

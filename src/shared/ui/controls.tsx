@@ -1,9 +1,12 @@
 import type { ReactNode } from 'react'
 
-export function SettingGroup({ title, children }: { title: string; children: ReactNode }) {
+export function SettingGroup({ title, titleAction, children }: { title: string; titleAction?: ReactNode; children: ReactNode }) {
   return (
     <section className="setting-group">
-      <h2>{title}</h2>
+      <div className="setting-group__heading">
+        <h2>{title}</h2>
+        {titleAction}
+      </div>
       <div className="setting-group__body">{children}</div>
     </section>
   )
@@ -87,12 +90,14 @@ export function TextField({
   label,
   placeholder,
   type = 'text',
+  disabled = false,
   onChange,
 }: {
   value: string
   label: string
   placeholder?: string
   type?: 'text' | 'password' | 'url'
+  disabled?: boolean
   onChange: (value: string) => void
 }) {
   return (
@@ -100,6 +105,7 @@ export function TextField({
       className="text-field"
       value={value}
       type={type}
+      disabled={disabled}
       aria-label={label}
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}
@@ -131,6 +137,30 @@ export function SelectField<T extends string>({
         </option>
       ))}
     </select>
+  )
+}
+
+export function PromptResetButton({
+  value,
+  label,
+  defaultValue,
+  onChange,
+}: {
+  value: string
+  label: string
+  defaultValue: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="prompt-reset-button"
+      aria-label={`恢复默认：${label}`}
+      disabled={value === defaultValue}
+      onClick={() => onChange(defaultValue)}
+    >
+      恢复默认
+    </button>
   )
 }
 

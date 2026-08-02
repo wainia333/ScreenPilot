@@ -1,7 +1,8 @@
-import { PromptField, SelectField, SettingGroup, SettingRow } from '../../../shared/ui/controls'
+import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings } from '../types'
+import { DEFAULT_SETTINGS } from '../defaults'
 
 export function TranslationSection({
   settings,
@@ -46,7 +47,17 @@ export function TranslationSection({
           />
         </SettingRow>
       </SettingGroup>
-      <SettingGroup title="大模型翻译系统提示词">
+      <SettingGroup
+        title="大模型翻译系统提示词"
+        titleAction={
+          <PromptResetButton
+            value={settings.translation.prompt}
+            label="大模型翻译系统提示词"
+            defaultValue={DEFAULT_SETTINGS.translation.prompt}
+            onChange={(prompt) => update({ prompt })}
+          />
+        }
+      >
         <PromptField
           value={settings.translation.prompt}
           label="大模型翻译系统提示词"
