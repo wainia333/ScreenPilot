@@ -13,6 +13,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{
     AppHandle, Emitter, LogicalUnit, Manager, PixelUnit, State, WebviewUrl, WebviewWindow,
@@ -71,19 +72,61 @@ pub struct PermissionStatus {
 
 const VISION_READY_BAR_HEIGHT: f64 = 56.0;
 const VISION_FLOATING_GAP: f64 = 8.0;
-const VISION_ANSWER_MIN_HEIGHT: f64 = 180.0;
-const VISION_CHAT_MIN_HEIGHT: f64 =
-    VISION_READY_BAR_HEIGHT + VISION_FLOATING_GAP + VISION_ANSWER_MIN_HEIGHT;
+const VISION_DIALOG_MIN_HEIGHT: f64 = 220.0;
+const VISION_DIALOG_MAX_HEIGHT: f64 = 480.0;
+const VISION_DIALOG_VIEWPORT_RATIO: f64 = 0.45;
+// The frosted dialog starts two logical pixels below READY_BAR_HEIGHT + GAP
+// because the bar's painted frame contributes its edge. The vendor prompt
+// observer does not include those pixels when it reports the requested native
+// height. Reserve them in the native minimum and treat the same delta as
+// layout feedback rather than a user resize.
+const VISION_DIALOG_FRAME_COMPENSATION: f64 = 2.0;
+static VISION_FLOATING_RESIZABLE: AtomicBool = AtomicBool::new(false);
+
+fn vision_dialog_height(viewport_height: f64) -> f64 {
+    ((viewport_height * VISION_DIALOG_VIEWPORT_RATIO)
+        .clamp(VISION_DIALOG_MIN_HEIGHT, VISION_DIALOG_MAX_HEIGHT)
+        .round()
+        * 2.0
+        / 3.0)
+        .round()
+}
+
+fn vision_dialog_minimum_height(initial_height: f64) -> f64 {
+    initial_height
+}
+
+fn vision_chat_frame_height(dialog_height: f64) -> f64 {
+    VISION_READY_BAR_HEIGHT + VISION_FLOATING_GAP + dialog_height + VISION_DIALOG_FRAME_COMPENSATION
+}
+
+fn vision_monitor_logical_height(window: &WebviewWindow) -> f64 {
+    window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.size().height as f64 / monitor.scale_factor())
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .unwrap_or(800.0)
+}
+
+fn vision_chat_initial_height(window: &WebviewWindow) -> f64 {
+    vision_chat_frame_height(vision_dialog_height(vision_monitor_logical_height(window)))
+}
+
+fn vision_chat_min_height(window: &WebviewWindow) -> f64 {
+    let dialog_height = vision_dialog_height(vision_monitor_logical_height(window));
+    vision_chat_frame_height(vision_dialog_minimum_height(dialog_height))
+}
 
 fn set_vision_floating_size_constraints(
     window: &WebviewWindow,
-    minimum_answer_height: bool,
+    minimum_height: Option<f64>,
 ) -> Result<(), String> {
     window
         .set_size_constraints(WindowSizeConstraints {
             min_width: None,
-            min_height: minimum_answer_height
-                .then(|| PixelUnit::new(LogicalUnit::new(VISION_CHAT_MIN_HEIGHT))),
+            min_height: minimum_height.map(|height| PixelUnit::new(LogicalUnit::new(height))),
             max_width: None,
             max_height: None,
         })
@@ -235,6 +278,7 @@ fn request_native_freeze_close() {
 fn request_native_freeze_close() {}
 
 pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
+    VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     let state = app.state::<AppState>();
     let existing_vision_visible = app
         .get_webview_window("vision")
@@ -260,7 +304,7 @@ pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> 
         window
             .set_resizable(false)
             .map_err(|error| error.to_string())?;
-        set_vision_floating_size_constraints(&window, false)?;
+        set_vision_floating_size_constraints(&window, None)?;
         window
             .set_ignore_cursor_events(false)
             .map_err(|error| error.to_string())?;
@@ -535,6 +579,7 @@ pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
 }
 
 pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
+    VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     let mut failures = Vec::new();
     close_native_freeze(app);
     if let Some(window) = app.get_webview_window("vision") {
@@ -550,7 +595,7 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
         if let Err(error) = window.set_resizable(false) {
             failures.push(error.to_string());
         }
-        if let Err(error) = set_vision_floating_size_constraints(&window, false) {
+        if let Err(error) = set_vision_floating_size_constraints(&window, None) {
             failures.push(error);
         }
     }
@@ -576,9 +621,17 @@ fn apply_floating_rect(window: &WebviewWindow, rect: &FloatingRect) -> Result<()
             let scale = window.scale_factor().unwrap_or(1.0);
             let width = (rect.width * scale).round() as i32;
             let height = (rect.height * scale).round() as i32;
+            let feedback_tolerance =
+                (VISION_DIALOG_FRAME_COMPENSATION * scale).ceil().max(1.0) as i32;
             if rect.x.is_none() && rect.y.is_none() {
                 if let Ok(current) = window.inner_size() {
-                    if floating_size_matches(current.width, current.height, width, height) {
+                    if floating_size_matches(
+                        current.width,
+                        current.height,
+                        width,
+                        height,
+                        feedback_tolerance,
+                    ) {
                         return Ok(());
                     }
                 }
@@ -596,8 +649,8 @@ fn apply_floating_rect(window: &WebviewWindow, rect: &FloatingRect) -> Result<()
                 if rect.x.is_none() && rect.y.is_none() {
                     let mut current = windows::Win32::Foundation::RECT::default();
                     if GetWindowRect(hwnd, &mut current).is_ok()
-                        && (current.right - current.left - width).abs() <= 2
-                        && (current.bottom - current.top - height).abs() <= 2
+                        && (current.right - current.left - width).abs() <= feedback_tolerance
+                        && (current.bottom - current.top - height).abs() <= feedback_tolerance
                     {
                         flags |= SWP_NOSIZE;
                     }
@@ -658,9 +711,16 @@ fn floating_height_for_stage(height: f64, screenshot_translation: bool, position
     height.min(if positioned { 224.0 } else { TRANSLATOR_HEIGHT })
 }
 
-fn floating_size_matches(current_width: u32, current_height: u32, width: i32, height: i32) -> bool {
-    (i64::from(current_width) - i64::from(width)).abs() <= 1
-        && (i64::from(current_height) - i64::from(height)).abs() <= 1
+fn floating_size_matches(
+    current_width: u32,
+    current_height: u32,
+    width: i32,
+    height: i32,
+    tolerance: i32,
+) -> bool {
+    let tolerance = i64::from(tolerance.max(1));
+    (i64::from(current_width) - i64::from(width)).abs() <= tolerance
+        && (i64::from(current_height) - i64::from(height)).abs() <= tolerance
 }
 
 fn validate_floating_fly_rect(rect: &FloatingFlyRect) -> Result<(), String> {
@@ -778,28 +838,93 @@ fn apply_floating_fly_rect(window: &WebviewWindow, rect: &FloatingFlyRect) -> Re
     apply_floating_rect(window, &final_rect)
 }
 
+fn should_defer_floating_resize(
+    native_sizing: bool,
+    already_resizable: bool,
+    resizable: bool,
+    positioned: bool,
+) -> bool {
+    native_sizing || (already_resizable && resizable && !positioned)
+}
+
+fn floating_height_for_initial(height: f64, initial_height: Option<f64>) -> f64 {
+    initial_height.unwrap_or(height)
+}
+
+#[cfg(target_os = "windows")]
+fn native_window_is_sizing(window: &WebviewWindow) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GUI_INMOVESIZE,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    if thread_id == 0 {
+        return false;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        GetGUIThreadInfo(thread_id, &mut info).is_ok()
+            && info.flags.contains(GUI_INMOVESIZE)
+            && info.hwndMoveSize == hwnd
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_window_is_sizing(_window: &WebviewWindow) -> bool {
+    false
+}
+
 #[tauri::command]
 pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("vision") else {
+        close_native_freeze(&app);
+        return Ok(());
+    };
+    let screenshot_translation = window
+        .url()
+        .map_err(|error| error.to_string())?
+        .fragment()
+        .is_some_and(|fragment| fragment.contains("mode=translate"));
+    let positioned = rect.x.is_some() && rect.y.is_some();
+    let mut rect = FloatingRect {
+        height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
+        ..rect
+    };
+    let resizable = vision_floating_resizable(screenshot_translation, rect.height);
+    let already_resizable = VISION_FLOATING_RESIZABLE.load(Ordering::Acquire)
+        || window.is_resizable().map_err(|error| error.to_string())?;
+    if should_defer_floating_resize(
+        native_window_is_sizing(&window),
+        already_resizable,
+        resizable,
+        positioned,
+    ) {
+        return Ok(());
+    }
     close_native_freeze(&app);
-    if let Some(window) = app.get_webview_window("vision") {
-        let screenshot_translation = window
-            .url()
-            .map_err(|error| error.to_string())?
-            .fragment()
-            .is_some_and(|fragment| fragment.contains("mode=translate"));
-        let positioned = rect.x.is_some() && rect.y.is_some();
-        let rect = FloatingRect {
-            height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
-            ..rect
-        };
-        let resizable = vision_floating_resizable(screenshot_translation, rect.height);
+    let minimum_height = resizable.then(|| vision_chat_min_height(&window));
+    let initial_height = resizable.then(|| vision_chat_initial_height(&window));
+    if resizable && !already_resizable {
+        rect.height = floating_height_for_initial(rect.height, initial_height);
+    }
+    let resizable_changed = already_resizable != resizable;
+    if resizable_changed {
         window
             .set_resizable(resizable)
             .map_err(|error| error.to_string())?;
-        set_vision_floating_size_constraints(&window, resizable)?;
-        apply_floating_window_chrome(&window);
-        apply_floating_rect(&window, &rect)?;
     }
+    if resizable_changed {
+        set_vision_floating_size_constraints(&window, minimum_height)?;
+    }
+    VISION_FLOATING_RESIZABLE.store(resizable, Ordering::Release);
+    apply_floating_window_chrome(&window);
+    apply_floating_rect(&window, &rect)?;
     Ok(())
 }
 
@@ -1672,8 +1797,17 @@ mod tests {
     }
 
     #[test]
-    fn vision_chat_minimum_size_preserves_the_answer_surface() {
-        assert_eq!(VISION_CHAT_MIN_HEIGHT, 244.0);
+    fn vision_dialog_height_matches_the_frontend_answer_metrics() {
+        assert_eq!(vision_dialog_height(400.0), 147.0);
+        assert_eq!(vision_dialog_height(720.0), 216.0);
+        assert_eq!(vision_dialog_height(1440.0), 320.0);
+        assert_eq!(
+            VISION_READY_BAR_HEIGHT
+                + VISION_FLOATING_GAP
+                + vision_dialog_height(720.0)
+                + VISION_DIALOG_FRAME_COMPENSATION,
+            282.0
+        );
     }
 
     #[test]
@@ -1736,10 +1870,32 @@ mod tests {
 
     #[test]
     fn skips_native_resize_when_the_webview_already_matches() {
-        assert!(floating_size_matches(480, 320, 480, 320));
-        assert!(floating_size_matches(480, 320, 481, 319));
-        assert!(!floating_size_matches(480, 320, 482, 320));
-        assert!(!floating_size_matches(480, 320, 480, 318));
+        assert!(floating_size_matches(480, 320, 480, 320, 2));
+        assert!(floating_size_matches(480, 320, 482, 318, 2));
+        assert!(!floating_size_matches(480, 320, 483, 320, 2));
+        assert!(!floating_size_matches(480, 320, 480, 317, 2));
+    }
+
+    #[test]
+    fn defers_programmatic_resize_during_native_edge_drag() {
+        assert!(should_defer_floating_resize(true, false, true, false));
+        assert!(should_defer_floating_resize(false, true, true, false));
+        assert!(!should_defer_floating_resize(false, false, true, false));
+        assert!(!should_defer_floating_resize(false, true, true, true));
+        assert!(!should_defer_floating_resize(false, true, false, false));
+    }
+
+    #[test]
+    fn uses_the_first_resizable_rect_initial_height() {
+        assert_eq!(floating_height_for_initial(388.0, Some(282.0)), 282.0);
+        assert_eq!(floating_height_for_initial(420.0, Some(282.0)), 282.0);
+        assert_eq!(floating_height_for_initial(278.0, None), 278.0);
+    }
+
+    #[test]
+    fn uses_the_reduced_dialog_height_for_initial_and_followup_native_sizes() {
+        assert_eq!(vision_dialog_minimum_height(216.0), 216.0);
+        assert_eq!(vision_chat_frame_height(216.0), 282.0);
     }
 
     #[cfg(target_os = "windows")]

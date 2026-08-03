@@ -25,6 +25,8 @@ export class FakeDesktopPort implements DesktopPort {
   private settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
   private readonly keys = new Map<string, string[]>()
   readonly providerKeySaveCalls: ProviderKeyChanges[] = []
+  readonly providerModelFetchCalls: { provider: ProviderSettings; keys?: string[] }[] = []
+  readonly providerTestCalls: { provider: ProviderSettings; keys?: string[] }[] = []
   providerKeySaveError: string | null = null
   private readonly listeners: FakeListeners = {
     route: new Set(),
@@ -93,7 +95,11 @@ export class FakeDesktopPort implements DesktopPort {
     return Promise.resolve()
   }
 
-  fetchProviderModels(provider: ProviderSettings): Promise<string[]> {
+  fetchProviderModels(provider: ProviderSettings, keys?: string[]): Promise<string[]> {
+    this.providerModelFetchCalls.push({
+      provider: structuredClone(provider),
+      ...(keys === undefined ? {} : { keys: [...keys] }),
+    })
     return Promise.resolve(
       provider.availableModels.length > 0
         ? [...provider.availableModels]
@@ -101,9 +107,16 @@ export class FakeDesktopPort implements DesktopPort {
     )
   }
 
-  testProvider(provider: ProviderSettings, keys: string[]): Promise<{ success: boolean; error: string | null }> {
+  testProvider(provider: ProviderSettings, keys?: string[]): Promise<{ success: boolean; error: string | null }> {
+    this.providerTestCalls.push({
+      provider: structuredClone(provider),
+      ...(keys === undefined ? {} : { keys: [...keys] }),
+    })
+    const primaryKey = keys === undefined
+      ? this.keys.get(provider.id)?.find((key) => key.trim().length > 0) ?? ''
+      : keys.find((key) => key.trim().length > 0) ?? ''
     return Promise.resolve(
-      provider.baseUrl.length > 0 && keys.some(Boolean)
+      provider.baseUrl.length > 0 && primaryKey.length > 0
         ? { success: true, error: null }
         : { success: false, error: 'Provider URL and primary key are required' },
     )

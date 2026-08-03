@@ -129,4 +129,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "Provider URL must use HTTPS");
     }
+
+    #[tokio::test]
+    async fn connection_errors_do_not_include_the_primary_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string("primary-secret must not appear in the error"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = test_connection(&provider(format!("{}/v1", server.uri())), "primary-secret")
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Provider returned HTTP 401");
+        assert!(!error.contains("primary-secret"));
+    }
 }

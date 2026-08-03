@@ -9,8 +9,9 @@ export async function installVisionTauriMock(
   ocrSource = 'ScreenPilot Visual Test\n可见内容识别 · English OCR · E = mc²',
   keepFullscreenAfterCapture = true,
   translatedText = 'ScreenPilot 视觉测试\n可见内容识别、英文 OCR 与公式 E = mc²',
+  visionStreamDelayMs = 0,
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
@@ -23,6 +24,9 @@ export async function installVisionTauriMock(
       answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
       floatingRect: null as { width: number; height: number } | null,
       floatingRects: [] as { width: number; height: number }[],
+      floatingAppliedRects: [] as { width: number; height: number }[],
+      floatingDeferredRects: [] as { width: number; height: number }[],
+      floatingResizable: false,
     }
     const settings = {
       hotkey: 'F2',
@@ -167,6 +171,14 @@ export async function installVisionTauriMock(
           kind: 'answer',
           delta: visionTestState.answerText,
         })
+        if (streamDelayMs > 0) {
+          return new Promise<{ success: boolean }>((resolve) => {
+            window.setTimeout(() => {
+              emit('vision-stream', { imageId, kind: 'answer', delta: '', done: true, reason: 'done' })
+              resolve({ success: true })
+            }, streamDelayMs)
+          })
+        }
         emit('vision-stream', { imageId, kind: 'answer', delta: '', done: true, reason: 'done' })
         return { success: true }
       }
@@ -197,6 +209,11 @@ export async function installVisionTauriMock(
       if (command === 'optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
       if (command === 'synthesize_speech') return { success: true, data: '' }
       if (command === 'vision_set_hit_region') return true
+      if (command === 'vision_close') {
+        visionTestState.floatingRect = null
+        visionTestState.floatingResizable = false
+        return null
+      }
       if (command === 'vision_set_floating') {
         const rect = args.rect as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | undefined
         const screenshotTranslation = location.hash.includes('mode=translate')
@@ -204,14 +221,36 @@ export async function installVisionTauriMock(
           && Number.isFinite(Number(rect?.x))
           && Number.isFinite(Number(rect?.y))
         const requestedHeight = Number(rect?.height)
+        const referenceViewportHeight = Math.max(innerHeight, screen.height, screen.availHeight)
+        const dialogHeight = Math.round(
+          Math.round(Math.max(220, Math.min(480, referenceViewportHeight * 0.45))) * 2 / 3,
+        )
+        const chatInitialHeight = 56 + 8 + dialogHeight + 2
         const floatingRect = {
           width: Number(rect?.width),
           height: screenshotTranslation
             ? Math.min(requestedHeight, positionedTranslation ? 224 : 400)
             : requestedHeight,
         }
-        visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)
+        const positioned = Number.isFinite(Number(rect?.x)) && Number.isFinite(Number(rect?.y))
+        const enteringResizable = !screenshotTranslation && requestedHeight > 96 && !visionTestState.floatingResizable
+        const deferred = !screenshotTranslation
+          && requestedHeight > 96
+          && visionTestState.floatingResizable
+          && !positioned
+        if (deferred) {
+          visionTestState.floatingDeferredRects.push(floatingRect)
+          return null
+        }
+        if (enteringResizable) {
+          floatingRect.height = chatInitialHeight
+          visionTestState.floatingResizable = true
+        } else if (!screenshotTranslation && requestedHeight <= 96) {
+          visionTestState.floatingResizable = false
+        }
+        visionTestState.floatingRect = floatingRect
+        visionTestState.floatingAppliedRects.push(floatingRect)
         return null
       }
       if (command === 'vision_fly_floating') {
@@ -223,6 +262,7 @@ export async function installVisionTauriMock(
         }
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)
+        visionTestState.floatingAppliedRects.push(floatingRect)
         return null
       }
       if (command.startsWith('vision_')) return null
@@ -252,5 +292,6 @@ export async function installVisionTauriMock(
     sourceText: ocrSource,
     keepFullscreen: keepFullscreenAfterCapture,
     translatedResult: translatedText,
+    streamDelayMs: visionStreamDelayMs,
   })
 }

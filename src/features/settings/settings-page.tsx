@@ -406,8 +406,8 @@ export function SettingsPage() {
         </footer>
       </section>
       {dialog === 'close' ? (
-        <div className="dialog-backdrop" role="presentation">
-          <div className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
+        <div className="dialog-backdrop unsaved-close-backdrop" role="presentation">
+          <div className="decision-dialog unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
             <h2 id="close-dialog-title">保存更改后关闭？</h2>
             <p>未保存的设置不会生效。</p>
             <div>

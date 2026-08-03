@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import type { AppSettings, ProviderSettings, SettingsExport } from '../features/settings/types'
+import { providerCommandArgs } from './provider-command-args'
 import type {
   DesktopPort,
   PermissionStatus,
@@ -50,9 +51,10 @@ export class TauriDesktopPort implements DesktopPort {
     command('credentials_set_provider_keys', { providerId, keys })
   providerKeyCount = (providerId: string) => invoke<number>('credentials_provider_key_count', { providerId })
   deleteProviderKeys = (providerId: string) => command('credentials_delete_provider_keys', { providerId })
-  fetchProviderModels = (provider: ProviderSettings) => invoke<string[]>('providers_fetch_models', { provider })
-  testProvider = (provider: ProviderSettings, keys: string[]) =>
-    invoke<{ success: boolean; error: string | null }>('providers_test', { provider, keys })
+  fetchProviderModels = (provider: ProviderSettings, keys?: string[]) =>
+    invoke<string[]>('providers_fetch_models', providerCommandArgs(provider, keys))
+  testProvider = (provider: ProviderSettings, keys?: string[]) =>
+    invoke<{ success: boolean; error: string | null }>('providers_test', providerCommandArgs(provider, keys))
   translate = (request: TranslationRequest) => invoke<TranslationResult>('translator_translate', { request })
   optimizePrompt = (request: PromptOptimizationRequest) =>
     invoke<PromptOptimizationResult>('optimizer_run', { request })

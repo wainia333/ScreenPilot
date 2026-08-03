@@ -4,6 +4,7 @@ import { useDesktop } from '../../../desktop/use-desktop'
 import type { ProviderKeyChanges } from '../../../desktop/contract'
 import { SettingGroup, TextField } from '../../../shared/ui/controls'
 import type { AppSettings, ProviderSettings } from '../types'
+import { primaryProviderKeyDraft } from '../provider-key-draft'
 
 type ProviderStatus = { tone: 'neutral' | 'success' | 'error'; message: string }
 type SettingsUpdater = (update: (current: AppSettings) => AppSettings) => void
@@ -57,10 +58,11 @@ export function ProvidersSection({
   }))
   const setStatus = (id: string, status: ProviderStatus) =>
     setStatuses((current) => ({ ...current, [id]: status }))
-  const keyLines = (id: string) =>
-    keyDrafts[id] ?? []
+  const hasDraftKeys = (id: string) => Object.prototype.hasOwnProperty.call(keyDrafts, id)
+  const draftKeys = (id: string) => hasDraftKeys(id) ? keyDrafts[id] : undefined
+  const keyLines = (id: string) => draftKeys(id) ?? []
   return (
-    <>
+    <div data-screenpilot-provider-settings="true">
       <div className="section-heading">
         <div>
           <h1>模型提供商</h1>
@@ -113,7 +115,7 @@ export function ProvidersSection({
                 <span>API Keys</span>
                 <textarea
                   className="key-field"
-                  value={(keyDrafts[provider.id] ?? []).join('\n')}
+                  value={keyLines(provider.id).join('\n')}
                   aria-label={`${provider.name} API Keys`}
                   placeholder={provider.keyCount > 0 ? `已安全保存 ${provider.keyCount} 个密钥` : '每行一个密钥'}
                   disabled={saving}
@@ -134,15 +136,20 @@ export function ProvidersSection({
                   className="secondary-button"
                   disabled={saving}
                   onClick={async () => {
+                    const values = draftKeys(provider.id)
+                    const override = primaryProviderKeyDraft(values)
                     try {
-                      const models = await desktop.fetchProviderModels(provider)
+                      const models = await desktop.fetchProviderModels(provider, override)
                       updateProvider(provider.id, (current) => ({
                         availableModels: models,
                         enabledModels: current.enabledModels.filter((model) => models.includes(model)),
                       }))
                       setStatus(provider.id, { tone: 'success', message: `获取到 ${models.length} 个模型` })
                     } catch (error) {
-                      setStatus(provider.id, { tone: 'error', message: String(error) })
+                      setStatus(provider.id, {
+                        tone: 'error',
+                        message: redactKeyError(String(error), values ?? []),
+                      })
                     }
                   }}
                 >
@@ -153,13 +160,13 @@ export function ProvidersSection({
                   className="secondary-button"
                   disabled={saving}
                   onClick={async () => {
-                    const values = keyLines(provider.id)
-                    const result = await desktop.testProvider(provider, values)
+                    const values = draftKeys(provider.id)
+                    const result = await desktop.testProvider(provider, primaryProviderKeyDraft(values))
                     setStatus(provider.id, {
                       tone: result.success ? 'success' : 'error',
                       message: result.success
                         ? '连接成功'
-                        : redactKeyError(result.error ?? '连接失败', values),
+                        : redactKeyError(result.error ?? '连接失败', values ?? []),
                     })
                   }}
                 >
@@ -240,6 +247,6 @@ export function ProvidersSection({
           </SettingGroup>
         )
       })}
-    </>
+    </div>
   )
 }

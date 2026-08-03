@@ -7,6 +7,7 @@ import { DEFAULT_SETTINGS } from './defaults'
 import type { AppSettings, ProviderSettings, SettingsExport } from './types'
 import type { SettingsSaveResult } from '../../desktop/contract'
 import { SettingsPage } from './settings-page'
+import { primaryProviderKeyDraft } from './provider-key-draft'
 
 class ClosingDesktop extends FakeDesktopPort {
   hides = 0
@@ -101,8 +102,9 @@ class ImportSettingsDesktop extends CountingSettingsDesktop {
 class DeferredProviderDesktop extends ClosingDesktop {
   resolveModels: ((models: string[]) => void) | null = null
 
-  override fetchProviderModels(provider: ProviderSettings): Promise<string[]> {
+  override fetchProviderModels(provider: ProviderSettings, keys?: string[]): Promise<string[]> {
     void provider
+    void keys
     return new Promise((resolve) => {
       this.resolveModels = resolve
     })
@@ -115,6 +117,12 @@ describe('SettingsPage', () => {
     localStorage.clear()
   })
 
+  it('normalizes provider draft overrides to one primary key while preserving tri-state', () => {
+    expect(primaryProviderKeyDraft(undefined)).toBeUndefined()
+    expect(primaryProviderKeyDraft([])).toEqual([])
+    expect(primaryProviderKeyDraft(['  ', ' draft-primary ', 'backup'])).toEqual(['draft-primary'])
+  })
+
   it('offers save, discard and continue choices before closing dirty settings', async () => {
     const desktop = new ClosingDesktop()
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
@@ -122,6 +130,8 @@ describe('SettingsPage', () => {
     fireEvent.click(await screen.findByRole('radio', { name: '深色' }))
     fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
     const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+    expect(dialog).toHaveClass('decision-dialog', 'unsaved-close-dialog')
+    expect(dialog.parentElement).toHaveClass('dialog-backdrop', 'unsaved-close-backdrop')
     expect(dialog).toHaveTextContent('保存并关闭')
     expect(dialog).toHaveTextContent('放弃更改')
     fireEvent.click(screen.getByRole('button', { name: '继续编辑' }))
@@ -129,6 +139,21 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
     fireEvent.click(screen.getByRole('button', { name: '放弃更改' }))
     expect(desktop.hides).toBe(1)
+  })
+
+  it('keeps the import confirmation on the base dialog presentation', async () => {
+    const desktop = new ImportSettingsDesktop(structuredClone(DEFAULT_SETTINGS))
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(await screen.findByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    fireEvent.click(screen.getByRole('button', { name: '导入配置' }))
+    await act(async () => Promise.resolve())
+    const dialog = screen.getByRole('dialog', { name: '覆盖当前未保存内容？' })
+    expect(dialog).toHaveClass('decision-dialog')
+    expect(dialog).not.toHaveClass('unsaved-close-dialog')
+    expect(dialog.parentElement).toHaveClass('dialog-backdrop')
+    expect(dialog.parentElement).not.toHaveClass('unsaved-close-backdrop')
   })
 
   it('keeps the save action in the lower-right footer', async () => {
@@ -580,6 +605,127 @@ describe('SettingsPage', () => {
     })
     expect(screen.getByRole('textbox', { name: '提供商名称' })).toHaveValue('Edited while fetching')
     expect(screen.getByRole('button', { name: 'model-a' })).toBeVisible()
+  })
+
+  it('passes the current draft URL and plaintext keys to model fetch and connection test', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '新增' }))
+    const url = screen.getByRole('textbox', { name: '提供商 Base URL' })
+    const keys = screen.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })
+    fireEvent.change(url, { target: { value: 'https://draft.example/v1/responses' } })
+    fireEvent.change(keys, { target: { value: ' draft-primary \n draft-backup ' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '拉取模型' }))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      await Promise.resolve()
+    })
+    expect(desktop.providerModelFetchCalls).toHaveLength(1)
+    expect(desktop.providerModelFetchCalls[0]?.provider.baseUrl).toBe('https://draft.example/v1/responses')
+    expect(desktop.providerModelFetchCalls[0]?.keys).toEqual(['draft-primary'])
+    expect(desktop.providerTestCalls).toHaveLength(1)
+    expect(desktop.providerTestCalls[0]?.provider.baseUrl).toBe('https://draft.example/v1/responses')
+    expect(desktop.providerTestCalls[0]?.keys).toEqual(['draft-primary'])
+    expect(screen.getByText('连接成功')).toBeVisible()
+  })
+
+  it('uses the persisted provider key when the API Keys field is untouched', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'saved-provider',
+        name: 'Saved Provider',
+        baseUrl: 'https://saved.example/v1',
+        keyCount: 1,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    await desktop.setProviderKeys('saved-provider', ['persisted-primary'])
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '拉取模型' }))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      await Promise.resolve()
+    })
+    expect(desktop.providerModelFetchCalls).toHaveLength(1)
+    expect(desktop.providerModelFetchCalls[0]?.provider.id).toBe('saved-provider')
+    expect(desktop.providerModelFetchCalls[0]?.keys).toBeUndefined()
+    expect(desktop.providerTestCalls).toHaveLength(1)
+    expect(desktop.providerTestCalls[0]?.provider.id).toBe('saved-provider')
+    expect(desktop.providerTestCalls[0]?.keys).toBeUndefined()
+    expect(screen.getByText('连接成功')).toBeVisible()
+  })
+
+  it('does not reuse a persisted key after the draft field is explicitly cleared', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'cleared-provider',
+        name: 'Cleared Provider',
+        baseUrl: 'https://cleared.example/v1',
+        keyCount: 1,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    await desktop.setProviderKeys('cleared-provider', ['persisted-primary'])
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    const keys = screen.getByRole('textbox', { name: 'Cleared Provider API Keys' })
+    fireEvent.change(keys, { target: { value: 'draft-primary' } })
+    fireEvent.change(keys, { target: { value: '' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      await Promise.resolve()
+    })
+    expect(desktop.providerTestCalls[0]?.provider.id).toBe('cleared-provider')
+    expect(desktop.providerTestCalls[0]?.keys).toEqual([])
+    const status = screen.getByText('Provider URL and primary key are required')
+    expect(status).toBeVisible()
+    expect(status).not.toHaveTextContent('persisted-primary')
+  })
+
+  it('uses an entered key instead of a persisted provider key', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'override-provider',
+        name: 'Override Provider',
+        baseUrl: 'https://override.example/v1',
+        keyCount: 1,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    await desktop.setProviderKeys('override-provider', ['persisted-primary'])
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Override Provider API Keys' }), {
+      target: { value: 'draft-primary' },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      await Promise.resolve()
+    })
+    expect(desktop.providerTestCalls[0]?.provider.id).toBe('override-provider')
+    expect(desktop.providerTestCalls[0]?.keys).toEqual(['draft-primary'])
+    expect(screen.getByText('连接成功')).toBeVisible()
   })
 
   it('saves multiple provider key drafts only through the global save action', async () => {

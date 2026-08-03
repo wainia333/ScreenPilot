@@ -235,26 +235,85 @@ pub fn credentials_delete_provider_keys(provider_id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub async fn providers_fetch_models(provider: ProviderSettings) -> Result<Vec<String>, String> {
-    let keys = CredentialVault::provider_keys(&provider.id)?;
-    provider_http::fetch_models(&provider, keys.first().map(String::as_str)).await
+pub async fn providers_fetch_models(
+    provider: ProviderSettings,
+    keys: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let primary_key = resolve_provider_primary_key(&provider.id, keys.as_deref())?;
+    provider_http::fetch_models(&provider, primary_key.as_deref())
+        .await
+        .map_err(|error| redact_provider_error(error, primary_key.as_deref()))
 }
 
 #[tauri::command]
 pub async fn providers_test(
     provider: ProviderSettings,
-    keys: Vec<String>,
+    keys: Option<Vec<String>>,
 ) -> ProviderConnectionResult {
-    match provider_http::test_connection(&provider, keys.first().map_or("", String::as_str)).await {
+    let primary_key = match resolve_provider_primary_key(&provider.id, keys.as_deref()) {
+        Ok(primary_key) => primary_key,
+        Err(error) => {
+            return ProviderConnectionResult {
+                success: false,
+                error: Some(error),
+            }
+        }
+    };
+    match provider_http::test_connection(&provider, primary_key.as_deref().unwrap_or("")).await {
         Ok(()) => ProviderConnectionResult {
             success: true,
             error: None,
         },
         Err(error) => ProviderConnectionResult {
             success: false,
-            error: Some(error),
+            error: Some(redact_provider_error(error, primary_key.as_deref())),
         },
     }
+}
+
+fn redact_provider_error(error: String, primary_key: Option<&str>) -> String {
+    match primary_key.filter(|key| !key.is_empty()) {
+        Some(key) => error.replace(key, "***"),
+        None => error,
+    }
+}
+
+fn first_non_empty_key(keys: &[String]) -> Option<String> {
+    keys.iter()
+        .map(|key| key.trim())
+        .find(|key| !key.is_empty())
+        .map(str::to_owned)
+}
+
+fn select_primary_provider_key(
+    draft_keys: Option<&[String]>,
+    persisted_keys: &[String],
+) -> Option<String> {
+    match draft_keys {
+        Some(draft_keys) => first_non_empty_key(draft_keys),
+        None => first_non_empty_key(persisted_keys),
+    }
+}
+
+fn resolve_provider_primary_key(
+    provider_id: &str,
+    draft_keys: Option<&[String]>,
+) -> Result<Option<String>, String> {
+    resolve_provider_primary_key_with(draft_keys, || CredentialVault::provider_keys(provider_id))
+}
+
+fn resolve_provider_primary_key_with<F>(
+    draft_keys: Option<&[String]>,
+    load_persisted: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Result<Vec<String>, String>,
+{
+    if let Some(draft_keys) = draft_keys {
+        return Ok(select_primary_provider_key(Some(draft_keys), &[]));
+    }
+    let persisted_keys = load_persisted()?;
+    Ok(select_primary_provider_key(None, &persisted_keys))
 }
 
 struct RuntimeSettingsEffects<'a> {
@@ -407,5 +466,47 @@ mod tests {
             &previous,
             &administrator_startup_change
         ));
+    }
+
+    #[test]
+    fn provider_key_selection_prefers_non_empty_draft_without_reading_persisted_values() {
+        let draft = vec!["  draft-primary  ".into(), "draft-backup".into()];
+        assert_eq!(
+            resolve_provider_primary_key_with(Some(&draft), || {
+                Err("vault must not be read".into())
+            })
+            .expect("draft override should short circuit vault access"),
+            Some("draft-primary".into())
+        );
+    }
+
+    #[test]
+    fn provider_key_selection_uses_persisted_primary_only_when_draft_is_untouched() {
+        let persisted = vec!["  persisted-primary  ".into(), "persisted-backup".into()];
+        assert_eq!(
+            resolve_provider_primary_key_with(None, || Ok(persisted))
+                .expect("persisted key lookup should succeed"),
+            Some("persisted-primary".into())
+        );
+    }
+
+    #[test]
+    fn provider_key_selection_keeps_explicit_empty_draft_empty() {
+        let draft = vec!["  ".into()];
+        let persisted = vec!["persisted-primary".into()];
+        assert_eq!(select_primary_provider_key(Some(&draft), &persisted), None);
+    }
+
+    #[test]
+    fn provider_errors_redact_the_resolved_primary_key() {
+        let error = redact_provider_error(
+            "request failed for draft-primary".into(),
+            Some("draft-primary"),
+        );
+        assert_eq!(error, "request failed for ***");
+        assert_eq!(
+            redact_provider_error("request failed".into(), None),
+            "request failed"
+        );
     }
 }

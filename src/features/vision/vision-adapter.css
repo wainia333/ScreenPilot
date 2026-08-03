@@ -4,6 +4,59 @@
   outline: none !important;
 }
 
+/* Vision's prompt-optimization preview is an editable result, not a form
+   control that needs a ring. The vendor textarea carries `outline-none`, but
+   the app-wide textarea:focus-visible rule has higher paint priority once the
+   adapter stylesheet is loaded. Keep this override on the adapter-marked
+   preview card only, and make the focused and unfocused border models match. */
+[data-screenpilot-vision-prompt-preview="true"] textarea,
+[data-screenpilot-vision-prompt-preview="true"] textarea:focus,
+[data-screenpilot-vision-prompt-preview="true"] textarea:focus-visible {
+  outline: none !important;
+  outline-width: 0 !important;
+  outline-offset: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+/* The prompt preview and the large-model answer use the same native floating
+   window resize path. Give the preview the answer frame's initial height;
+   once the webview is floating, the shared dialog rule below owns its height. */
+[data-screenpilot-vision-prompt-preview="true"] {
+  display: flex !important;
+  height: var(--screenpilot-dialog-initial-height) !important;
+  min-height: var(--screenpilot-dialog-initial-height) !important;
+  max-height: none !important;
+  flex-direction: column;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  scrollbar-gutter: stable;
+}
+
+/* Mirror the answer panel's column/scroll contract: the editor owns the
+   variable-height scroll port and the action row stays at the frame's bottom
+   as the user expands it. The vendor's inline textarea height is content-fit
+   only; the adapter intentionally makes it the flexible middle region. */
+[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) > textarea {
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+  flex: 1 1 auto;
+  overflow-y: auto !important;
+}
+
+[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) > :last-child {
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
 main[data-screenpilot-vision-adapter="true"] select:focus,
 main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   outline: none;
@@ -20,6 +73,48 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   opacity: 1 !important;
 }
 
+[data-screenpilot-answer-panel="true"] {
+  display: flex;
+  height: var(--screenpilot-dialog-initial-height) !important;
+  min-height: var(--screenpilot-dialog-initial-height) !important;
+  flex-direction: column;
+}
+
+[data-screenpilot-answer-scroll="true"] {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  height: auto !important;
+  padding-bottom: 0 !important;
+  overflow-y: auto;
+}
+
+[data-screenpilot-answer-actions="true"] {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  order: 999;
+  display: flex;
+  flex-shrink: 0;
+  align-self: stretch;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: auto;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  /* Keep the controls pinned without introducing a second visual frame at
+     the bottom of the answer card. The answer panel owns the frosted shell;
+     this adapter layer must remain completely transparent in both themes. */
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 [data-screenpilot-ready-prompt-panel="true"],
 [data-screenpilot-captured-prompt-panel="true"] {
   opacity: 1 !important;
@@ -30,11 +125,23 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%) !important;
 }
 
-[data-screenpilot-floating-answer-card="true"] {
-  height: var(--screenpilot-floating-result-height) !important;
+/* The OCR translation card is rendered by the vendor Vision component, so it
+   does not carry `.window-frosted` itself. Match that component's actual
+   light frame (98% -> 94% alpha gradient plus a 30px saturated blur) without
+   broadening the rule to Vision's own prompt/answer panels. */
+[data-screenpilot-ocr-card="true"] {
+  background: linear-gradient(180deg, rgb(255 255 255 / 98%) 0%, rgb(250 250 252 / 94%) 100%) !important;
+  -webkit-backdrop-filter: saturate(180%) blur(30px) !important;
+  backdrop-filter: saturate(180%) blur(30px) !important;
 }
 
-[data-screenpilot-floating-answer-card="true"] > .h-full {
+[data-screenpilot-floating-dialog-card="true"] {
+  height: var(--screenpilot-floating-dialog-height) !important;
+  min-height: var(--screenpilot-floating-dialog-min-height) !important;
+  max-height: none !important;
+}
+
+[data-screenpilot-floating-dialog-card="true"] > .h-full {
   height: 100% !important;
 }
 
@@ -215,6 +322,10 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   [data-screenpilot-window-frame="true"] {
     border-color: rgb(255 255 255 / 24%) !important;
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%) !important;
+  }
+
+  [data-screenpilot-ocr-card="true"] {
+    background: linear-gradient(180deg, rgb(32 32 35 / 94%) 0%, rgb(23 23 26 / 90%) 100%) !important;
   }
 
   [data-screenpilot-ocr-source="true"] {

@@ -10,8 +10,18 @@ async function expectAccessible(page: Page) {
 async function waitForVisionSelection(page: Page) {
   await expect.poll(async () => page.evaluate(() => (
     window as typeof window & { __SCREENPILOT_TEST__: { showCount: number } }
-  ).__SCREENPILOT_TEST__.showCount)).toBeGreaterThanOrEqual(2)
+  ).__SCREENPILOT_TEST__.showCount), { timeout: 20_000 }).toBeGreaterThanOrEqual(2)
   await expect(page.locator('main > div.fixed.inset-0.select-none')).toHaveCSS('cursor', 'crosshair')
+}
+
+async function expectSettledViewportBottom(card: Locator, targetBottom: number) {
+  await expect.poll(() => card.evaluate((element, target) => {
+    const rect = element.getBoundingClientRect()
+    const activeGeometryAnimation = element.getAnimations().some((animation) => (
+      animation.playState !== 'finished'
+    ))
+    return !activeGeometryAnimation && Math.round(rect.bottom) === target
+  }, targetBottom)).toBe(true)
 }
 
 async function expectEdgeSafeFrame(frame: Locator) {
@@ -26,6 +36,71 @@ async function expectEdgeSafeFrame(frame: Locator) {
   expect(style.borderStyle).toBe('solid')
   expect(style.borderWidth).toBe('1px')
   expect(style.boxShadow).toContain('inset')
+}
+
+async function frostedFrameStyle(frame: Locator) {
+  return frame.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return {
+      backgroundImage: computed.backgroundImage,
+      backdropFilter: computed.backdropFilter,
+    }
+  })
+}
+
+const VISION_FROSTED_TRANSPARENCY = {
+  backgroundImage: 'linear-gradient(rgba(255, 255, 255, 0.98) 0%, rgba(250, 250, 252, 0.94) 100%)',
+  backdropFilter: 'saturate(1.8) blur(30px)',
+}
+
+async function expectFrostedTransparency(frame: Locator) {
+  await expect.poll(() => frostedFrameStyle(frame)).toEqual(VISION_FROSTED_TRANSPARENCY)
+}
+
+async function transparentAnswerActionsStyle(frame: Locator) {
+  return frame.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return {
+      backgroundColor: computed.backgroundColor,
+      backgroundImage: computed.backgroundImage,
+      borderTopStyle: computed.borderTopStyle,
+      borderTopWidth: computed.borderTopWidth,
+      borderBottomStyle: computed.borderBottomStyle,
+      borderBottomWidth: computed.borderBottomWidth,
+      boxShadow: computed.boxShadow,
+      backdropFilter: computed.backdropFilter,
+    }
+  })
+}
+
+const TRANSPARENT_ANSWER_ACTIONS = {
+  backgroundColor: 'rgba(0, 0, 0, 0)',
+  backgroundImage: 'none',
+  borderTopStyle: 'none',
+  borderTopWidth: '0px',
+  borderBottomStyle: 'none',
+  borderBottomWidth: '0px',
+  boxShadow: 'none',
+  backdropFilter: 'none',
+}
+
+async function expectTransparentAnswerActions(frame: Locator) {
+  await expect.poll(() => transparentAnswerActionsStyle(frame)).toEqual(TRANSPARENT_ANSWER_ACTIONS)
+}
+
+async function expectAnswerActionsLeftAligned(panel: Locator) {
+  await expect.poll(async () => panel.evaluate((element) => {
+    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
+    const firstButton = actions?.querySelector<HTMLElement>(':scope > button')
+    if (actions === null || firstButton === null || firstButton === undefined) return false
+    const panelRect = element.getBoundingClientRect()
+    const actionsRect = actions.getBoundingClientRect()
+    const buttonRect = firstButton.getBoundingClientRect()
+    const buttonAtActionsStart = Math.abs(buttonRect.left - actionsRect.left) <= 1
+    const nearPanelLeft = buttonRect.left >= panelRect.left - 1
+      && buttonRect.left - panelRect.left <= 20
+    return buttonAtActionsStart && nearPanelLeft
+  })).toBe(true)
 }
 
 async function expectHistoryCountBadge(button: Locator) {
@@ -106,6 +181,35 @@ async function expectNeutralSelectFocus(select: Locator) {
   expect(`${style.borderColor} ${style.boxShadow}`).not.toMatch(
     /rgb(?:a)?\(\s*(?:177\s*,\s*60\s*,\s*56|185\s*,\s*86\s*,\s*61|223\s*,\s*128\s*,\s*101|239\s*,\s*127\s*,\s*121)/u,
   )
+}
+
+const RED_FOCUS_PAINT = /rgb(?:a)?\(\s*(?:177\s*,\s*60\s*,\s*56|185\s*,\s*86\s*,\s*61|223\s*,\s*128\s*,\s*101|239\s*,\s*127\s*,\s*121)/u
+
+async function expectNoRedFocusPaint(control: Locator) {
+  const style = await control.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return {
+      outline: computed.outline,
+      border: computed.border,
+      boxShadow: computed.boxShadow,
+    }
+  })
+  expect(`${style.outline} ${style.border} ${style.boxShadow}`).not.toMatch(RED_FOCUS_PAINT)
+  return style
+}
+
+async function focusPaintStyle(control: Locator) {
+  return control.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return {
+      outlineStyle: computed.outlineStyle,
+      outlineWidth: computed.outlineWidth,
+      outlineColor: computed.outlineColor,
+      outlineOffset: computed.outlineOffset,
+      border: computed.border,
+      boxShadow: computed.boxShadow,
+    }
+  })
 }
 
 async function settingsNavigationIndicator(button: Locator) {
@@ -375,6 +479,64 @@ test('provider key drafts use the global footer save and cancel actions', async 
   expect(pageErrors).toEqual([])
 })
 
+test('provider model lists stay bounded while retaining model actions', async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 620 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+  await page.getByRole('button', { name: '新增', exact: true }).click()
+
+  const modelList = page.locator('.model-list[aria-label="OpenAI Compatible 模型列表"]')
+  const modelInput = page.getByRole('textbox', { name: 'OpenAI Compatible 手动模型名' })
+  const addModel = page.getByRole('button', { name: '添加', exact: true })
+
+  for (let index = 1; index <= 3; index += 1) {
+    await modelInput.fill(`compact-model-${index}`)
+    await addModel.click()
+  }
+
+  const compactMetrics = await modelList.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return {
+      clientHeight: element.clientHeight,
+      maxHeight: style.maxHeight,
+      overflowY: style.overflowY,
+      scrollHeight: element.scrollHeight,
+    }
+  })
+  expect(compactMetrics.maxHeight).toBe('180px')
+  expect(compactMetrics.overflowY).toBe('auto')
+  expect(compactMetrics.scrollHeight).toBe(compactMetrics.clientHeight)
+
+  for (let index = 4; index <= 36; index += 1) {
+    await modelInput.fill(`scroll-model-${index}`)
+    await addModel.click()
+  }
+
+  const boundedMetrics = await modelList.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }))
+  expect(boundedMetrics.scrollHeight).toBeGreaterThan(boundedMetrics.clientHeight)
+  expect(boundedMetrics.clientHeight).toBeLessThanOrEqual(180)
+
+  const finalModel = modelList.getByRole('button', { name: 'scroll-model-36', exact: true })
+  await modelList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect.poll(() => modelList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  const finalModelVisibility = await finalModel.evaluate((element) => {
+    const list = element.closest('.model-list')
+    if (!(list instanceof HTMLElement)) return false
+    const listBounds = list.getBoundingClientRect()
+    const modelBounds = element.getBoundingClientRect()
+    return modelBounds.top >= listBounds.top
+      && modelBounds.bottom <= listBounds.bottom
+  })
+  expect(finalModelVisibility).toBe(true)
+  await finalModel.click()
+  await expect(finalModel).toHaveAttribute('aria-pressed', 'true')
+})
+
 test('prompt reset controls stay beside original titles without overlap', async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 620 })
   await page.goto('/')
@@ -509,12 +671,131 @@ test('select controls do not show a red focus outline when opened', async ({ pag
   }
 })
 
+test('pointer-focused settings and Vision optimizer controls stay free of red focus paint', async ({ page }) => {
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+
+    await page.goto('/')
+    await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+    await page.getByRole('button', { name: '新增', exact: true }).click()
+    const providerName = page.getByRole('textbox', { name: '提供商名称' })
+    await providerName.click()
+    const providerFocus = await focusPaintStyle(providerName)
+    expect(providerFocus.outlineStyle).toBe('solid')
+    expect(providerFocus.outlineWidth).toBe('1px')
+    expect(providerFocus.outlineOffset).toBe('1px')
+    expect(providerFocus.outlineColor).toMatch(/(?:0\.46|46%)/u)
+    expect(`${providerFocus.outlineColor} ${providerFocus.border} ${providerFocus.boxShadow}`).not.toMatch(RED_FOCUS_PAINT)
+
+    await page.getByRole('button', { name: '提示词优化', exact: true }).click()
+    const settingsPrompt = page.getByRole('textbox', { name: '优化提示词' })
+    await settingsPrompt.click()
+    await expectNoRedFocusPaint(settingsPrompt)
+
+    await page.goto('/?route=prompt-optimizer')
+    const optimizerPrompt = page.getByRole('textbox', { name: '原始提示词' })
+    await optimizerPrompt.click()
+    await expectNoRedFocusPaint(optimizerPrompt)
+
+    // Keyboard navigation still receives a visible, theme-neutral indicator.
+    await page.keyboard.press('Tab')
+    const keyboardStyle = await page.evaluate(() => {
+      const element = document.activeElement
+      if (!(element instanceof HTMLElement)) return null
+      const computed = getComputedStyle(element)
+      return {
+        focusVisible: element.matches(':focus-visible'),
+        outline: computed.outline,
+        border: computed.border,
+        boxShadow: computed.boxShadow,
+      }
+    })
+    expect(keyboardStyle).not.toBeNull()
+    if (keyboardStyle === null) throw new Error('Keyboard-focused optimizer control is missing')
+    expect(keyboardStyle.focusVisible).toBe(true)
+    expect(keyboardStyle.outline).toMatch(/solid 2px/u)
+    expect(`${keyboardStyle.outline} ${keyboardStyle.border} ${keyboardStyle.boxShadow}`).not.toMatch(RED_FOCUS_PAINT)
+  }
+})
+
+test('settings prompt fields match the provider focus frame in both themes', async ({ page }) => {
+  const promptFields = [
+    { section: '翻译', label: '大模型翻译系统提示词' },
+    { section: 'OCR', label: 'OCR 提示词' },
+    { section: 'OCR', label: '截图翻译提示词' },
+    { section: 'Vision', label: 'Vision 系统提示词' },
+    { section: 'Vision', label: 'Vision 问答提示词' },
+    { section: '提示词优化', label: '优化器系统提示词' },
+    { section: '提示词优化', label: '优化提示词' },
+  ] as const
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    await page.goto('/')
+    await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+    await page.getByRole('button', { name: '新增', exact: true }).click()
+
+    const providerName = page.getByRole('textbox', { name: '提供商名称' })
+    await providerName.click()
+    const providerFocus = await focusPaintStyle(providerName)
+    const expectedFocus = {
+      outlineStyle: providerFocus.outlineStyle,
+      outlineWidth: providerFocus.outlineWidth,
+      outlineColor: providerFocus.outlineColor,
+      outlineOffset: providerFocus.outlineOffset,
+      boxShadow: providerFocus.boxShadow,
+    }
+    expect({
+      outlineStyle: 'solid',
+      outlineWidth: '1px',
+      outlineOffset: '1px',
+      boxShadow: 'none',
+    }).toEqual({
+      outlineStyle: expectedFocus.outlineStyle,
+      outlineWidth: expectedFocus.outlineWidth,
+      outlineOffset: expectedFocus.outlineOffset,
+      boxShadow: expectedFocus.boxShadow,
+    })
+    expect(expectedFocus.outlineColor).toMatch(/(?:0\.46|46%)/u)
+
+    for (const field of promptFields) {
+      await page.getByRole('button', { name: field.section, exact: true }).click()
+      const prompt = page.getByRole('textbox', { name: field.label })
+      await prompt.click()
+      const pointerFocus = await focusPaintStyle(prompt)
+      expect({
+        outlineStyle: pointerFocus.outlineStyle,
+        outlineWidth: pointerFocus.outlineWidth,
+        outlineColor: pointerFocus.outlineColor,
+        outlineOffset: pointerFocus.outlineOffset,
+        boxShadow: pointerFocus.boxShadow,
+      }).toEqual(expectedFocus)
+
+      // Move away and back with Tab so the keyboard focus-visible path is
+      // covered independently from Chromium's pointer focus behavior.
+      await prompt.focus()
+      await page.keyboard.press('Tab')
+      await page.keyboard.press('Shift+Tab')
+      await expect.poll(() => prompt.evaluate((element) => document.activeElement === element && element.matches(':focus-visible'))).toBe(true)
+      const keyboardFocus = await focusPaintStyle(prompt)
+      expect({
+        outlineStyle: keyboardFocus.outlineStyle,
+        outlineWidth: keyboardFocus.outlineWidth,
+        outlineColor: keyboardFocus.outlineColor,
+        outlineOffset: keyboardFocus.outlineOffset,
+        boxShadow: keyboardFocus.boxShadow,
+      }).toEqual(expectedFocus)
+    }
+  }
+})
+
 test('translator debounces, commits and restores its history', async ({ page }) => {
   await page.setViewportSize({ width: 680, height: 400 })
   await page.goto('/?route=translator')
   await expectEdgeSafeFrame(page.locator('.translator-window'))
   const card = page.locator('.translator-window.ocr-result-card.screenpilot-jelly-pop')
   await expect(card).toBeVisible()
+  await expectFrostedTransparency(card)
   await expect(card).toHaveAttribute('data-screenpilot-ocr-card', 'true')
   await expect(card.locator('.ocr-result-header')).toBeVisible()
   await expect(card.locator('.ocr-result-body')).toBeVisible()
@@ -596,6 +877,7 @@ test('prompt optimizer requests only on demand and keeps editable output', async
   await expectEdgeSafeFrame(page.locator('.optimizer-window'))
   const card = page.locator('.optimizer-window.ocr-result-card.screenpilot-jelly-pop')
   await expect(card).toHaveAttribute('data-screenpilot-ocr-card', 'true')
+  await expectFrostedTransparency(card)
   await expect(card.locator('.ocr-result-header')).toBeVisible()
   await expect(card.locator('.ocr-result-body')).toBeVisible()
   await expect(card.locator('.ocr-result-divider')).toBeVisible()
@@ -686,10 +968,362 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await page.getByPlaceholder('问点什么...').fill('What is visible?')
   await page.locator('button:has(svg.lucide-arrow-up)').click()
   await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
+  const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
+  const answerActions = page.locator('[data-screenpilot-answer-actions="true"]')
+  await expect(answerPanel).toBeVisible()
+  await expect(answerActions).toBeVisible()
+  await expectTransparentAnswerActions(answerActions)
+  await expectAnswerActionsLeftAligned(answerPanel)
+  await expect.poll(async () => answerPanel.evaluate((element) => {
+    const panel = element.getBoundingClientRect()
+    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')?.getBoundingClientRect()
+    if (actions === undefined) return false
+    const settled = element.getAnimations().length === 0
+    return settled && Math.abs(panel.bottom - actions.bottom) <= 1
+  })).toBe(true)
+  const answerPanelBox = await answerPanel.boundingBox()
+  const answerActionsBox = await answerActions.boundingBox()
+  expect(answerPanelBox).not.toBeNull()
+  expect(answerActionsBox).not.toBeNull()
+  if (answerPanelBox === null || answerActionsBox === null) throw new Error('Vision answer action geometry is missing')
+  expect(Math.abs(answerPanelBox.y + answerPanelBox.height - (answerActionsBox.y + answerActionsBox.height))).toBeLessThanOrEqual(1)
   await page.getByTitle('历史').click()
   await expect(page.getByRole('button', { name: /What is visible/ })).toBeVisible()
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('vision-answer.png')
+})
+
+test('Vision prompt optimization preview keeps pointer focus free of red paint', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  const prompt = page.getByPlaceholder('问点什么...')
+  await prompt.fill('Explain the visible content.')
+  const optimize = page.getByRole('button', { name: '优化', exact: true })
+  await expect(optimize).toBeEnabled()
+  await optimize.click()
+
+  const preview = page.locator('[data-screenpilot-vision-prompt-preview="true"]')
+  await expect(preview).toBeVisible()
+  const previewEditor = preview.locator('textarea')
+  await expect(previewEditor).toBeVisible()
+  const unfocusedStyle = await focusPaintStyle(previewEditor)
+  await previewEditor.click()
+  const pointerStyle = await focusPaintStyle(previewEditor)
+  expect(pointerStyle.outlineStyle).toBe('none')
+  expect(pointerStyle.outlineWidth).toBe('0px')
+  expect(pointerStyle.outlineOffset).toBe('0px')
+  expect(pointerStyle.boxShadow).toBe('none')
+  expect(pointerStyle.border).toBe(unfocusedStyle.border)
+  expect(`${pointerStyle.outlineStyle} ${pointerStyle.border} ${pointerStyle.boxShadow}`).not.toMatch(RED_FOCUS_PAINT)
+
+  await previewEditor.fill('Edited optimized prompt.')
+  await expect(previewEditor).toHaveValue('Edited optimized prompt.')
+
+  // Shift+Tab from the discard button returns keyboard focus to the
+  // textarea, proving the no-ring rule also covers :focus-visible.
+  const discard = preview.getByRole('button', { name: '放弃', exact: true })
+  await discard.focus()
+  await page.keyboard.press('Shift+Tab')
+  await expect.poll(() => previewEditor.evaluate((element) => document.activeElement === element)).toBe(true)
+  const keyboardStyle = await focusPaintStyle(previewEditor)
+  expect(keyboardStyle.outlineStyle).toBe('none')
+  expect(keyboardStyle.outlineWidth).toBe('0px')
+  expect(keyboardStyle.outlineOffset).toBe('0px')
+  expect(keyboardStyle.boxShadow).toBe('none')
+  expect(keyboardStyle.border).toBe(unfocusedStyle.border)
+  expect(`${keyboardStyle.outlineStyle} ${keyboardStyle.border} ${keyboardStyle.boxShadow}`).not.toMatch(RED_FOCUS_PAINT)
+
+  // Recompute once under the dark media query as well; the adapter rule is
+  // theme-independent and must keep the same no-paint contract.
+  await page.emulateMedia({ colorScheme: 'dark' })
+  const darkStyle = await focusPaintStyle(previewEditor)
+  expect(darkStyle.outlineStyle).toBe('none')
+  expect(darkStyle.outlineWidth).toBe('0px')
+  expect(darkStyle.outlineOffset).toBe('0px')
+  expect(darkStyle.boxShadow).toBe('none')
+  expect(darkStyle.border).toBe(unfocusedStyle.border)
+
+  await discard.click()
+  await expect(preview).toBeHidden()
+})
+
+test('Vision prompt preview reuses the large-model native edge resize frame', async ({ page }) => {
+  test.setTimeout(60_000)
+  const consoleErrors: string[] = []
+  const pageErrors: string[] = []
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+
+  const captureAndWait = async (targetPage: Page) => {
+    await targetPage.mouse.move(100, 140)
+    await targetPage.mouse.down()
+    await targetPage.mouse.move(560, 430, { steps: 8 })
+    await targetPage.mouse.up()
+    await expect(targetPage.getByPlaceholder('问点什么...')).toBeVisible()
+  }
+
+  await installVisionTauriMock(page, undefined, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await captureAndWait(page)
+  await page.getByPlaceholder('问点什么...').fill('Answer with the shared dialog frame.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+
+  const answer = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answer).toBeVisible()
+  await expect.poll(async () => Math.round((await answer.boundingBox())?.height ?? 0)).toBe(216)
+  const answerInitial = await answer.boundingBox()
+  if (answerInitial === null) throw new Error('Large-model answer geometry is missing')
+  const answerNative = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+    }
+  ).__SCREENPILOT_TEST__.floatingRect)
+  if (answerNative === null) throw new Error('Large-model native geometry is missing')
+  expect(Math.abs(answerNative.height - (answerInitial.height + 66))).toBeLessThanOrEqual(1)
+
+  await page.setViewportSize({
+    width: Math.round(answerNative.width),
+    height: Math.round(answerNative.height),
+  })
+  await expect(answer).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
+  await expectSettledViewportBottom(answer, Math.round(answerNative.height))
+  const answerFloatingInitial = await answer.boundingBox()
+  if (answerFloatingInitial === null) throw new Error('Floating answer geometry is missing')
+  expect(Math.abs(answerFloatingInitial.y + answerFloatingInitial.height - answerNative.height)).toBeLessThanOrEqual(1)
+
+  await page.setViewportSize({
+    width: Math.round(answerNative.width),
+    height: Math.round(answerNative.height + 120),
+  })
+  await expect.poll(async () => (await answer.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(answerFloatingInitial.height + 100)
+  await expectSettledViewportBottom(answer, Math.round(answerNative.height + 120))
+  const answerExpanded = await answer.boundingBox()
+  if (answerExpanded === null) throw new Error('Expanded answer geometry is missing')
+  expect(Math.abs(answerExpanded.y + answerExpanded.height - (answerNative.height + 120))).toBeLessThanOrEqual(1)
+
+  const promptPage = await page.context().newPage()
+  promptPage.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  promptPage.on('pageerror', (error) => pageErrors.push(error.message))
+  await installVisionTauriMock(promptPage, undefined, false)
+  await promptPage.setViewportSize({ width: 1280, height: 720 })
+  await promptPage.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(promptPage)
+  await captureAndWait(promptPage)
+  const prompt = promptPage.getByPlaceholder('问点什么...')
+  await prompt.fill('Explain the visible content. '.repeat(30))
+  await promptPage.getByRole('button', { name: '优化', exact: true }).click()
+
+  const preview = promptPage.locator('[data-screenpilot-vision-prompt-preview="true"]')
+  const editor = preview.locator('textarea')
+  await expect(preview).toBeVisible()
+  await expect(editor).toBeVisible()
+  await expect(preview.locator('.screenpilot-vision-prompt-preview-resize-handle')).toHaveCount(0)
+  const promptInitial = await preview.boundingBox()
+  if (promptInitial === null) throw new Error('Prompt preview initial geometry is missing')
+  expect(Math.abs(promptInitial.height - answerInitial.height)).toBeLessThanOrEqual(1)
+
+  const promptNative = await promptPage.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+    }
+  ).__SCREENPILOT_TEST__.floatingRect)
+  if (promptNative === null) throw new Error('Prompt preview native geometry is missing')
+  expect(Math.abs(promptNative.height - answerNative.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptNative.height - (promptInitial.height + 66))).toBeLessThanOrEqual(1)
+
+  await promptPage.setViewportSize({
+    width: Math.round(promptNative.width),
+    height: Math.round(promptNative.height),
+  })
+  await expect(preview).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
+  await expectSettledViewportBottom(preview, Math.round(promptNative.height))
+  const promptFloatingInitial = await preview.boundingBox()
+  if (promptFloatingInitial === null) throw new Error('Floating prompt geometry is missing')
+  expect(Math.abs(promptFloatingInitial.height - answerFloatingInitial.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptFloatingInitial.y + promptFloatingInitial.height - promptNative.height)).toBeLessThanOrEqual(1)
+
+  await promptPage.setViewportSize({
+    width: Math.round(promptNative.width),
+    height: Math.round(promptNative.height + 120),
+  })
+  await expect.poll(async () => (await preview.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(promptFloatingInitial.height + 100)
+  await expectSettledViewportBottom(preview, Math.round(promptNative.height + 120))
+  const promptExpanded = await preview.boundingBox()
+  if (promptExpanded === null) throw new Error('Expanded prompt geometry is missing')
+  expect(Math.abs(promptExpanded.height - answerExpanded.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptExpanded.y + promptExpanded.height - (promptNative.height + 120))).toBeLessThanOrEqual(1)
+  const promptResizeFeedback = await promptPage.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }
+  ).__SCREENPILOT_TEST__.floatingRects.at(-1))
+  if (promptResizeFeedback === undefined) throw new Error('Prompt preview resize feedback is missing')
+  // The vendor prompt observer reports the card using a 64px chrome model,
+  // while the painted frame is 66px. The native command treats this 2px
+  // self-report as feedback and must not resize the window back underneath
+  // the user's edge drag.
+  expect(Math.abs(promptResizeFeedback.height - (promptNative.height + 120))).toBeLessThanOrEqual(2)
+
+  const promptMinimumHeight = Math.round(promptInitial.height)
+  await promptPage.setViewportSize({
+    width: Math.round(promptNative.width),
+    height: Math.round(promptNative.height - 200),
+  })
+  await expect.poll(async () => (await preview.boundingBox())?.height ?? 0)
+    .toBe(promptMinimumHeight)
+
+  await promptPage.setViewportSize({
+    width: Math.round(promptNative.width),
+    height: Math.round(promptNative.height + 120),
+  })
+  await expect.poll(async () => (await preview.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(promptInitial.height + 100)
+
+  await editor.fill('Edited line '.repeat(250))
+  const editorMetrics = await editor.evaluate((element) => {
+    if (!(element instanceof HTMLTextAreaElement)) return null
+    element.scrollTop = element.scrollHeight
+    return {
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }
+  })
+  if (editorMetrics === null) throw new Error('Vision prompt preview editor is missing')
+  expect(editorMetrics.scrollHeight).toBeGreaterThan(editorMetrics.clientHeight)
+  expect(editorMetrics.scrollTop).toBeGreaterThan(0)
+
+  await preview.getByRole('button', { name: '放弃', exact: true }).click()
+  await expect(preview).toBeHidden()
+  const unexpectedConsoleErrors = consoleErrors.filter(
+    (message) => !message.includes('flushSync was called from inside a lifecycle method'),
+  )
+  expect(unexpectedConsoleErrors).toEqual([])
+  expect(pageErrors).toEqual([])
+  await promptPage.close()
+})
+
+test('Vision answer actions stay pinned while long responses scroll', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, true, undefined, 1_200)
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = Array.from({ length: 80 }, (_, index) => (
+      `Response line ${String(index + 1)} keeps the Vision answer body long enough to scroll.`
+    )).join('\n')
+  })
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  await page.getByPlaceholder('问点什么...').fill('Give a long response.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+
+  const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
+  const answerActions = page.locator('[data-screenpilot-answer-actions="true"]')
+  const answerBody = answerPanel.locator('[data-screenpilot-answer-scroll="true"]')
+  await expect(answerActions).toBeVisible()
+  await expectTransparentAnswerActions(answerActions)
+  await expectAnswerActionsLeftAligned(answerPanel)
+  const stopButton = answerActions.getByRole('button', { name: '停止', exact: true })
+  await expect(stopButton).toBeVisible()
+  await expect.poll(async () => answerPanel.evaluate((element) => {
+    const scroll = element.querySelector('[data-screenpilot-answer-scroll="true"]')
+    if (!(scroll instanceof HTMLElement)) return false
+    return scroll.scrollHeight > scroll.clientHeight
+  })).toBe(true)
+  await expect.poll(async () => answerPanel.evaluate((element) => {
+    const panel = element.getBoundingClientRect()
+    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')?.getBoundingClientRect()
+    if (actions === undefined) return false
+    const settled = element.getAnimations().length === 0
+    return settled && Math.abs(panel.bottom - actions.bottom) <= 2
+  })).toBe(true)
+
+  const panelBox = await answerPanel.boundingBox()
+  const actionsBox = await answerActions.boundingBox()
+  expect(panelBox).not.toBeNull()
+  expect(actionsBox).not.toBeNull()
+  if (panelBox === null || actionsBox === null) throw new Error('Long Vision answer geometry is missing')
+  const bottomGap = panelBox.y + panelBox.height - (actionsBox.y + actionsBox.height)
+  expect(Math.abs(bottomGap)).toBeLessThanOrEqual(2)
+
+  await answerBody.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error('Vision answer scroll body is missing')
+    element.scrollTop = Math.floor(element.scrollHeight / 2)
+  })
+  const middleActionsBox = await answerActions.boundingBox()
+  expect(middleActionsBox).not.toBeNull()
+  if (middleActionsBox === null) throw new Error('Middle-scroll Vision action geometry is missing')
+  expect(Math.abs(middleActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(middleActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
+  await expectAnswerActionsLeftAligned(answerPanel)
+
+  await answerBody.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error('Vision answer scroll body is missing')
+    element.scrollTop = element.scrollHeight
+  })
+  const scrolledActionsBox = await answerActions.boundingBox()
+  expect(scrolledActionsBox).not.toBeNull()
+  if (scrolledActionsBox === null) throw new Error('Scrolled Vision action geometry is missing')
+  expect(Math.abs(scrolledActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(scrolledActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
+  await expectAnswerActionsLeftAligned(answerPanel)
+
+  const finalLineVisibility = await answerPanel.evaluate((element) => {
+    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
+    const scroll = element.querySelector<HTMLElement>('[data-screenpilot-answer-scroll="true"]')
+    if (actions === null || scroll === null) return null
+    const walker = document.createTreeWalker(scroll, NodeFilter.SHOW_TEXT)
+    let node: Text | null = null
+    while (walker.nextNode()) {
+      const candidate = walker.currentNode
+      if (candidate.textContent?.includes('Response line 80') === true) {
+        node = candidate as Text
+        break
+      }
+    }
+    if (node === null) return null
+    const start = node.textContent.indexOf('Response line 80')
+    if (start < 0) return null
+    const range = document.createRange()
+    range.setStart(node, start)
+    range.setEnd(node, start + 'Response line 80'.length)
+    const rect = range.getBoundingClientRect()
+    const actionsRect = actions.getBoundingClientRect()
+    return { textBottom: rect.bottom, actionsTop: actionsRect.top }
+  })
+  expect(finalLineVisibility).not.toBeNull()
+  if (finalLineVisibility === null) throw new Error('Final Vision response line is missing')
+  expect(finalLineVisibility.textBottom).toBeLessThanOrEqual(finalLineVisibility.actionsTop + 1)
+
+  await expect(stopButton).toBeHidden()
+  const completedActionsBox = await answerActions.boundingBox()
+  expect(completedActionsBox).not.toBeNull()
+  if (completedActionsBox === null) throw new Error('Completed Vision action geometry is missing')
+  expect(Math.abs(completedActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(completedActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
+  await expectAnswerActionsLeftAligned(answerPanel)
 })
 
 test('Vision markdown links open externally without navigating the app webview', async ({ page }) => {
@@ -733,6 +1367,7 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   await expect(page.getByText(/500 x 300/)).toBeVisible()
   await page.mouse.up()
   await expect(page.getByText(/ScreenPilot 视觉测试/)).toBeVisible()
+  await expectFrostedTransparency(page.locator('[data-screenpilot-ocr-card="true"]'))
   await expectEdgeSafeFrame(page.locator('[data-screenpilot-window-frame="true"]', { has: page.getByText(/ScreenPilot 视觉测试/) }))
   const sourceLanguage = page.getByRole('combobox', { name: '源语言' })
   const targetLanguage = page.getByRole('combobox', { name: '目标语言' })
@@ -929,21 +1564,22 @@ test('chat card fills a floating window after native edge resize', async ({ page
     const initialHeight = Math.round(floatingRect.height)
     await page.setViewportSize({ width, height: initialHeight })
 
-    const card = page.locator('[data-screenpilot-floating-answer-card="true"]')
+    const card = page.locator('[data-screenpilot-answer-panel="true"][data-screenpilot-floating-dialog-card="true"]')
     await expect(card).toBeVisible()
     const initialBox = await card.boundingBox()
     expect(initialBox).not.toBeNull()
+    if (initialBox === null) throw new Error('chat initial resize geometry is missing')
 
-    const minimumHeight = 244
-    await page.setViewportSize({ width, height: minimumHeight })
-    await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBe(minimumHeight)
+    const minimumHeight = Math.round(initialBox.height)
+    await page.setViewportSize({ width, height: initialHeight - 180 })
+    await expect.poll(async () => Math.round((await card.boundingBox())?.height ?? 0))
+      .toBe(minimumHeight)
     const minimumBox = await card.boundingBox()
     if (minimumBox === null) throw new Error('chat minimum resize geometry is missing')
-    expect(minimumBox.height).toBeGreaterThanOrEqual(176)
+    expect(minimumBox.height).toBe(minimumHeight)
 
     const resizedHeight = initialHeight + 160
     await page.setViewportSize({ width, height: resizedHeight })
-    if (initialBox === null) throw new Error('chat initial resize geometry is missing')
     await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBe(resizedHeight)
     const resizedBox = await card.boundingBox()
     if (resizedBox === null) throw new Error('chat resized geometry is missing')

@@ -66,6 +66,10 @@ const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
 const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
 const OCR_FLOATING_MAX_HEIGHT = 400
+const VISION_ANSWER_MIN_HEIGHT = 220
+const VISION_ANSWER_MAX_HEIGHT = 480
+const VISION_ANSWER_VIEWPORT_RATIO = 0.45
+const VISION_DIALOG_MINIMUM_RATIO = 2 / 3
 languageHost.dataset.screenpilotTargetLanguage = 'true'
 sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
@@ -103,6 +107,25 @@ function clearCssProperty(element: HTMLElement, name: string) {
   if (element.style.getPropertyValue(name)) element.style.removeProperty(name)
 }
 
+function visionAnswerHeight(viewportHeight: number): number {
+  return Math.round(Math.max(
+    VISION_ANSWER_MIN_HEIGHT,
+    Math.min(VISION_ANSWER_MAX_HEIGHT, viewportHeight * VISION_ANSWER_VIEWPORT_RATIO),
+  ))
+}
+
+function visionDialogMinimumHeight(initialHeight: number): number {
+  return Math.round(initialHeight * VISION_DIALOG_MINIMUM_RATIO)
+}
+
+function initialVisionViewportHeight(): number {
+  if (typeof window === 'undefined') return 800
+  const innerHeight = window.innerHeight
+  const screenHeight = window.screen.height
+  const heights = [innerHeight, screenHeight].filter((height) => Number.isFinite(height) && height > 0)
+  return heights.length > 0 ? Math.max(...heights) : 800
+}
+
 function isFloatingResultSurface(element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect()
   return rect.left >= -2
@@ -112,25 +135,45 @@ function isFloatingResultSurface(element: HTMLElement): boolean {
     && window.innerHeight > 96
 }
 
-function syncFloatingResultLayout(
+function clearFloatingDialogLayout(element: HTMLElement) {
+  element.removeAttribute('data-screenpilot-floating-dialog-card')
+  clearCssProperty(element, '--screenpilot-floating-dialog-height')
+  clearCssProperty(element, '--screenpilot-floating-dialog-min-height')
+}
+
+function syncFloatingDialogLayout(
   element: HTMLElement,
   height: number,
   floatingSurface: HTMLElement = element,
+  minimumHeight = 1,
 ) {
   if (!isFloatingResultSurface(floatingSurface)) {
-    element.removeAttribute('data-screenpilot-floating-answer-card')
-    clearCssProperty(element, '--screenpilot-floating-result-height')
+    clearFloatingDialogLayout(element)
     return
   }
 
-  setAttributeIfChanged(element, 'data-screenpilot-floating-answer-card', 'true')
-  setCssPropertyIfChanged(element, '--screenpilot-floating-result-height', `${String(Math.max(1, Math.floor(height)))}px`)
+  const resolvedMinimum = Math.max(1, Math.floor(minimumHeight))
+  setAttributeIfChanged(element, 'data-screenpilot-floating-dialog-card', 'true')
+  setCssPropertyIfChanged(
+    element,
+    '--screenpilot-floating-dialog-min-height',
+    `${String(resolvedMinimum)}px`,
+  )
+  setCssPropertyIfChanged(
+    element,
+    '--screenpilot-floating-dialog-height',
+    `${String(Math.max(resolvedMinimum, Math.floor(height)))}px`,
+  )
 }
 
 export default function ReferenceVisionAdapter() {
   const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('auto')
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>('auto')
   const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '' })
+  // Capture the desktop/fullscreen viewport before Vision rebases its webview
+  // to the compact native floating window. This is the same viewport used by
+  // the vendor's initial answer metrics and remains stable during a drag.
+  const referenceViewportHeightRef = useRef(initialVisionViewportHeight())
   const sourceRef = useRef({ imageId: '', text: '' })
   const requestSequenceRef = useRef(0)
   const sourceLanguageRef = useRef<SourceLanguage>('auto')
@@ -208,7 +251,8 @@ export default function ReferenceVisionAdapter() {
   }, [clearOverride])
 
   useEffect(() => {
-    const applyAdapters = () => {
+    let adapterFrame: number | null = null
+    const applyAdaptersNow = () => {
       const send = document.querySelector<HTMLButtonElement>('button:has(svg.lucide-arrow-up)')
       if (send !== null) send.setAttribute('aria-label', '发送')
 
@@ -227,6 +271,38 @@ export default function ReferenceVisionAdapter() {
         }
       }
       if (promptPanel instanceof HTMLElement) {
+        // The Vision prompt-optimization preview is the only editable
+        // textarea in the cloned Vision surface. Mark its enclosing frosted
+        // card so the adapter can remove the global focus ring without
+        // changing any other Vision control or the vendor source copy.
+        const promptPreviewEditor = promptPanel.querySelector<HTMLTextAreaElement>('textarea')
+        const promptPreviewCard = promptPreviewEditor?.closest<HTMLElement>('.window-frosted') ?? null
+        document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
+          if (card !== promptPreviewCard) {
+            card.removeAttribute('data-screenpilot-vision-prompt-preview')
+            clearCssProperty(card, '--screenpilot-dialog-initial-height')
+            clearFloatingDialogLayout(card)
+          }
+        })
+        const dialogInitialHeight = visionDialogMinimumHeight(
+          visionAnswerHeight(referenceViewportHeightRef.current),
+        )
+        const dialogMinimumHeight = dialogInitialHeight
+        if (promptPreviewCard !== null) {
+          setAttributeIfChanged(promptPreviewCard, 'data-screenpilot-vision-prompt-preview', 'true')
+          setCssPropertyIfChanged(
+            promptPreviewCard,
+            '--screenpilot-dialog-initial-height',
+            `${String(dialogInitialHeight)}px`,
+          )
+          const top = promptPreviewCard.getBoundingClientRect().top
+          syncFloatingDialogLayout(
+            promptPreviewCard,
+            window.innerHeight - top,
+            promptPanel,
+            dialogMinimumHeight,
+          )
+        }
         const answerCard = Array.from(promptPanel.children).find((child) => (
           child instanceof HTMLElement
           && child.classList.contains('window-frosted')
@@ -234,22 +310,54 @@ export default function ReferenceVisionAdapter() {
           && child.classList.contains('absolute')
         ))
         if (answerCard instanceof HTMLElement) {
+          setAttributeIfChanged(answerCard, 'data-screenpilot-answer-panel', 'true')
+          setCssPropertyIfChanged(
+            answerCard,
+            '--screenpilot-dialog-initial-height',
+            `${String(dialogInitialHeight)}px`,
+          )
+          const answerScroll = answerCard.querySelector<HTMLElement>('.h-full.overflow-y-auto.custom-scrollbar')
+          if (answerScroll !== null) {
+            setAttributeIfChanged(answerScroll, 'data-screenpilot-answer-scroll', 'true')
+            const answerActions = Array.from(answerScroll.children).find((child) => (
+              child instanceof HTMLElement
+              && child.classList.contains('flex')
+              && child.classList.contains('items-center')
+              && child.classList.contains('gap-1')
+              && child.querySelector(':scope > button') !== null
+            ))
+            if (answerActions instanceof HTMLElement) {
+              setAttributeIfChanged(answerActions, 'data-screenpilot-answer-actions', 'true')
+            } else {
+              answerScroll.querySelectorAll<HTMLElement>('[data-screenpilot-answer-actions="true"]').forEach((actions) => {
+                actions.removeAttribute('data-screenpilot-answer-actions')
+              })
+            }
+          }
           const top = answerCard.getBoundingClientRect().top
-          syncFloatingResultLayout(
+          syncFloatingDialogLayout(
             answerCard,
             window.innerHeight - top,
             promptPanel,
+            dialogMinimumHeight,
           )
         } else {
-          document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-answer-card="true"]').forEach((card) => {
-            card.removeAttribute('data-screenpilot-floating-answer-card')
-            clearCssProperty(card, '--screenpilot-floating-result-height')
+          document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
+            clearFloatingDialogLayout(card)
+            clearCssProperty(card, '--screenpilot-dialog-initial-height')
+            card.removeAttribute('data-screenpilot-answer-panel')
           })
         }
       } else {
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-answer-card="true"]').forEach((card) => {
-          card.removeAttribute('data-screenpilot-floating-answer-card')
-          clearCssProperty(card, '--screenpilot-floating-result-height')
+        document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-dialog-card="true"]').forEach((card) => {
+          clearFloatingDialogLayout(card)
+        })
+        document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
+          card.removeAttribute('data-screenpilot-vision-prompt-preview')
+          clearCssProperty(card, '--screenpilot-dialog-initial-height')
+        })
+        document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
+          card.removeAttribute('data-screenpilot-answer-panel')
         })
       }
 
@@ -290,6 +398,11 @@ export default function ReferenceVisionAdapter() {
       body.dataset.screenpilotTranslationBody = 'true'
       const translateCard = body.parentElement
       translateCard?.setAttribute('data-screenpilot-window-frame', 'true')
+      // The screenshot-translation/OCR result card is the one Vision surface
+      // outside the reference component that should receive the same frosted
+      // transparency as `.window-frosted`. Keep it explicitly scoped so the
+      // regular Vision prompt and answer frames are untouched.
+      translateCard?.setAttribute('data-screenpilot-ocr-card', 'true')
       const translateRect = translateCard instanceof HTMLElement
         ? translateCard.getBoundingClientRect()
         : null
@@ -375,6 +488,14 @@ export default function ReferenceVisionAdapter() {
       }
     }
 
+    const applyAdapters = () => {
+      if (adapterFrame !== null) return
+      adapterFrame = window.requestAnimationFrame(() => {
+        adapterFrame = null
+        applyAdaptersNow()
+      })
+    }
+
     applyAdapters()
     const observer = new MutationObserver(applyAdapters)
     observer.observe(document.body, {
@@ -398,10 +519,20 @@ export default function ReferenceVisionAdapter() {
     window.addEventListener('screenpilot-ai-availability', applyAdapters)
     return () => {
       observer.disconnect()
+      if (adapterFrame !== null) window.cancelAnimationFrame(adapterFrame)
+      adapterFrame = null
       document.removeEventListener('input', handleInput)
       document.removeEventListener('change', handleChange)
       window.removeEventListener('resize', applyAdapters)
       window.removeEventListener('screenpilot-ai-availability', applyAdapters)
+      document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
+        card.removeAttribute('data-screenpilot-vision-prompt-preview')
+        clearCssProperty(card, '--screenpilot-dialog-initial-height')
+        clearFloatingDialogLayout(card)
+      })
+      document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
+        clearCssProperty(card, '--screenpilot-dialog-initial-height')
+      })
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
       document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {

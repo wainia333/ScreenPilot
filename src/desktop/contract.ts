@@ -62,8 +62,8 @@ export type DesktopPort = {
   setProviderKeys(providerId: string, keys: string[]): Promise<void>
   providerKeyCount(providerId: string): Promise<number>
   deleteProviderKeys(providerId: string): Promise<void>
-  fetchProviderModels(provider: ProviderSettings): Promise<string[]>
-  testProvider(provider: ProviderSettings, keys: string[]): Promise<ProviderConnectionResult>
+  fetchProviderModels(provider: ProviderSettings, keys?: string[]): Promise<string[]>
+  testProvider(provider: ProviderSettings, keys?: string[]): Promise<ProviderConnectionResult>
   translate(request: TranslationRequest): Promise<TranslationResult>
   optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult>
   commitText(text: string, autoPaste: boolean): Promise<void>
