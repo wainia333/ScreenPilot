@@ -21,6 +21,7 @@ type TranslationHistory = {
 }
 
 const historyKey = 'screenpilot:translator-history'
+export const TRANSLATOR_INPUT_DEBOUNCE_MS = 700
 const goldenSectionRatio = (3 - Math.sqrt(5)) / 2
 const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
   { value: 'auto', label: '自动' },
@@ -143,7 +144,7 @@ export function TranslatorPage() {
   useEffect(() => {
     if (settings === null || input.trim().length === 0) return
     const requestKey = translationRequestKey(input, settings)
-    const delay = immediateRequest.current === requestKey ? 0 : 600
+    const delay = immediateRequest.current === requestKey ? 0 : TRANSLATOR_INPUT_DEBOUNCE_MS
     if (delay === 0) immediateRequest.current = null
     const requestGeneration = generation.current + 1
     generation.current = requestGeneration
@@ -227,8 +228,18 @@ export function TranslatorPage() {
           {loading ? '翻译中…' : input.trim().length > 0 ? 'Ctrl+Enter 提交' : '等待输入'}
         </span>
         <div className="ocr-result-header-actions">
-          <button type="button" className="ocr-header-button" aria-label="翻译历史" onClick={() => setHistoryOpen(!historyOpen)}>
+          <button
+            type="button"
+            className="ocr-header-button history-button"
+            aria-label="翻译历史"
+            aria-describedby="translator-history-count"
+            onClick={() => setHistoryOpen(!historyOpen)}
+          >
             <Clock3 size={16} />
+            {history.length > 0 ? <span className="history-count-badge" aria-hidden="true">{history.length}</span> : null}
+            <span id="translator-history-count" className="history-count-announcement">
+              {history.length > 0 ? `历史记录：${history.length} 条` : '暂无历史记录'}
+            </span>
           </button>
           <button type="button" className="ocr-header-button" aria-label="关闭翻译" onClick={() => void desktop.hideWindow()}>
             <X size={14} />

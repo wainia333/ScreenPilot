@@ -4,7 +4,7 @@ import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import type { TranslationRequest, TranslationResult } from '../../desktop/contract'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
-import { TranslatorPage } from './translator-page'
+import { TRANSLATOR_INPUT_DEBOUNCE_MS, TranslatorPage } from './translator-page'
 
 class RecordingDesktop extends FakeDesktopPort {
   readonly translations: TranslationRequest[] = []
@@ -46,6 +46,17 @@ class RecordingDesktop extends FakeDesktopPort {
   }
 }
 
+class DeferredTranslationDesktop extends RecordingDesktop {
+  readonly pending: { request: TranslationRequest; resolve: (result: TranslationResult) => void }[] = []
+
+  override translate(request: TranslationRequest): Promise<TranslationResult> {
+    this.translations.push(request)
+    return new Promise((resolve) => {
+      this.pending.push({ request, resolve })
+    })
+  }
+}
+
 describe('TranslatorPage', () => {
   afterEach(() => {
     cleanup()
@@ -53,14 +64,14 @@ describe('TranslatorPage', () => {
     localStorage.clear()
   })
 
-  it('waits 600ms, ignores IME submit and commits after composition ends', async () => {
+  it('waits 700ms, ignores IME submit and commits after composition ends', async () => {
     vi.useFakeTimers()
     const desktop = new RecordingDesktop()
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const input = screen.getByLabelText('原文')
     fireEvent.change(input, { target: { value: 'sample' } })
-    await act(() => vi.advanceTimersByTime(599))
+    await act(() => vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS - 1))
     expect(desktop.translations).toHaveLength(0)
     await act(async () => {
       vi.advanceTimersByTime(1)
@@ -88,7 +99,7 @@ describe('TranslatorPage', () => {
     await act(async () => Promise.resolve())
     expect(screen.getByLabelText('原文')).toHaveValue('selected source')
     await act(async () => {
-      vi.advanceTimersByTime(600)
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.text).toBe('selected source')
@@ -111,7 +122,7 @@ describe('TranslatorPage', () => {
     })
     expect(screen.getByLabelText('原文')).toHaveValue('delayed selection')
     await act(async () => {
-      vi.advanceTimersByTime(600)
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.text).toBe('delayed selection')
@@ -135,6 +146,64 @@ describe('TranslatorPage', () => {
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.targetLanguage).toBe('ja')
+  })
+
+  it('ignores a late response after a newer debounced input', async () => {
+    vi.useFakeTimers()
+    const desktop = new DeferredTranslationDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const input = screen.getByLabelText('原文')
+    fireEvent.change(input, { target: { value: 'first source' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.pending).toHaveLength(1)
+    fireEvent.change(input, { target: { value: 'latest source' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.pending).toHaveLength(2)
+    await act(async () => {
+      desktop.pending[1]?.resolve({ generation: desktop.pending[1].request.generation, text: 'latest result' })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('latest result')
+    await act(async () => {
+      desktop.pending[0]?.resolve({ generation: desktop.pending[0].request.generation, text: 'stale result' })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('latest result')
+  })
+
+  it('shows and synchronizes the translation history badge', async () => {
+    localStorage.setItem('screenpilot:translator-history', JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+      id: `saved-translation-${String(index)}`,
+      input: 'saved source',
+      output: 'saved result',
+      method: 'microsoft',
+      updatedAt: index,
+    }))))
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const historyButton = screen.getByRole('button', { name: '翻译历史' })
+    expect(historyButton).toHaveClass('history-button')
+    expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('20')
+    expect(screen.getByText('历史记录：20 条')).toBeInTheDocument()
+    fireEvent.click(historyButton)
+    fireEvent.click(screen.getByRole('button', { name: '清空' }))
+    expect(historyButton.querySelector('.history-count-badge')).toBeNull()
+    expect(screen.getByText('暂无历史记录')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('原文'), { target: { value: 'new source' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
   })
 
   it('submits an explicit source language and retranslates immediately', async () => {

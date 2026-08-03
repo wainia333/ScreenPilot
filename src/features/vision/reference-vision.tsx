@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import ReferenceVision from '../../vendor/kivio-screenshot/Vision'
 import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
+import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
@@ -137,6 +138,8 @@ export default function ReferenceVisionAdapter() {
   const overrideLockedRef = useRef(false)
   const aiAvailabilityRef = useRef({ ocr: true, translation: true })
   const aiAvailabilityLoadedRef = useRef(false)
+
+  useEffect(() => installOcrDebounceTimingAdapter(), [])
 
   const clearOverride = useCallback(() => {
     overrideLockedRef.current = false

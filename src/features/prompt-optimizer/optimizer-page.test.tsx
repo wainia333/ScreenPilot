@@ -128,4 +128,32 @@ describe('OptimizerPage', () => {
     expect(desktop.optimizations).toHaveLength(1)
     expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('optimized:Summarize the supplied material.')
   })
+
+  it('shows and synchronizes the optimization history badge', async () => {
+    localStorage.setItem('screenpilot:optimizer-history', JSON.stringify([{
+      id: 'saved-optimization',
+      input: 'saved prompt',
+      output: 'saved result',
+      updatedAt: 4,
+    }]))
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const historyButton = screen.getByRole('button', { name: '优化历史' })
+    expect(historyButton).toHaveClass('history-button')
+    expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
+    expect(screen.getByText('历史记录：1 条')).toBeInTheDocument()
+    fireEvent.click(historyButton)
+    fireEvent.click(screen.getByRole('button', { name: '删除历史' }))
+    expect(historyButton.querySelector('.history-count-badge')).toBeNull()
+    expect(screen.getByText('暂无历史记录')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '原始提示词' }), {
+      target: { value: 'new prompt' },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '优化' }))
+      await Promise.resolve()
+    })
+    expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
+  })
 })

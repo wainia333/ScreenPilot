@@ -82,7 +82,19 @@ export function OptimizerPage() {
           {loading ? '优化中…' : input.trim().length > 0 ? 'Ctrl+Enter 优化' : '等待输入'}
         </span>
         <div className="ocr-result-header-actions">
-          <button type="button" className="ocr-header-button" aria-label="优化历史" onClick={() => setHistoryOpen(!historyOpen)}><Clock3 size={16} /></button>
+          <button
+            type="button"
+            className="ocr-header-button history-button"
+            aria-label="优化历史"
+            aria-describedby="optimizer-history-count"
+            onClick={() => setHistoryOpen(!historyOpen)}
+          >
+            <Clock3 size={16} />
+            {history.length > 0 ? <span className="history-count-badge" aria-hidden="true">{history.length}</span> : null}
+            <span id="optimizer-history-count" className="history-count-announcement">
+              {history.length > 0 ? `历史记录：${history.length} 条` : '暂无历史记录'}
+            </span>
+          </button>
           <button type="button" className="ocr-header-button" aria-label="关闭优化器" onClick={() => void desktop.hideWindow()}><X size={14} /></button>
         </div>
       </header>

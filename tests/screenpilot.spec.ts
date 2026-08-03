@@ -28,6 +28,47 @@ async function expectEdgeSafeFrame(frame: Locator) {
   expect(style.boxShadow).toContain('inset')
 }
 
+async function expectHistoryCountBadge(button: Locator) {
+  const badge = button.locator('.history-count-badge')
+  await expect(badge).toHaveText(/^[0-9]+$/u)
+  await expect(badge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await expect(badge).toHaveCSS('border-width', '0px')
+  await expect(badge).toHaveCSS('border-style', 'none')
+  await expect(badge).toHaveCSS('border-radius', '0px')
+  await expect(badge).toHaveCSS('box-shadow', 'none')
+
+  const geometry = await button.evaluate((element) => {
+    const icon = element.querySelector('svg')?.getBoundingClientRect()
+    const count = element.querySelector('.history-count-badge')?.getBoundingClientRect()
+    const badgeStyle = element.querySelector('.history-count-badge')
+    if (icon === undefined || count === undefined || badgeStyle === null) return null
+    return {
+      iconBottom: icon.bottom,
+      iconColor: getComputedStyle(element.querySelector('svg') as SVGElement).color,
+      iconRight: icon.right,
+      iconTop: icon.top,
+      badgeBottom: count.bottom,
+      badgeColor: getComputedStyle(badgeStyle).color,
+      badgeLeft: count.left,
+      badgeRight: count.right,
+      badgeTop: count.top,
+    }
+  })
+  expect(geometry).not.toBeNull()
+  if (geometry === null) throw new Error('History count badge geometry is missing')
+
+  // The number sits in the icon's upper-right corner, with only a small gap
+  // from the clock circle and no detached notification bubble.
+  expect(geometry.badgeRight).toBeGreaterThanOrEqual(geometry.iconRight)
+  expect(geometry.badgeRight).toBeLessThanOrEqual(geometry.iconRight + 6)
+  expect(geometry.badgeLeft).toBeLessThanOrEqual(geometry.iconRight + 1)
+  expect(geometry.badgeTop).toBeGreaterThanOrEqual(geometry.iconTop - 6)
+  expect(geometry.badgeTop).toBeLessThanOrEqual(geometry.iconTop + 1)
+  expect(geometry.badgeBottom).toBeGreaterThanOrEqual(geometry.iconTop)
+  expect(geometry.badgeBottom).toBeLessThanOrEqual(geometry.iconTop + 6)
+  expect(geometry.badgeColor).toBe(geometry.iconColor)
+}
+
 async function expectNeutralSelectFocus(select: Locator) {
   await select.focus()
   const style = await select.evaluate((element) => {
@@ -539,7 +580,11 @@ test('translator debounces, commits and restores its history', async ({ page }) 
   await targetLanguage.selectOption('ja')
   await expect(targetLanguage).toHaveValue('ja')
   await expect(page).toHaveScreenshot('translator-source-language-controls.png')
-  await page.getByRole('button', { name: '翻译历史' }).click()
+  const translatorHistoryButton = page.getByRole('button', { name: '翻译历史' })
+  await expect(translatorHistoryButton.locator('.history-count-badge')).toHaveText('1')
+  await expect(translatorHistoryButton).toHaveCSS('width', '28px')
+  await expectHistoryCountBadge(translatorHistoryButton)
+  await translatorHistoryButton.click()
   await expect(page.getByRole('complementary', { name: '翻译历史' })).toContainText('A concise synthetic translation sample.')
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('translator-result.png')
@@ -588,6 +633,10 @@ test('prompt optimizer requests only on demand and keeps editable output', async
   await expect(page.getByRole('textbox', { name: '优化结果' })).toHaveValue('')
   await page.getByRole('button', { name: '优化', exact: true }).click()
   await expect(page.getByRole('textbox', { name: '优化结果' })).toContainText('明确目标、约束和输出格式')
+  const optimizerHistoryButton = page.getByRole('button', { name: '优化历史' })
+  await expect(optimizerHistoryButton.locator('.history-count-badge')).toHaveText('1')
+  await expect(optimizerHistoryButton).toHaveCSS('width', '28px')
+  await expectHistoryCountBadge(optimizerHistoryButton)
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('optimizer-result.png')
 })
@@ -801,8 +850,28 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   expect(languageRequest?.sourceLanguage).toBe('en')
   expect(languageRequest?.targetLanguage).toBe('en')
   const source = page.locator('.ocr-editable')
+  const translationRequestCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: unknown[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.length
+  })
   await source.fill('Edited synthetic OCR source')
+  await page.waitForTimeout(950)
+  const earlyTranslationRequestCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: unknown[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.length
+  })
+  expect(earlyTranslationRequestCount).toBe(translationRequestCount)
   await expect(page.getByText('编辑后译文(en)：Edited synthetic OCR source')).toBeVisible({ timeout: 2_000 })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: unknown[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.length
+  })).toBe(translationRequestCount + 1)
   await expect(sourceLanguage).toBeVisible()
   await expect(sourceLanguage).toHaveValue('en')
   await expect(targetLanguage).toBeVisible()

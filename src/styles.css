@@ -995,6 +995,38 @@ select:focus-visible {
   border-radius: 8px;
 }
 
+.ocr-header-button.history-button {
+  position: relative;
+}
+
+.history-count-badge {
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: currentColor;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.history-count-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .ocr-section-button {
   width: 20px;
   height: 20px;
