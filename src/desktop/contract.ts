@@ -5,6 +5,7 @@ export type WindowRoute = 'settings' | 'translator' | 'prompt-optimizer' | 'visi
 export type TranslationRequest = {
   text: string
   method: string
+  sourceLanguage: string
   targetLanguage: string
   generation: number
 }
@@ -32,7 +33,7 @@ export type SettingsSaveResult = {
 export type ProviderKeyChanges = Record<string, string[]>
 
 export type TranslationSettingsPatch = Partial<
-  Pick<AppSettings['translation'], 'method' | 'targetLanguage'>
+  Pick<AppSettings['translation'], 'method' | 'sourceLanguage' | 'targetLanguage'>
 >
 
 export type ProviderConnectionResult = {

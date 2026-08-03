@@ -18,7 +18,7 @@ export async function installVisionTauriMock(
     let imageSequence = 0
     const visionTestState = {
       showCount: 0,
-      translationRequests: [] as { text: string; targetLanguage: string }[],
+      translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string }[],
       externalUrls: [] as string[],
       answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
       floatingRect: null as { width: number; height: number } | null,
@@ -48,6 +48,7 @@ export async function installVisionTauriMock(
       retryAttempts: 3,
       screenshotTranslation: {
         enabled: true,
+        sourceLanguage: 'auto',
         targetLanguage: 'auto',
         hotkey: 'F4',
         providerId: 'test-provider',
@@ -185,10 +186,12 @@ export async function installVisionTauriMock(
         return { success: true }
       }
       if (command === 'vision_translate_text') {
+        const requestedSource = stringArgument(args.sourceLanguage)
         const requestedTarget = stringArgument(args.targetLanguage)
+        const sourceLanguage = requestedSource || settings.screenshotTranslation.sourceLanguage
         const targetLanguage = requestedTarget || settings.screenshotTranslation.targetLanguage
         const text = String(args.text)
-        visionTestState.translationRequests.push({ text, targetLanguage })
+        visionTestState.translationRequests.push({ text, sourceLanguage, targetLanguage })
         return { success: true, translated: `编辑后译文(${targetLanguage})：${text}` }
       }
       if (command === 'optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`

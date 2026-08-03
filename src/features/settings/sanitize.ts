@@ -11,6 +11,7 @@ import type {
   ThemeMode,
   ThinkingEffort,
   TranslationMethod,
+  TranslationLanguage,
 } from './types'
 
 type UnknownRecord = Record<string, unknown>
@@ -20,7 +21,7 @@ const languages = new Set<InterfaceLanguage>(['zh', 'en'])
 const thinkingEfforts = new Set<ThinkingEffort>(['low', 'medium', 'high', 'xhigh'])
 const messageOrders = new Set<MessageOrder>(['asc', 'desc'])
 const ocrMethods = new Set<OcrMethod>(['ai', 'baidu', 'chaoxing', 'system'])
-const screenshotTargetLanguages = new Set(['auto', 'zh-CN', 'en', 'ja', 'ko'])
+const screenshotTargetLanguages = new Set<TranslationLanguage>(['auto', 'zh-CN', 'en', 'ja', 'ko'])
 const translationMethods = new Set<TranslationMethod>([
   'ai',
   'baidu',
@@ -152,6 +153,11 @@ export function sanitizeSettings(value: unknown): AppSettings {
       ),
     },
     translation: {
+      sourceLanguage: choice(
+        translation.sourceLanguage,
+        screenshotTargetLanguages,
+        DEFAULT_SETTINGS.translation.sourceLanguage,
+      ),
       targetLanguage: choice(
         translation.targetLanguage,
         screenshotTargetLanguages,
@@ -164,6 +170,11 @@ export function sanitizeSettings(value: unknown): AppSettings {
     },
     screenshotTranslation: {
       enabled: flag(screenshot.enabled, DEFAULT_SETTINGS.screenshotTranslation.enabled),
+      sourceLanguage: choice(
+        screenshot.sourceLanguage,
+        screenshotTargetLanguages,
+        DEFAULT_SETTINGS.screenshotTranslation.sourceLanguage,
+      ),
       targetLanguage: choice(
         screenshot.targetLanguage,
         screenshotTargetLanguages,

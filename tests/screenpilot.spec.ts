@@ -462,7 +462,7 @@ test('select controls do not show a red focus outline when opened', async ({ pag
 
   await page.goto('/?route=translator')
   const translatorSelects = page.getByRole('combobox')
-  await expect(translatorSelects).toHaveCount(2)
+  await expect(translatorSelects).toHaveCount(3)
   for (let index = 0; index < await translatorSelects.count(); index += 1) {
     await expectNeutralSelectFocus(translatorSelects.nth(index))
   }
@@ -518,10 +518,27 @@ test('translator debounces, commits and restores its history', async ({ page }) 
   await expect(output).toHaveValue('译文：A concise synthetic translation sample.', { timeout: 2_000 })
   await output.fill('Edited translation result.')
   await expect(output).toHaveValue('Edited translation result.')
+  const sourceLanguage = page.getByRole('combobox', { name: '源语言' })
   const targetLanguage = page.getByRole('combobox', { name: '目标语言' })
+  await expect(sourceLanguage).toHaveValue('auto')
   await expect(targetLanguage).toHaveValue('auto')
+  const sourceLanguageStyle = await sourceLanguage.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    const bounds = element.getBoundingClientRect()
+    return { fontSize: computed.fontSize, width: bounds.width, height: bounds.height }
+  })
+  const targetLanguageStyle = await targetLanguage.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    const bounds = element.getBoundingClientRect()
+    return { fontSize: computed.fontSize, width: bounds.width, height: bounds.height }
+  })
+  expect(sourceLanguageStyle).toEqual(targetLanguageStyle)
+  await sourceLanguage.selectOption('en')
+  await expect(sourceLanguage).toHaveValue('en')
+  await expect(output).toHaveValue('译文：A concise synthetic translation sample.', { timeout: 2_000 })
   await targetLanguage.selectOption('ja')
   await expect(targetLanguage).toHaveValue('ja')
+  await expect(page).toHaveScreenshot('translator-source-language-controls.png')
   await page.getByRole('button', { name: '翻译历史' }).click()
   await expect(page.getByRole('complementary', { name: '翻译历史' })).toContainText('A concise synthetic translation sample.')
   await expectAccessible(page)
@@ -668,33 +685,69 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   await page.mouse.up()
   await expect(page.getByText(/ScreenPilot 视觉测试/)).toBeVisible()
   await expectEdgeSafeFrame(page.locator('[data-screenpilot-window-frame="true"]', { has: page.getByText(/ScreenPilot 视觉测试/) }))
+  const sourceLanguage = page.getByRole('combobox', { name: '源语言' })
   const targetLanguage = page.getByRole('combobox', { name: '目标语言' })
+  await expect(sourceLanguage).toHaveValue('auto')
   await expect(targetLanguage).toHaveValue('auto')
+  const sourceLanguageLabel = page.getByText('源语言', { exact: true })
   const targetLanguageLabel = page.getByText('目标语言', { exact: true })
+  const ocrEngine = page.locator('[data-screenpilot-original-heading="true"] select:not([data-screenpilot-source-language-select="true"])')
   const translationEngine = page.locator('select[data-screenpilot-translation-method="true"]')
+  await expect(sourceLanguageLabel).toBeVisible()
+  await expect(ocrEngine).toBeVisible()
   await expect(targetLanguageLabel).toBeVisible()
   await expect(translationEngine).toBeVisible()
-  const translatedHeading = page.locator('[data-screenpilot-translated-heading="true"]')
-  const geometry = await translatedHeading.evaluate((heading) => {
-    const label = heading.querySelector('.screenpilot-target-language-control label')
-    const language = heading.querySelector('#screenpilot-target-language')
-    const engine = heading.querySelector('select[data-screenpilot-translation-method="true"]')
-    if (!(label instanceof HTMLElement) || !(language instanceof HTMLElement) || !(engine instanceof HTMLElement)) return null
+  const geometry = await page.evaluate(() => {
+    const sourceHeading = document.querySelector('[data-screenpilot-original-heading="true"]')
+    const targetHeading = document.querySelector('[data-screenpilot-translated-heading="true"]')
+    const sourceLabel = sourceHeading?.querySelector('.screenpilot-source-language-control label')
+    const sourceLanguage = sourceHeading?.querySelector('#screenpilot-source-language')
+    const sourceEngine = sourceHeading?.querySelector('select:not([data-screenpilot-source-language-select="true"])')
+    const targetLabel = targetHeading?.querySelector('.screenpilot-target-language-control label')
+    const targetLanguage = targetHeading?.querySelector('#screenpilot-target-language')
+    const targetEngine = targetHeading?.querySelector('select[data-screenpilot-translation-method="true"]')
+    if (!(sourceHeading instanceof HTMLElement)
+      || !(targetHeading instanceof HTMLElement)
+      || !(sourceLabel instanceof HTMLElement)
+      || !(sourceLanguage instanceof HTMLElement)
+      || !(sourceEngine instanceof HTMLElement)
+      || !(targetLabel instanceof HTMLElement)
+      || !(targetLanguage instanceof HTMLElement)
+      || !(targetEngine instanceof HTMLElement)) return null
     const rect = (element: Element) => {
       const bounds = element.getBoundingClientRect()
       return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
     }
     return {
-      translatedHeadingBox: rect(heading),
-      targetLanguageLabelBox: rect(label),
-      targetLanguageBox: rect(language),
-      translationEngineBox: rect(engine),
+      originalHeadingBox: rect(sourceHeading),
+      sourceLanguageLabelBox: rect(sourceLabel),
+      sourceLanguageBox: rect(sourceLanguage),
+      ocrEngineBox: rect(sourceEngine),
+      translatedHeadingBox: rect(targetHeading),
+      targetLanguageLabelBox: rect(targetLabel),
+      targetLanguageBox: rect(targetLanguage),
+      translationEngineBox: rect(targetEngine),
     }
   })
   expect(geometry).not.toBeNull()
   if (geometry === null) throw new Error('OCR translation controls geometry is missing')
-  const { translatedHeadingBox, targetLanguageLabelBox, targetLanguageBox, translationEngineBox } = geometry
+  const {
+    originalHeadingBox,
+    sourceLanguageLabelBox,
+    sourceLanguageBox,
+    ocrEngineBox,
+    translatedHeadingBox,
+    targetLanguageLabelBox,
+    targetLanguageBox,
+    translationEngineBox,
+  } = geometry
   const centerY = (box: { y: number; height: number }) => box.y + box.height / 2
+  expect(Math.abs(centerY(sourceLanguageLabelBox) - centerY(sourceLanguageBox))).toBeLessThanOrEqual(1)
+  expect(Math.abs(centerY(sourceLanguageBox) - centerY(ocrEngineBox))).toBeLessThanOrEqual(1)
+  expect(sourceLanguageLabelBox.x).toBeGreaterThan(originalHeadingBox.x + originalHeadingBox.width * 0.25)
+  expect(sourceLanguageBox.x).toBeGreaterThan(sourceLanguageLabelBox.x + sourceLanguageLabelBox.width)
+  expect(ocrEngineBox.x).toBeGreaterThan(sourceLanguageBox.x + sourceLanguageBox.width)
+  expect(Math.abs(originalHeadingBox.x + originalHeadingBox.width - ocrEngineBox.x - ocrEngineBox.width)).toBeLessThanOrEqual(1)
   expect(Math.abs(centerY(targetLanguageLabelBox) - centerY(targetLanguageBox))).toBeLessThanOrEqual(1)
   expect(Math.abs(centerY(targetLanguageBox) - centerY(translationEngineBox))).toBeLessThanOrEqual(1)
   expect(targetLanguageLabelBox.x).toBeGreaterThan(translatedHeadingBox.x + translatedHeadingBox.width * 0.25)
@@ -703,8 +756,10 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   expect(Math.abs(translatedHeadingBox.x + translatedHeadingBox.width - translationEngineBox.x - translationEngineBox.width)).toBeLessThanOrEqual(1)
   expect(targetLanguageBox.width).toBeCloseTo(translationEngineBox.width, 0)
   expect(targetLanguageBox.height).toBeCloseTo(translationEngineBox.height, 0)
+  expect(sourceLanguageBox.width).toBeCloseTo(targetLanguageBox.width, 0)
+  expect(sourceLanguageBox.height).toBeCloseTo(targetLanguageBox.height, 0)
   const screenshotSelects = page.getByRole('combobox')
-  await expect(screenshotSelects).toHaveCount(3)
+  await expect(screenshotSelects).toHaveCount(4)
   for (let index = 0; index < await screenshotSelects.count(); index += 1) {
     const select = screenshotSelects.nth(index)
     const style = await select.evaluate((element) => {
@@ -721,20 +776,37 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
     expect(style.height).toBeCloseTo(24, 0)
     await expectNeutralSelectFocus(select)
   }
+  await sourceLanguage.selectOption('en')
+  await expect(page.getByText(/编辑后译文\(auto\)：ScreenPilot Visual Test/)).toBeVisible()
+  const sourceLanguageRequest = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        translationRequests: { text: string; sourceLanguage: string; targetLanguage: string }[]
+      }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.at(-1)
+  })
+  expect(sourceLanguageRequest?.sourceLanguage).toBe('en')
+  expect(sourceLanguageRequest?.targetLanguage).toBe('auto')
   await targetLanguage.selectOption('en')
   await expect(page.getByText(/编辑后译文\(en\)：ScreenPilot Visual Test/)).toBeVisible()
   const languageRequest = await page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: {
-        translationRequests: { text: string; targetLanguage: string }[]
+        translationRequests: { text: string; sourceLanguage: string; targetLanguage: string }[]
       }
     }).__SCREENPILOT_TEST__
     return state.translationRequests.at(-1)
   })
+  expect(languageRequest?.sourceLanguage).toBe('en')
   expect(languageRequest?.targetLanguage).toBe('en')
   const source = page.locator('.ocr-editable')
   await source.fill('Edited synthetic OCR source')
   await expect(page.getByText('编辑后译文(en)：Edited synthetic OCR source')).toBeVisible({ timeout: 2_000 })
+  await expect(sourceLanguage).toBeVisible()
+  await expect(sourceLanguage).toHaveValue('en')
+  await expect(targetLanguage).toBeVisible()
+  await expect(targetLanguage).toHaveValue('en')
   const thumbnail = page.locator('img[alt="snap"]')
   await expect(thumbnail).toBeVisible()
   const coloredPixels = await thumbnail.evaluate((element) => {
@@ -754,6 +826,9 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   })
   expect(coloredPixels).toBeGreaterThan(20)
   await expectAccessible(page)
+  await expect(sourceLanguage).toBeVisible()
+  await expect(targetLanguage).toBeVisible()
+  await expect(page).toHaveScreenshot('screenshot-translation-source-language.png')
   await expect(page).toHaveScreenshot('screenshot-translation.png')
 })
 

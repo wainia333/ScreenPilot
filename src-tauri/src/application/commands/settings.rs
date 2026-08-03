@@ -76,6 +76,8 @@ pub struct TranslationSettingsPatch {
     #[serde(default)]
     method: Option<TranslationMethod>,
     #[serde(default)]
+    source_language: Option<String>,
+    #[serde(default)]
     target_language: Option<String>,
 }
 
@@ -83,6 +85,15 @@ fn apply_translation_settings_patch(
     settings: &mut AppSettings,
     patch: TranslationSettingsPatch,
 ) -> Result<(), String> {
+    if patch
+        .source_language
+        .as_deref()
+        .is_some_and(|source_language| {
+            !matches!(source_language, "auto" | "zh-CN" | "en" | "ja" | "ko")
+        })
+    {
+        return Err("Text translation source language is unsupported".into());
+    }
     if patch
         .target_language
         .as_deref()
@@ -94,6 +105,9 @@ fn apply_translation_settings_patch(
     }
     if let Some(method) = patch.method {
         settings.translation.method = method;
+    }
+    if let Some(source_language) = patch.source_language {
+        settings.translation.source_language = source_language;
     }
     if let Some(target_language) = patch.target_language {
         settings.translation.target_language = target_language;
@@ -328,6 +342,7 @@ mod tests {
             &mut settings,
             TranslationSettingsPatch {
                 method: Some(TranslationMethod::Ai),
+                source_language: Some("en".into()),
                 target_language: Some("ja".into()),
             },
         )
@@ -335,6 +350,7 @@ mod tests {
         assert_eq!(settings.providers, providers);
         assert_eq!(settings.translation.ai_model, model);
         assert_eq!(settings.translation.method, TranslationMethod::Ai);
+        assert_eq!(settings.translation.source_language, "en");
         assert_eq!(settings.translation.target_language, "ja");
     }
 
@@ -346,11 +362,29 @@ mod tests {
             &mut settings,
             TranslationSettingsPatch {
                 method: None,
+                source_language: None,
                 target_language: Some("xx".into()),
             },
         )
         .expect_err("unsupported language should fail");
         assert_eq!(error, "Text translation target language is unsupported");
+        assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn translation_patch_rejects_unknown_source_language_without_mutating() {
+        let mut settings = AppSettings::default();
+        let before = settings.clone();
+        let error = apply_translation_settings_patch(
+            &mut settings,
+            TranslationSettingsPatch {
+                method: None,
+                source_language: Some("xx".into()),
+                target_language: None,
+            },
+        )
+        .expect_err("unsupported source language should fail");
+        assert_eq!(error, "Text translation source language is unsupported");
         assert_eq!(settings, before);
     }
 

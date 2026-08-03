@@ -150,6 +150,8 @@ pub struct RetrySettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationSettings {
+    #[serde(default = "default_source_language")]
+    pub source_language: String,
     pub target_language: String,
     pub method: TranslationMethod,
     #[serde(default)]
@@ -162,6 +164,8 @@ pub struct TranslationSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotTranslationSettings {
     pub enabled: bool,
+    #[serde(default = "default_source_language")]
+    pub source_language: String,
     #[serde(default = "default_screenshot_target_language")]
     pub target_language: String,
     #[serde(default)]
@@ -245,6 +249,7 @@ impl Default for AppSettings {
                 prompt_optimizer: "Control+Alt+P".into(),
             },
             translation: TranslationSettings {
+                source_language: default_source_language(),
                 target_language: "auto".into(),
                 method: TranslationMethod::Microsoft,
                 ai_enabled: false,
@@ -253,6 +258,7 @@ impl Default for AppSettings {
             },
             screenshot_translation: ScreenshotTranslationSettings {
                 enabled: true,
+                source_language: default_source_language(),
                 target_language: default_screenshot_target_language(),
                 ocr_ai_enabled: false,
                 ocr_method: OcrMethod::Chaoxing,
@@ -393,10 +399,22 @@ impl AppSettings {
             return Err("Retry attempts must be between 1 and 5".into());
         }
         if !matches!(
+            self.translation.source_language.as_str(),
+            "auto" | "zh-CN" | "en" | "ja" | "ko"
+        ) {
+            return Err("Text translation source language is unsupported".into());
+        }
+        if !matches!(
             self.translation.target_language.as_str(),
             "auto" | "zh-CN" | "en" | "ja" | "ko"
         ) {
             return Err("Text translation target language is unsupported".into());
+        }
+        if !matches!(
+            self.screenshot_translation.source_language.as_str(),
+            "auto" | "zh-CN" | "en" | "ja" | "ko"
+        ) {
+            return Err("Screenshot translation source language is unsupported".into());
         }
         if !matches!(
             self.screenshot_translation.target_language.as_str(),
@@ -438,6 +456,10 @@ fn default_screenshot_target_language() -> String {
     "auto".into()
 }
 
+fn default_source_language() -> String {
+    "auto".into()
+}
+
 fn valid_model_selection(providers: &[ProviderSettings], selection: &ModelSelection) -> bool {
     providers
         .iter()
@@ -466,9 +488,11 @@ mod tests {
         assert_eq!(json["shortcuts"]["promptOptimizer"], "Control+Alt+P");
         assert_eq!(json["screenshotTranslation"]["ocrMethod"], "chaoxing");
         assert_eq!(json["translation"]["aiEnabled"], false);
+        assert_eq!(json["translation"]["sourceLanguage"], "auto");
         assert_eq!(json["screenshotTranslation"]["ocrAiEnabled"], false);
         assert_eq!(json["screenshotTranslation"]["translationAiEnabled"], false);
         assert_eq!(json["screenshotTranslation"]["targetLanguage"], "auto");
+        assert_eq!(json["screenshotTranslation"]["sourceLanguage"], "auto");
         assert!(json["screenshotTranslation"]["ocrPrompt"]
             .as_str()
             .is_some_and(|prompt| prompt.contains("copy-ready Markdown")));
@@ -494,6 +518,23 @@ mod tests {
             .remove("targetLanguage");
         let restored = serde_json::from_value::<AppSettings>(json).expect("deserialize legacy");
         assert_eq!(restored.screenshot_translation.target_language, "auto");
+    }
+
+    #[test]
+    fn fills_missing_source_languages() {
+        let settings = AppSettings::default();
+        let mut json = serde_json::to_value(settings).expect("serialize defaults");
+        let translation = json["translation"]
+            .as_object_mut()
+            .expect("translation settings");
+        translation.remove("sourceLanguage");
+        let screenshot = json["screenshotTranslation"]
+            .as_object_mut()
+            .expect("screenshot settings");
+        screenshot.remove("sourceLanguage");
+        let restored = serde_json::from_value::<AppSettings>(json).expect("deserialize legacy");
+        assert_eq!(restored.translation.source_language, "auto");
+        assert_eq!(restored.screenshot_translation.source_language, "auto");
     }
 
     #[test]

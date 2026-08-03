@@ -22,6 +22,18 @@ describe('sanitizeSettings', () => {
     expect(settings.translation.targetLanguage).toBe('auto')
   })
 
+  it('migrates missing source languages and rejects unsupported values', () => {
+    const legacy = sanitizeSettings({})
+    expect(legacy.translation.sourceLanguage).toBe('auto')
+    expect(legacy.screenshotTranslation.sourceLanguage).toBe('auto')
+    const unsupported = sanitizeSettings({
+      translation: { sourceLanguage: 'unsupported' },
+      screenshotTranslation: { sourceLanguage: 'unsupported' },
+    })
+    expect(unsupported.translation.sourceLanguage).toBe('auto')
+    expect(unsupported.screenshotTranslation.sourceLanguage).toBe('auto')
+  })
+
   it('keeps structured model names containing colons', () => {
     const settings = sanitizeSettings({
       providers: [

@@ -124,15 +124,33 @@ describe('TranslatorPage', () => {
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const language = screen.getByRole('combobox', { name: '目标语言' })
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveClass('translator-language-select')
+    expect(language).toHaveClass('translator-language-select')
     expect(language).toHaveValue('auto')
-    expect(screen.getByRole('option', { name: '简体中文' })).toBeVisible()
-    expect(screen.getByRole('option', { name: 'English' })).toBeVisible()
+    expect(screen.getAllByRole('option', { name: '简体中文' })).toHaveLength(2)
+    expect(screen.getAllByRole('option', { name: 'English' })).toHaveLength(2)
     fireEvent.change(language, { target: { value: 'ja' } })
     await act(async () => {
       vi.advanceTimersByTime(0)
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.targetLanguage).toBe('ja')
+  })
+
+  it('submits an explicit source language and retranslates immediately', async () => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    desktop.selection = 'English source'
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const language = screen.getByRole('combobox', { name: '源语言' })
+    expect(language).toHaveValue('auto')
+    fireEvent.change(language, { target: { value: 'en' } })
+    await act(async () => {
+      vi.advanceTimersByTime(0)
+      await Promise.resolve()
+    })
+    expect(desktop.translations.at(-1)?.sourceLanguage).toBe('en')
   })
 
   it('preserves providers and AI settings when a stale translator window changes method', async () => {

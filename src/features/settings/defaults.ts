@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     promptOptimizer: 'Control+Alt+P',
   },
   translation: {
+    sourceLanguage: 'auto',
     targetLanguage: 'auto',
     method: 'microsoft',
     aiEnabled: false,
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   screenshotTranslation: {
     enabled: true,
+    sourceLanguage: 'auto',
     targetLanguage: 'auto',
     ocrAiEnabled: false,
     ocrMethod: 'chaoxing',

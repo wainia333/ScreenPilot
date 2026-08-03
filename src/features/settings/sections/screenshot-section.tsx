@@ -47,6 +47,20 @@ export function ScreenshotSection({
             onChange={(targetLanguage) => update({ targetLanguage })}
           />
         </SettingRow>
+        <SettingRow label="源语言">
+          <SelectField
+            value={current.sourceLanguage}
+            label="截图翻译源语言"
+            options={[
+              { value: 'auto', label: '自动' },
+              { value: 'zh-CN', label: '简体中文' },
+              { value: 'en', label: 'English' },
+              { value: 'ja', label: '日本語' },
+              { value: 'ko', label: '한국어' },
+            ]}
+            onChange={(sourceLanguage) => update({ sourceLanguage })}
+          />
+        </SettingRow>
         <SettingRow label="开启大模型 OCR">
           <Toggle
             checked={current.ocrAiEnabled}

@@ -159,6 +159,22 @@ describe('SettingsPage', () => {
     expect(desktop.saves).toBe(0)
   })
 
+  it('saves, migrates, and cancels source language settings', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    const source = screen.getByRole('combobox', { name: '源语言' })
+    expect(source).toHaveValue('auto')
+    fireEvent.change(source, { target: { value: 'en' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    expect((await desktop.loadSettings()).translation.sourceLanguage).toBe('en')
+    fireEvent.change(screen.getByRole('combobox', { name: '源语言' }), { target: { value: 'zh-CN' } })
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en')
+  })
+
   it('uses the successful save as the cancel baseline and blocks cancel during saving', async () => {
     const desktop = new DeferredSaveDesktop()
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)

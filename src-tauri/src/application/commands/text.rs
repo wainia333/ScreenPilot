@@ -13,6 +13,8 @@ use tokio::time::{sleep, Duration};
 pub struct TranslationRequest {
     text: String,
     method: String,
+    #[serde(default = "default_source_language")]
+    source_language: String,
     target_language: String,
     generation: u64,
 }
@@ -47,7 +49,14 @@ pub async fn translator_translate(
             text: String::new(),
         });
     }
-    let target_language = translation::resolve_target_language(text, &request.target_language);
+    validate_translation_source_language(&request.source_language)?;
+    validate_translation_target_language(&request.target_language)?;
+    let source_language = translation::resolve_source_language(text, &request.source_language);
+    let target_language = translation::resolve_target_language_for_source(
+        text,
+        &request.target_language,
+        source_language,
+    );
     let target_language_name = translation_target_language_name(target_language)?;
     let mut settings = state.current()?;
     settings.normalize_ai_options();
@@ -70,14 +79,26 @@ pub async fn translator_translate(
             provider,
             &selection.model,
             &keys,
-            &build_template_prompt(&settings.translation.prompt, text, target_language_name),
+            &build_translation_prompt(
+                &settings.translation.prompt,
+                text,
+                target_language_name,
+                source_language,
+            ),
             "",
             AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
         )
         .await?
     } else {
         let credentials = adapter_credentials(&request.method)?;
-        translation::translate(&request.method, text, target_language, &credentials).await?
+        translation::translate_with_source(
+            &request.method,
+            text,
+            source_language,
+            target_language,
+            &credentials,
+        )
+        .await?
     };
     Ok(TranslationResult {
         generation: request.generation,
@@ -95,6 +116,22 @@ fn translation_target_language_name(target_language: &str) -> Result<&'static st
     }
 }
 
+fn validate_translation_source_language(source_language: &str) -> Result<(), String> {
+    if matches!(source_language, "auto" | "zh-CN" | "en" | "ja" | "ko") {
+        Ok(())
+    } else {
+        Err("Unsupported text translation source language".into())
+    }
+}
+
+fn validate_translation_target_language(target_language: &str) -> Result<(), String> {
+    if matches!(target_language, "auto" | "zh-CN" | "en" | "ja" | "ko") {
+        Ok(())
+    } else {
+        Err("Unsupported text translation target language".into())
+    }
+}
+
 fn build_template_prompt(template: &str, text: &str, language: &str) -> String {
     let trimmed = template.trim();
     let mut prompt = trimmed.replace("{lang}", language).replace("{text}", text);
@@ -103,6 +140,35 @@ fn build_template_prompt(template: &str, text: &str, language: &str) -> String {
         prompt.push_str(text);
     }
     prompt
+}
+
+fn build_translation_prompt(template: &str, text: &str, language: &str, source: &str) -> String {
+    let prompt = build_template_prompt(template, text, language)
+        .replace("{sourceLang}", translation_source_language_name(source))
+        .replace("{source}", translation_source_language_name(source));
+    if source == "auto" {
+        prompt
+    } else {
+        format!(
+            "Translate from {}.\n\n{}",
+            translation_source_language_name(source),
+            prompt
+        )
+    }
+}
+
+fn translation_source_language_name(source_language: &str) -> &'static str {
+    match source_language {
+        "zh-CN" => "Simplified Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        _ => "the detected source language",
+    }
+}
+
+fn default_source_language() -> String {
+    "auto".into()
 }
 
 fn optimizer_response_language_name(language: &str, text: &str) -> &'static str {
@@ -224,7 +290,8 @@ pub fn vision_take_selection(state: State<'_, AppState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_template_prompt, optimizer_response_language_name, translation_target_language_name,
+        build_template_prompt, build_translation_prompt, optimizer_response_language_name,
+        translation_target_language_name,
     };
 
     #[test]
@@ -246,6 +313,26 @@ mod tests {
         assert_eq!(
             build_template_prompt("Translate faithfully", "hello", "Japanese"),
             "Translate faithfully\n\nhello"
+        );
+    }
+
+    #[test]
+    fn includes_explicit_source_language_in_ai_prompt() {
+        assert!(build_translation_prompt(
+            "Translate to {lang}: {text}",
+            "hello",
+            "Simplified Chinese",
+            "en"
+        )
+        .starts_with("Translate from English."));
+        assert_eq!(
+            build_translation_prompt(
+                "Translate to {lang}: {text}",
+                "hello",
+                "Simplified Chinese",
+                "auto"
+            ),
+            "Translate to Simplified Chinese: hello"
         );
     }
 

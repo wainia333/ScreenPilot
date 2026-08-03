@@ -7,12 +7,14 @@ import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
+type SourceLanguage = TargetLanguage
 
 type ReferenceSettings = {
   translationAiEnabled?: boolean
   translatorProviderId?: string
   translatorModel?: string
   screenshotTranslation: Record<string, unknown> & {
+    sourceLanguage?: SourceLanguage
     targetLanguage?: TargetLanguage
     ocrAiEnabled?: boolean
     translationAiEnabled?: boolean
@@ -49,13 +51,22 @@ const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
   { value: 'ja', label: '日本語' },
   { value: 'ko', label: '한국어' },
 ]
+const sourceLanguageOptions: { value: SourceLanguage; label: string }[] = [
+  { value: 'auto', label: '自动' },
+  { value: 'zh-CN', label: '简体中文' },
+  { value: 'en', label: 'English' },
+  { value: 'ja', label: '日本語' },
+  { value: 'ko', label: '한국어' },
+]
 
 const languageHost = document.createElement('span')
+const sourceLanguageHost = document.createElement('span')
 const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
 const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
 const OCR_FLOATING_MAX_HEIGHT = 400
 languageHost.dataset.screenpilotTargetLanguage = 'true'
+sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
 
 function isTargetLanguage(value: unknown): value is TargetLanguage {
@@ -116,14 +127,19 @@ function syncFloatingResultLayout(
 }
 
 export default function ReferenceVisionAdapter() {
+  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('auto')
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>('auto')
   const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '' })
   const sourceRef = useRef({ imageId: '', text: '' })
   const requestSequenceRef = useRef(0)
+  const sourceLanguageRef = useRef<SourceLanguage>('auto')
+  const targetLanguageRef = useRef<TargetLanguage>('auto')
+  const overrideLockedRef = useRef(false)
   const aiAvailabilityRef = useRef({ ocr: true, translation: true })
   const aiAvailabilityLoadedRef = useRef(false)
 
   const clearOverride = useCallback(() => {
+    overrideLockedRef.current = false
     requestSequenceRef.current += 1
     setOverrideResult({ status: 'idle', text: '' })
   }, [])
@@ -131,8 +147,16 @@ export default function ReferenceVisionAdapter() {
   useEffect(() => {
     let active = true
     void invoke<ReferenceSettings>('get_settings').then((settings) => {
+      const configuredSource = settings.screenshotTranslation.sourceLanguage
+      if (active && isTargetLanguage(configuredSource)) {
+        sourceLanguageRef.current = configuredSource
+        setSourceLanguage(configuredSource)
+      }
       const configured = settings.screenshotTranslation.targetLanguage
-      if (active && isTargetLanguage(configured)) setTargetLanguage(configured)
+      if (active && isTargetLanguage(configured)) {
+        targetLanguageRef.current = configured
+        setTargetLanguage(configured)
+      }
       const screenshot = settings.screenshotTranslation
       aiAvailabilityRef.current = {
         ocr: screenshot.ocrAiEnabled === true
@@ -169,7 +193,7 @@ export default function ReferenceVisionAdapter() {
         imageId,
         text: payload.delta,
       }
-      clearOverride()
+      if (!overrideLockedRef.current) clearOverride()
     }).then((unlisten) => {
       if (active) dispose = unlisten
       else unlisten()
@@ -254,6 +278,12 @@ export default function ReferenceVisionAdapter() {
       }
       const divider = heading.previousElementSibling
       const source = divider?.previousElementSibling
+      const sourceHeading = source instanceof HTMLElement
+        ? source.firstElementChild instanceof HTMLElement ? source.firstElementChild : null
+        : null
+      const sourceMethodSelect = sourceHeading?.querySelector<HTMLSelectElement>(
+        'select:not([data-screenpilot-source-language-select="true"])',
+      ) ?? null
       body.dataset.screenpilotTranslationBody = 'true'
       const translateCard = body.parentElement
       translateCard?.setAttribute('data-screenpilot-window-frame', 'true')
@@ -325,6 +355,15 @@ export default function ReferenceVisionAdapter() {
       }
       heading.dataset.screenpilotTranslatedHeading = 'true'
       methodSelect.dataset.screenpilotTranslationMethod = 'true'
+      if (sourceHeading !== null) {
+        sourceHeading.dataset.screenpilotOriginalHeading = 'true'
+        if (
+          sourceLanguageHost.parentElement !== sourceHeading
+          || sourceLanguageHost.nextSibling !== sourceMethodSelect
+        ) {
+          sourceHeading.insertBefore(sourceLanguageHost, sourceMethodSelect)
+        }
+      }
       if (languageHost.parentElement !== heading || languageHost.nextSibling !== methodSelect) {
         heading.insertBefore(languageHost, methodSelect)
       }
@@ -366,6 +405,7 @@ export default function ReferenceVisionAdapter() {
         card.removeAttribute('data-screenpilot-floating-translate-surface')
       })
       languageHost.remove()
+      sourceLanguageHost.remove()
       resultHost.remove()
     }
   }, [clearOverride])
@@ -380,30 +420,93 @@ export default function ReferenceVisionAdapter() {
     }
   }, [overrideResult.status])
 
-  const persistTargetLanguage = useCallback(async (value: TargetLanguage) => {
+  const persistTargetLanguage = useCallback(async (value: TargetLanguage, source: SourceLanguage) => {
     const settings = await invoke<ReferenceSettings>('get_settings')
     await invoke('save_settings', {
       settings: {
         ...settings,
         screenshotTranslation: {
           ...settings.screenshotTranslation,
+          sourceLanguage: source,
           targetLanguage: value,
         },
       },
     })
   }, [])
 
+  const persistSourceLanguage = useCallback(async (value: SourceLanguage, target: TargetLanguage) => {
+    const settings = await invoke<ReferenceSettings>('get_settings')
+    await invoke('save_settings', {
+      settings: {
+        ...settings,
+        screenshotTranslation: {
+          ...settings.screenshotTranslation,
+          targetLanguage: target,
+          sourceLanguage: value,
+        },
+      },
+    })
+  }, [])
+
+  const translateVisibleSource = useCallback(async (
+    source: string,
+    nextSourceLanguage: SourceLanguage,
+    nextTargetLanguage: TargetLanguage,
+  ): Promise<TranslateResult | null> => {
+    if (!source) return null
+    return invoke<TranslateResult>('vision_translate_text', {
+      text: source,
+      sourceLanguage: nextSourceLanguage,
+      targetLanguage: nextTargetLanguage,
+    })
+  }, [])
+
+  const handleSourceLanguage = useCallback(async (value: SourceLanguage) => {
+    overrideLockedRef.current = true
+    sourceLanguageRef.current = value
+    setSourceLanguage(value)
+    const source = visibleOcrSource() || sourceRef.current.text.trim()
+    const sequence = requestSequenceRef.current + 1
+    requestSequenceRef.current = sequence
+    if (source) setOverrideResult({ status: 'loading', text: '' })
+    else setOverrideResult({ status: 'idle', text: '' })
+    try {
+      await invoke('vision_cancel_stream').catch(() => undefined)
+      const [, translation] = await Promise.all([
+        persistSourceLanguage(value, targetLanguageRef.current),
+        translateVisibleSource(source, value, targetLanguageRef.current),
+      ])
+      if (sequence !== requestSequenceRef.current || translation === null) return
+      if (translation.success) {
+        setOverrideResult({ status: 'ready', text: translation.translated ?? '' })
+      } else {
+        setOverrideResult({ status: 'error', text: translation.error ?? '翻译失败' })
+      }
+    } catch (error) {
+      if (sequence !== requestSequenceRef.current) return
+      setOverrideResult({
+        status: 'error',
+        text: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }, [persistSourceLanguage, translateVisibleSource])
+
   const handleTargetLanguage = useCallback(async (value: TargetLanguage) => {
+    overrideLockedRef.current = true
+    targetLanguageRef.current = value
     setTargetLanguage(value)
     const source = visibleOcrSource() || sourceRef.current.text.trim()
     const sequence = requestSequenceRef.current + 1
     requestSequenceRef.current = sequence
     if (source) setOverrideResult({ status: 'loading', text: '' })
+    else setOverrideResult({ status: 'idle', text: '' })
     try {
-      const translation = source
-        ? invoke<TranslateResult>('vision_translate_text', { text: source, targetLanguage: value })
-        : Promise.resolve<TranslateResult | null>(null)
-      const [, result] = await Promise.all([persistTargetLanguage(value), translation])
+      await invoke('vision_cancel_stream').catch(() => undefined)
+      const translation = translateVisibleSource(source, sourceLanguageRef.current, value)
+      const [, result] = await Promise.all([
+        persistTargetLanguage(value, sourceLanguageRef.current),
+        translation,
+      ])
       if (sequence !== requestSequenceRef.current || result === null) return
       if (result.success) {
         setOverrideResult({ status: 'ready', text: result.translated ?? '' })
@@ -417,11 +520,28 @@ export default function ReferenceVisionAdapter() {
         text: error instanceof Error ? error.message : String(error),
       })
     }
-  }, [persistTargetLanguage])
+  }, [persistTargetLanguage, translateVisibleSource])
 
   return (
     <main data-screenpilot-vision-adapter="true">
       <ReferenceVision />
+      {createPortal(
+        <span className="screenpilot-source-language-control">
+          <label htmlFor="screenpilot-source-language">源语言</label>
+          <select
+            id="screenpilot-source-language"
+            aria-label="源语言"
+            data-screenpilot-source-language-select="true"
+            value={sourceLanguage}
+            onChange={(event) => void handleSourceLanguage(event.target.value as SourceLanguage)}
+          >
+            {sourceLanguageOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </span>,
+        sourceLanguageHost,
+      )}
       {createPortal(
         <span className="screenpilot-target-language-control">
           <label htmlFor="screenpilot-target-language">目标语言</label>

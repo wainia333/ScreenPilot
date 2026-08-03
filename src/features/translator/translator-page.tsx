@@ -3,14 +3,14 @@ import { useEffect, useRef, useState } from 'react'
 import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 import { translationMethodOptions } from '../settings/translation-methods'
-import type { AppSettings, TranslationMethod } from '../settings/types'
+import type { AppSettings, TranslationLanguage, TranslationMethod } from '../settings/types'
 import { isValidModelSelection, normalizeAiAvailability } from '../settings/sanitize'
 import { DEFAULT_SETTINGS } from '../settings/defaults'
 import type { TranslationSettingsPatch } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 
-type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
+type TargetLanguage = TranslationLanguage
 
 type TranslationHistory = {
   id: string
@@ -29,11 +29,19 @@ const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
   { value: 'ja', label: '日本語' },
   { value: 'ko', label: '한국어' },
 ]
+const sourceLanguageOptions: { value: TranslationLanguage; label: string }[] = [
+  { value: 'auto', label: '自动' },
+  { value: 'zh-CN', label: '简体中文' },
+  { value: 'en', label: 'English' },
+  { value: 'ja', label: '日本語' },
+  { value: 'ko', label: '한국어' },
+]
 
 function translationRequestKey(input: string, settings: AppSettings): string {
   return JSON.stringify([
     input,
     settings.translation.method,
+    settings.translation.sourceLanguage,
     settings.translation.targetLanguage,
   ])
 }
@@ -145,6 +153,7 @@ export function TranslatorPage() {
       void desktop.translate({
         text: input,
         method: settings.translation.method,
+        sourceLanguage: settings.translation.sourceLanguage,
         targetLanguage: settings.translation.targetLanguage,
         generation: requestGeneration,
       }).then((result) => {
@@ -233,6 +242,18 @@ export function TranslatorPage() {
         <section className="ocr-result-section ocr-result-source">
           <div className="ocr-result-section-heading">
             <label htmlFor="translator-input">原文</label>
+            <select
+              aria-label="源语言"
+              className="translator-language-select"
+              value={settings?.translation.sourceLanguage ?? 'auto'}
+              disabled={settings === null}
+              onChange={(event) => {
+                if (settings === null) return
+                updateTranslationSettings({ sourceLanguage: event.target.value as TranslationLanguage })
+              }}
+            >
+              {sourceLanguageOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+            </select>
           </div>
           <textarea
             ref={inputRef}
@@ -282,6 +303,7 @@ export function TranslatorPage() {
             </button>
             <select
               aria-label="目标语言"
+              className="translator-language-select"
               value={settings?.translation.targetLanguage ?? 'auto'}
               disabled={settings === null}
               onChange={(event) => {

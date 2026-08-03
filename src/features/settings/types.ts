@@ -19,6 +19,8 @@ export type TranslationMethod =
   | 'caiyun2'
   | 'microsoft'
 
+export type TranslationLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
+
 export type ModelSelection = {
   providerId: string
   model: string
@@ -54,6 +56,7 @@ export type RetrySettings = {
 }
 
 export type TranslationSettings = {
+  sourceLanguage: TranslationLanguage
   targetLanguage: string
   method: TranslationMethod
   aiEnabled: boolean
@@ -63,6 +66,7 @@ export type TranslationSettings = {
 
 export type ScreenshotTranslationSettings = {
   enabled: boolean
+  sourceLanguage: TranslationLanguage
   targetLanguage: string
   ocrAiEnabled: boolean
   ocrMethod: OcrMethod

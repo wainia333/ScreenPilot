@@ -99,13 +99,33 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   white-space: nowrap;
 }
 
+.screenpilot-source-language-control {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
 [data-screenpilot-target-language="true"] {
   align-items: center;
   display: inline-flex;
   margin-left: auto;
 }
 
+[data-screenpilot-source-language="true"] {
+  align-items: center;
+  display: inline-flex;
+  margin-left: auto;
+}
+
 .screenpilot-target-language-control label {
+  color: rgb(163 163 163);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.screenpilot-source-language-control label {
   color: rgb(163 163 163);
   font-size: 10.5px;
   font-weight: 600;
@@ -127,7 +147,28 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   width: 100px;
 }
 
+[data-screenpilot-original-heading="true"] select {
+  background: rgb(255 255 255 / 0.8);
+  border: 1px solid rgb(0 0 0 / 0.06);
+  border-radius: 6px;
+  color: rgb(115 115 115);
+  font-size: 11.5px !important;
+  font-weight: 500;
+  height: 24px !important;
+  line-height: 22px;
+  max-width: 100px !important;
+  min-width: 100px;
+  outline: none;
+  padding: 0 6px;
+  width: 100px;
+}
+
 [data-screenpilot-target-language="true"] + select[data-screenpilot-translation-method="true"] {
+  margin-left: 6px !important;
+  margin-right: 0 !important;
+}
+
+[data-screenpilot-source-language="true"] + select {
   margin-left: 6px !important;
   margin-right: 0 !important;
 }
@@ -188,7 +229,17 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
     color: rgb(115 115 115);
   }
 
+  .screenpilot-source-language-control label {
+    color: rgb(115 115 115);
+  }
+
   [data-screenpilot-translation-body="true"] select {
+    background: rgb(23 23 23 / 0.7);
+    border-color: rgb(255 255 255 / 0.08);
+    color: rgb(163 163 163);
+  }
+
+  [data-screenpilot-original-heading="true"] select {
     background: rgb(23 23 23 / 0.7);
     border-color: rgb(255 255 255 / 0.08);
     color: rgb(163 163 163);

@@ -23,6 +23,20 @@ export function TranslationSection({
   return (
     <>
       <SettingGroup title="翻译行为">
+        <SettingRow label="源语言">
+          <SelectField
+            value={settings.translation.sourceLanguage}
+            label="源语言"
+            options={[
+              { value: 'auto', label: '自动判断' },
+              { value: 'zh-CN', label: '简体中文' },
+              { value: 'en', label: 'English' },
+              { value: 'ja', label: '日本語' },
+              { value: 'ko', label: '한국어' },
+            ]}
+            onChange={(sourceLanguage) => update({ sourceLanguage })}
+          />
+        </SettingRow>
         <SettingRow label="目标语言">
           <SelectField
             value={settings.translation.targetLanguage}

@@ -940,7 +940,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
         "hotkey": settings.shortcuts.translator,
         "theme": settings.theme,
         "targetLang": settings.translation.target_language,
-        "source": "auto",
+        "source": settings.translation.source_language,
         "autoPaste": settings.general.auto_paste,
         "launchAtStartup": settings.general.launch_at_startup,
         "launchAtStartupAsAdmin": settings.general.launch_at_startup_as_administrator,
@@ -953,6 +953,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
         "retryAttempts": settings.retry.attempts,
         "screenshotTranslation": {
             "enabled": settings.screenshot_translation.enabled,
+            "sourceLanguage": settings.screenshot_translation.source_language,
             "targetLanguage": settings.screenshot_translation.target_language,
             "hotkey": settings.shortcuts.screenshot_translation,
             "providerId": ocr_provider,
@@ -1052,6 +1053,10 @@ fn apply_screenshot_settings_patch(
     if let Some(target_language) = screenshot.get("targetLanguage").and_then(Value::as_str) {
         validate_screenshot_target_language(target_language)?;
         current.screenshot_translation.target_language = target_language.to_string();
+    }
+    if let Some(source_language) = screenshot.get("sourceLanguage").and_then(Value::as_str) {
+        validate_screenshot_source_language(source_language)?;
+        current.screenshot_translation.source_language = source_language.to_string();
     }
     if let Some(show_source) = screenshot.get("directTranslate").and_then(Value::as_bool) {
         current.screenshot_translation.show_source = !show_source;
@@ -1282,7 +1287,7 @@ pub async fn vision_translate(
 }
 
 async fn async_translation(state: &AppState, source: String) -> Result<(String, String), String> {
-    let translated = translate_source(state, &source, None).await?;
+    let translated = translate_source(state, &source, None, None).await?;
     Ok((source, translated))
 }
 
@@ -1291,9 +1296,17 @@ pub async fn vision_translate_text(
     state: State<'_, AppState>,
     text: String,
     target_language: Option<String>,
+    source_language: Option<String>,
 ) -> Result<Value, String> {
     Ok(
-        match translate_source(&state, &text, target_language.as_deref()).await {
+        match translate_source(
+            &state,
+            &text,
+            source_language.as_deref(),
+            target_language.as_deref(),
+        )
+        .await
+        {
             Ok(translated) => json!({ "success": true, "translated": translated }),
             Err(error) => json!({ "success": false, "error": error }),
         },
@@ -1339,14 +1352,20 @@ async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String
 async fn translate_source(
     state: &AppState,
     source: &str,
+    requested_source_language: Option<&str>,
     requested_target_language: Option<&str>,
 ) -> Result<String, String> {
     let mut settings = state.current()?;
     settings.normalize_ai_options();
+    let requested_source_language =
+        requested_source_language.unwrap_or(&settings.screenshot_translation.source_language);
+    validate_screenshot_source_language(requested_source_language)?;
+    let source_language = translation::resolve_source_language(source, requested_source_language);
     let target_language =
         requested_target_language.unwrap_or(&settings.screenshot_translation.target_language);
     validate_screenshot_target_language(target_language)?;
-    let target_language = translation::resolve_target_language(source, target_language);
+    let target_language =
+        translation::resolve_target_language_for_source(source, target_language, source_language);
     if settings.screenshot_translation.translation_method == TranslationMethod::Ai {
         let selection = settings
             .screenshot_translation
@@ -1358,6 +1377,7 @@ async fn translate_source(
         let prompt = build_screenshot_translation_prompt(
             source,
             screenshot_target_name(target_language),
+            screenshot_source_name(source_language),
             &settings.screenshot_translation.translation_prompt,
         );
         complete_text(
@@ -1381,20 +1401,51 @@ async fn translate_source(
             .map(CredentialVault::provider_keys)
             .transpose()?
             .unwrap_or_default();
-        translation::translate(method, source, target_language, &credentials).await
+        translation::translate_with_source(
+            method,
+            source,
+            source_language,
+            target_language,
+            &credentials,
+        )
+        .await
     }
 }
 
-fn build_screenshot_translation_prompt(source: &str, language: &str, template: &str) -> String {
+fn build_screenshot_translation_prompt(
+    source: &str,
+    language: &str,
+    source_language: &str,
+    template: &str,
+) -> String {
     let trimmed = template.trim();
     let mut prompt = trimmed
         .replace("{lang}", language)
+        .replace("{sourceLang}", screenshot_source_name(source_language))
         .replace("{text}", source);
     if !trimmed.contains("{text}") {
         prompt.push_str("\n\n");
         prompt.push_str(source);
     }
-    prompt
+    if source_language == "auto" {
+        prompt
+    } else {
+        format!(
+            "Translate from {}.\n\n{}",
+            screenshot_source_name(source_language),
+            prompt
+        )
+    }
+}
+
+fn screenshot_source_name(source_language: &str) -> &'static str {
+    match source_language {
+        "zh-CN" => "Simplified Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        _ => "the detected source language",
+    }
 }
 
 fn screenshot_target_name(target_language: &str) -> &'static str {
@@ -1412,6 +1463,14 @@ fn validate_screenshot_target_language(target_language: &str) -> Result<(), Stri
         Ok(())
     } else {
         Err("Unsupported screenshot translation target language".into())
+    }
+}
+
+fn validate_screenshot_source_language(source_language: &str) -> Result<(), String> {
+    if matches!(source_language, "auto" | "zh-CN" | "en" | "ja" | "ko") {
+        Ok(())
+    } else {
+        Err("Unsupported screenshot translation source language".into())
     }
 }
 
@@ -1461,6 +1520,7 @@ pub async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result
         &build_screenshot_translation_prompt(
             &text,
             language,
+            "auto",
             &settings.prompt_optimizer.optimize_prompt,
         ),
         AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
@@ -1571,22 +1631,36 @@ mod tests {
     fn defines_screenshot_translation_targets() {
         for language in ["auto", "zh-CN", "en", "ja", "ko"] {
             assert!(validate_screenshot_target_language(language).is_ok());
+            assert!(validate_screenshot_source_language(language).is_ok());
             assert!(!screenshot_target_name(language).is_empty());
         }
         assert!(validate_screenshot_target_language("unsupported").is_err());
+        assert!(validate_screenshot_source_language("unsupported").is_err());
         assert_eq!(screenshot_target_name("en"), "English");
     }
 
     #[test]
     fn expands_reference_screenshot_translation_placeholders() {
         assert_eq!(
-            build_screenshot_translation_prompt("source", "English", "Translate to {lang}: {text}"),
+            build_screenshot_translation_prompt(
+                "source",
+                "English",
+                "auto",
+                "Translate to {lang}: {text}"
+            ),
             "Translate to English: source"
         );
         assert_eq!(
-            build_screenshot_translation_prompt("source", "English", "Translate only"),
+            build_screenshot_translation_prompt("source", "English", "auto", "Translate only"),
             "Translate only\n\nsource"
         );
+        assert!(build_screenshot_translation_prompt(
+            "source",
+            "Simplified Chinese",
+            "en",
+            "Translate to {lang}: {text}"
+        )
+        .starts_with("Translate from English."));
     }
 
     #[test]
