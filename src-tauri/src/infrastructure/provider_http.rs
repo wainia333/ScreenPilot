@@ -19,7 +19,9 @@ struct ModelItem {
 pub fn client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60))
+        // Responses reasoning and web-search streams can legitimately stay
+        // open for longer than a conventional short HTTP request timeout.
+        .timeout(Duration::from_secs(300))
         .user_agent(format!("ScreenPilot/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| error.to_string())

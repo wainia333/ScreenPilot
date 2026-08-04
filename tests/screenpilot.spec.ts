@@ -1082,6 +1082,11 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
   const answer = page.locator('[data-screenpilot-answer-panel="true"]')
   await expect(answer).toBeVisible()
   await expect.poll(async () => Math.round((await answer.boundingBox())?.height ?? 0)).toBe(216)
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+    }
+  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(282)
   const answerInitial = await answer.boundingBox()
   if (answerInitial === null) throw new Error('Large-model answer geometry is missing')
   const answerNative = await page.evaluate(() => (
@@ -1216,6 +1221,214 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
   expect(unexpectedConsoleErrors).toEqual([])
   expect(pageErrors).toEqual([])
   await promptPage.close()
+})
+
+test('Vision text-only answer and prompt optimization use the expanded native frame', async ({ page }) => {
+  test.setTimeout(60_000)
+
+  const prepare = async (targetPage: Page) => {
+    await installVisionTauriMock(targetPage, undefined, false)
+    await targetPage.setViewportSize({ width: 1280, height: 720 })
+    await targetPage.goto('/?window=vision#vision?mode=chat')
+    await waitForVisionSelection(targetPage)
+    await expect(targetPage.locator('[data-screenpilot-vision-image="false"]')).toBeVisible()
+  }
+
+  await prepare(page)
+  const prompt = page.getByPlaceholder('问点什么...')
+  await prompt.fill('Answer without a screenshot.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+  const answer = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answer).toBeVisible()
+  await expect.poll(async () => Math.round((await answer.boundingBox())?.height ?? 0)).toBe(324)
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+    }
+  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(390)
+  const answerNative = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingRect: { width: number; height: number } | null
+        floatingMinimumHeight: number
+        floatingHasScreenshot: boolean
+      }
+    }
+  ).__SCREENPILOT_TEST__)
+  if (answerNative.floatingRect === null) throw new Error('Text-only native geometry is missing')
+  expect(answerNative.floatingRect.height).toBe(390)
+  expect(answerNative.floatingMinimumHeight).toBe(390)
+  expect(answerNative.floatingHasScreenshot).toBe(false)
+
+  await page.setViewportSize({ width: Math.round(answerNative.floatingRect.width), height: 190 })
+  await expect.poll(async () => Math.round((await answer.boundingBox())?.height ?? 0)).toBe(324)
+  await page.setViewportSize({ width: Math.round(answerNative.floatingRect.width), height: 510 })
+  await expect.poll(async () => Math.round((await answer.boundingBox())?.height ?? 0)).toBeGreaterThan(424)
+
+  const promptPage = await page.context().newPage()
+  await prepare(promptPage)
+  await promptPage.getByPlaceholder('问点什么...').fill('Optimize without a screenshot.')
+  await promptPage.getByRole('button', { name: '优化', exact: true }).click()
+  const preview = promptPage.locator('[data-screenpilot-vision-prompt-preview="true"]')
+  await expect(preview).toBeVisible()
+  await expect.poll(async () => Math.round((await preview.boundingBox())?.height ?? 0)).toBe(324)
+  const promptNative = await promptPage.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingRect: { width: number; height: number } | null
+        floatingMinimumHeight: number
+        floatingHasScreenshot: boolean
+      }
+    }
+  ).__SCREENPILOT_TEST__)
+  if (promptNative.floatingRect === null) throw new Error('Text-only prompt native geometry is missing')
+  expect(promptNative.floatingRect.height).toBe(390)
+  expect(promptNative.floatingMinimumHeight).toBe(390)
+  expect(promptNative.floatingHasScreenshot).toBe(false)
+  await promptPage.setViewportSize({ width: Math.round(promptNative.floatingRect.width), height: 190 })
+  await expect.poll(async () => Math.round((await preview.boundingBox())?.height ?? 0)).toBe(324)
+  await promptPage.setViewportSize({ width: Math.round(promptNative.floatingRect.width), height: 510 })
+  await expect.poll(async () => Math.round((await preview.boundingBox())?.height ?? 0)).toBeGreaterThan(424)
+  await promptPage.close()
+})
+
+test('Vision floating layout retries a deferred native resize before recording success', async ({ page }) => {
+  test.setTimeout(60_000)
+  // Make the first positioned native set deliberately report deferred. The
+  // retry helper must leave the cache untouched until the following applied
+  // response, then settle without an unbounded ordinary-feedback loop.
+  await installVisionTauriMock(page, undefined, false, undefined, 0, 1)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.getByPlaceholder('问点什么...').fill('Retry after native sizing.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+
+  const answer = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answer).toBeVisible()
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingDeferredRects: { width: number; height: number }[]
+        floatingAppliedRects: { width: number; height: number }[]
+        floatingRect: { width: number; height: number } | null
+      }
+    }
+  ).__SCREENPILOT_TEST__.floatingDeferredRects.length)).toBeGreaterThan(0)
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingAppliedRects: { width: number; height: number }[]
+      }
+    }
+  ).__SCREENPILOT_TEST__.floatingAppliedRects.length)).toBeGreaterThan(0)
+
+  const native = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingRect: { width: number; height: number } | null
+        floatingRects: { width: number; height: number }[]
+      }
+    }
+  ).__SCREENPILOT_TEST__)
+  if (native.floatingRect === null) throw new Error('Retried native geometry is missing')
+  expect(native.floatingRect.height).toBe(390)
+  expect(native.floatingRects.length).toBeLessThan(12)
+
+  const profileParity = await page.evaluate(async () => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingRect: { width: number; height: number } | null
+        floatingHasScreenshot: boolean
+      }
+      __TAURI_INTERNALS__: {
+        invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>
+      }
+    }
+    await testWindow.__TAURI_INTERNALS__.invoke('vision_set_floating', {
+      rect: { width: 480, height: 390, hasScreenshot: false },
+    })
+    const textOnly = {
+      height: testWindow.__SCREENPILOT_TEST__.floatingRect?.height ?? 0,
+      hasScreenshot: testWindow.__SCREENPILOT_TEST__.floatingHasScreenshot,
+    }
+    await testWindow.__TAURI_INTERNALS__.invoke('vision_set_floating', {
+      rect: { width: 480, height: 282 },
+    })
+    const compact = {
+      height: testWindow.__SCREENPILOT_TEST__.floatingRect?.height ?? 0,
+      hasScreenshot: testWindow.__SCREENPILOT_TEST__.floatingHasScreenshot,
+    }
+    await testWindow.__TAURI_INTERNALS__.invoke('vision_fly_floating', {
+      rect: {
+        from: { x: 0, y: 0 },
+        to: { x: 4, y: 4 },
+        width: 480,
+        height: 56,
+      },
+    })
+    return {
+      textOnly,
+      compact,
+      omittedFlyHasScreenshot: testWindow.__SCREENPILOT_TEST__.floatingHasScreenshot,
+    }
+  })
+  expect(profileParity.textOnly).toEqual({ height: 390, hasScreenshot: false })
+  expect(profileParity.compact).toEqual({ height: 282, hasScreenshot: true })
+  expect(profileParity.omittedFlyHasScreenshot).toBe(true)
+})
+
+test('Vision mode transitions replace the previous screenshot height profile', async ({ page }) => {
+  test.setTimeout(60_000)
+  await installVisionTauriMock(page, undefined, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await page.getByPlaceholder('问点什么...').fill('Text history before the screenshot.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+  await expect(page.locator('[data-screenpilot-answer-panel="true"]')).toBeVisible()
+  await expect(page.getByTitle('历史')).toContainText('1')
+  await page.getByRole('button', { name: '关闭' }).click()
+  await page.reload()
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await page.getByPlaceholder('问点什么...').fill('Screenshot history after text-only.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+  const screenshotAnswer = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(screenshotAnswer).toBeVisible()
+  await expect.poll(async () => Math.round((await screenshotAnswer.boundingBox())?.height ?? 0)).toBe(216)
+  await expect(page.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
+
+  await page.getByTitle('历史').click()
+  const textHistory = page.getByRole('button', { name: /Text history before the screenshot/ }).first()
+  await expect(textHistory).toBeVisible()
+  await textHistory.click()
+  const restoredTextAnswer = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(page.locator('[data-screenpilot-vision-image="false"]')).toBeVisible()
+  await expect.poll(async () => Math.round((await restoredTextAnswer.boundingBox())?.height ?? 0)).toBe(324)
+  const restoredNative = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingRect: { width: number; height: number } | null
+        floatingMinimumHeight: number
+        floatingHasScreenshot: boolean
+      }
+    }
+  ).__SCREENPILOT_TEST__)
+  if (restoredNative.floatingRect === null) throw new Error('Restored text-only native geometry is missing')
+  expect(restoredNative.floatingRect.height).toBe(390)
+  expect(restoredNative.floatingMinimumHeight).toBe(390)
+  expect(restoredNative.floatingHasScreenshot).toBe(false)
+
+  await page.reload()
+  await waitForVisionSelection(page)
+  await expect(page.locator('[data-screenpilot-vision-image="false"]')).toBeVisible()
+  await expect(page.locator('[data-screenpilot-answer-panel="true"]')).toHaveCount(0)
 })
 
 test('Vision answer actions stay pinned while long responses scroll', async ({ page }) => {

@@ -3,7 +3,47 @@ use crate::infrastructure::images::ImageStore;
 use crate::infrastructure::settings_store::SettingsStore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use tokio::sync::Notify;
+
+/// A per-request cancellation primitive. The atomic flag makes cancellation
+/// cheap to probe between events, while Notify wakes an in-flight network
+/// operation immediately instead of waiting for another SSE chunk.
+pub struct CancellationSignal {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl CancellationSignal {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 pub struct AppState {
     pub settings: RwLock<AppSettings>,
@@ -12,13 +52,19 @@ pub struct AppState {
     pub webview_data_directory: PathBuf,
     pub cache_directory: PathBuf,
     pub vision_busy: AtomicBool,
-    reference_vision_cancelled: AtomicBool,
+    reference_vision: Mutex<ReferenceVisionState>,
     surface_generation: AtomicU64,
     surface_transition: Mutex<()>,
     settings_write: Mutex<()>,
     translator_selection: Mutex<String>,
     vision_selection: Mutex<String>,
     startup_notice: Mutex<Option<String>>,
+}
+
+struct ReferenceVisionState {
+    generation: u64,
+    cancelled: bool,
+    signal: Arc<CancellationSignal>,
 }
 
 impl AppState {
@@ -36,7 +82,11 @@ impl AppState {
             webview_data_directory,
             cache_directory,
             vision_busy: AtomicBool::new(false),
-            reference_vision_cancelled: AtomicBool::new(false),
+            reference_vision: Mutex::new(ReferenceVisionState {
+                generation: 0,
+                cancelled: false,
+                signal: Arc::new(CancellationSignal::new()),
+            }),
             surface_generation: AtomicU64::new(0),
             surface_transition: Mutex::new(()),
             settings_write: Mutex::new(()),
@@ -54,18 +104,46 @@ impl AppState {
         self.vision_busy.store(false, Ordering::SeqCst);
     }
 
-    pub fn begin_reference_vision_stream(&self) {
-        self.reference_vision_cancelled
-            .store(false, Ordering::SeqCst);
+    pub fn begin_reference_vision_stream(&self) -> u64 {
+        let Ok(mut state) = self.reference_vision.lock() else {
+            return 0;
+        };
+        // Invalidate the old generation before waking it. This ordering closes
+        // the Stop/new-request interleaving where an old task could observe the
+        // new token while its wakeup was still in flight.
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.signal.cancel();
+        state.cancelled = false;
+        state.signal = Arc::new(CancellationSignal::new());
+        state.generation
     }
 
     pub fn cancel_reference_vision_stream(&self) {
-        self.reference_vision_cancelled
-            .store(true, Ordering::SeqCst);
+        if let Ok(mut state) = self.reference_vision.lock() {
+            state.generation = state.generation.wrapping_add(1).max(1);
+            state.cancelled = true;
+            state.signal.cancel();
+        }
     }
 
+    pub fn reference_vision_signal(&self, generation: u64) -> Option<Arc<CancellationSignal>> {
+        let state = self.reference_vision.lock().ok()?;
+        (state.generation == generation && !state.cancelled).then(|| Arc::clone(&state.signal))
+    }
+
+    #[allow(dead_code)]
     pub fn reference_vision_stream_cancelled(&self) -> bool {
-        self.reference_vision_cancelled.load(Ordering::SeqCst)
+        self.reference_vision
+            .lock()
+            .map(|state| state.cancelled)
+            .unwrap_or(true)
+    }
+
+    pub fn reference_vision_stream_current(&self, generation: u64) -> bool {
+        self.reference_vision
+            .lock()
+            .map(|state| state.generation == generation && !state.cancelled)
+            .unwrap_or(false)
     }
 
     pub fn begin_surface_action(&self) -> u64 {
@@ -190,5 +268,35 @@ mod tests {
             state.with_current_surface_action(second, || Ok::<_, String>("current")),
             Ok(Some("current"))
         );
+    }
+
+    #[test]
+    fn reference_stream_generation_invalidates_cancelled_and_replaced_requests() {
+        let (state, _directory) = state();
+        let first = state.begin_reference_vision_stream();
+        assert!(state.reference_vision_stream_current(first));
+        state.cancel_reference_vision_stream();
+        assert!(!state.reference_vision_stream_current(first));
+
+        let second = state.begin_reference_vision_stream();
+        assert_ne!(first, second);
+        assert!(state.reference_vision_stream_current(second));
+        assert!(!state.reference_vision_stream_current(first));
+    }
+
+    #[test]
+    fn generation_transition_wakes_only_the_invalidated_signal() {
+        let (state, _directory) = state();
+        let first = state.begin_reference_vision_stream();
+        let first_signal = state.reference_vision_signal(first).expect("first signal");
+        let second = state.begin_reference_vision_stream();
+        let second_signal = state
+            .reference_vision_signal(second)
+            .expect("second signal");
+        assert!(first_signal.is_cancelled());
+        assert!(!second_signal.is_cancelled());
+        state.cancel_reference_vision_stream();
+        assert!(second_signal.is_cancelled());
+        assert!(!state.reference_vision_stream_current(second));
     }
 }

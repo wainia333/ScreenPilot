@@ -17,32 +17,46 @@ pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
     let mut request = Url::parse(input).map_err(|_| "Provider URL is invalid")?;
     request.set_query(None);
     request.set_fragment(None);
+
+    // `Url::path` is already percent-encoded and always uses `/` as the path
+    // separator.  Keep the path's case and any proxy prefix intact; endpoint
+    // names are case-sensitive and providers commonly mount their API below a
+    // path such as `/openai/v1`.
     let path = request.path().trim_end_matches('/');
+    let base_path = if path.is_empty() { "/v1" } else { path };
     let (request_path, models_path, protocol) =
         if let Some(root) = path.strip_suffix("/chat/completions") {
+            let explicit_chat = root.ends_with("/v1");
             (
-                path.to_string(),
-                format!("{root}/models"),
-                ApiProtocol::ChatCompletions,
+                if explicit_chat {
+                    path.to_string()
+                } else {
+                    append_path(root, "responses")
+                },
+                append_path(root, "models"),
+                if explicit_chat {
+                    ApiProtocol::ChatCompletions
+                } else {
+                    ApiProtocol::Responses
+                },
             )
         } else if let Some(root) = path.strip_suffix("/responses") {
             (
                 path.to_string(),
-                format!("{root}/models"),
+                append_path(root, "models"),
                 ApiProtocol::Responses,
             )
         } else if let Some(root) = path.strip_suffix("/models") {
             (
-                format!("{root}/chat/completions"),
+                append_path(root, "responses"),
                 path.to_string(),
-                ApiProtocol::ChatCompletions,
+                ApiProtocol::Responses,
             )
         } else {
-            let root = if path.is_empty() { "" } else { path };
             (
-                format!("{root}/chat/completions"),
-                format!("{root}/models"),
-                ApiProtocol::ChatCompletions,
+                append_path(base_path, "responses"),
+                append_path(base_path, "models"),
+                ApiProtocol::Responses,
             )
         };
     request.set_path(&request_path);
@@ -55,6 +69,11 @@ pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
     })
 }
 
+fn append_path(prefix: &str, suffix: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    format!("{prefix}/{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,9 +83,9 @@ mod tests {
         let cases = [
             (
                 "https://api.example.com/v1",
-                "https://api.example.com/v1/chat/completions",
+                "https://api.example.com/v1/responses",
                 "https://api.example.com/v1/models",
-                ApiProtocol::ChatCompletions,
+                ApiProtocol::Responses,
             ),
             (
                 "https://api.example.com/v1/chat/completions?ignored=true",
@@ -82,9 +101,9 @@ mod tests {
             ),
             (
                 "http://127.0.0.1:11434/v1/models",
-                "http://127.0.0.1:11434/v1/chat/completions",
+                "http://127.0.0.1:11434/v1/responses",
                 "http://127.0.0.1:11434/v1/models",
-                ApiProtocol::ChatCompletions,
+                ApiProtocol::Responses,
             ),
         ];
         for (input, request, models, protocol) in cases {
@@ -92,6 +111,149 @@ mod tests {
             assert_eq!(endpoints.request.as_str(), request);
             assert_eq!(endpoints.models.as_str(), models);
             assert_eq!(endpoints.protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn derives_default_endpoints_for_domain_and_version_roots() {
+        let cases = [
+            (
+                "https://api.example.com",
+                "https://api.example.com/v1/responses",
+                "https://api.example.com/v1/models",
+            ),
+            (
+                "https://api.example.com/",
+                "https://api.example.com/v1/responses",
+                "https://api.example.com/v1/models",
+            ),
+            (
+                "https://api.example.com/v1/",
+                "https://api.example.com/v1/responses",
+                "https://api.example.com/v1/models",
+            ),
+            (
+                "https://proxy.example.com/openai/v1/",
+                "https://proxy.example.com/openai/v1/responses",
+                "https://proxy.example.com/openai/v1/models",
+            ),
+        ];
+        for (input, request, models) in cases {
+            let endpoints = derive_endpoints(input).expect("derive endpoints");
+            assert_eq!(endpoints.request.as_str(), request);
+            assert_eq!(endpoints.models.as_str(), models);
+            assert_eq!(endpoints.protocol, ApiProtocol::Responses);
+        }
+    }
+
+    #[test]
+    fn preserves_proxy_prefixes_for_explicit_endpoints() {
+        let cases = [
+            (
+                "https://proxy.example.com/gateway/v1/responses/",
+                "https://proxy.example.com/gateway/v1/responses",
+                "https://proxy.example.com/gateway/v1/models",
+                ApiProtocol::Responses,
+            ),
+            (
+                "https://proxy.example.com/gateway/v1/chat/completions/",
+                "https://proxy.example.com/gateway/v1/chat/completions",
+                "https://proxy.example.com/gateway/v1/models",
+                ApiProtocol::ChatCompletions,
+            ),
+            (
+                "https://proxy.example.com/gateway/chat/completions/",
+                "https://proxy.example.com/gateway/responses",
+                "https://proxy.example.com/gateway/models",
+                ApiProtocol::Responses,
+            ),
+            (
+                "https://proxy.example.com/gateway/v1/models/",
+                "https://proxy.example.com/gateway/v1/responses",
+                "https://proxy.example.com/gateway/v1/models",
+                ApiProtocol::Responses,
+            ),
+        ];
+        for (input, request, models, protocol) in cases {
+            let endpoints = derive_endpoints(input).expect("derive endpoints");
+            assert_eq!(endpoints.request.as_str(), request);
+            assert_eq!(endpoints.models.as_str(), models);
+            assert_eq!(endpoints.protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn strips_query_and_fragment_before_deriving_paths() {
+        let endpoints = derive_endpoints("https://api.example.com/v1?key=secret#fragment")
+            .expect("derive endpoints");
+        assert_eq!(
+            endpoints.request.as_str(),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            endpoints.models.as_str(),
+            "https://api.example.com/v1/models"
+        );
+
+        let explicit =
+            derive_endpoints("https://api.example.com/v1/chat/completions/?ignored=true#ignored")
+                .expect("derive explicit endpoint");
+        assert_eq!(
+            explicit.request.as_str(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            explicit.models.as_str(),
+            "https://api.example.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn follows_url_case_and_unicode_semantics() {
+        let uppercase_host = derive_endpoints("HTTPS://API.EXAMPLE.COM/v1/")
+            .expect("uppercase scheme and host should parse");
+        assert_eq!(
+            uppercase_host.request.as_str(),
+            "https://api.example.com/v1/responses"
+        );
+
+        let uppercase_path = derive_endpoints("https://api.example.com/V1/CHAT/COMPLETIONS")
+            .expect("uppercase path should parse");
+        assert_eq!(
+            uppercase_path.request.as_str(),
+            "https://api.example.com/V1/CHAT/COMPLETIONS/responses"
+        );
+        assert_eq!(
+            uppercase_path.models.as_str(),
+            "https://api.example.com/V1/CHAT/COMPLETIONS/models"
+        );
+        assert_eq!(uppercase_path.protocol, ApiProtocol::Responses);
+
+        let unicode =
+            derive_endpoints("https://例え.テスト/v1/").expect("unicode URL should parse");
+        assert_eq!(unicode.request.host_str(), Some("xn--r8jz45g.xn--zckzah"));
+        assert_eq!(unicode.request.path(), "/v1/responses");
+        assert_eq!(unicode.models.path(), "/v1/models");
+
+        let unicode_prefix = derive_endpoints("https://api.example.com/租户/v1/")
+            .expect("unicode path should parse");
+        assert_eq!(
+            unicode_prefix.request.as_str(),
+            "https://api.example.com/%E7%A7%9F%E6%88%B7/v1/responses"
+        );
+        assert_eq!(
+            unicode_prefix.models.as_str(),
+            "https://api.example.com/%E7%A7%9F%E6%88%B7/v1/models"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_urls() {
+        for input in ["", "not a URL", "/v1", "https://", "https://[::1"] {
+            assert_eq!(
+                derive_endpoints(input),
+                Err("Provider URL is invalid".into())
+            );
         }
     }
 }

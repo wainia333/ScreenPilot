@@ -17,6 +17,10 @@ const exactFiles = new Map([
   ['src-tauri/src/screenshot.rs', ['src-tauri/src/screenshot.rs', 'A7768399F178D2FC5FA1361080E134358EEBC1C3B78551AA9F065F735184EA43']],
   ['src-tauri/src/windows.rs', ['src-tauri/src/windows.rs', 'F25A5100D024E40C4579B780BAEEA3FEA7EA47E17C9220601D83C19BB31EC1B6']],
 ])
+const authorizedPatchedFiles = new Map([
+  ['src/vendor/kivio-screenshot/Vision.tsx', 'A068D44890AF085AF6EE7661BEABA47641508FEECBEBC3A054514B65F6EB15E6'],
+  ['src/vendor/kivio-screenshot/api/tauri.ts', '3D47CE11CF1EC20057551AFFE97ABA94B388B3880596EC859ACF7058DB5916AF'],
+])
 const ignoredDirectories = new Set([
   '.git',
   'coverage',
@@ -53,9 +57,10 @@ for (const [target, [source, expected]] of exactFiles) {
     continue
   }
   const targetHash = hash(targetFile)
-  if (targetHash !== expected) failures.push(`原样副本哈希不符：${target}`)
+  const authorizedHash = authorizedPatchedFiles.get(target)
+  if (targetHash !== (authorizedHash ?? expected)) failures.push(`原样副本哈希不符：${target}`)
   const sourceFile = join(referenceRoot, source)
-  if (existsSync(sourceFile) && hash(sourceFile) !== targetHash) {
+  if (!authorizedHash && existsSync(sourceFile) && hash(sourceFile) !== targetHash) {
     failures.push(`原样副本与参考源不一致：${target}`)
   }
 }

@@ -2,8 +2,9 @@ use crate::application::lifecycle::TRANSLATOR_HEIGHT;
 use crate::application::state::AppState;
 use crate::domain::settings::{AppSettings, ModelSelection, OcrMethod, TranslationMethod};
 use crate::infrastructure::ai_http::{
-    complete_text, complete_vision, stream_vision, AiMessage, AiRequestPolicy, AiStreamFinish,
-    VisionCompletion,
+    complete_text, complete_vision_with_options, complete_vision_with_options_result_cancelled,
+    stream_vision_with_options_cancelled, AiMessage, AiRequestPolicy, AiStreamFinish,
+    VisionCompletion, VisionRequestOptions,
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::sse::SseDelta;
@@ -12,6 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -19,6 +21,7 @@ use tauri::{
     AppHandle, Emitter, LogicalUnit, Manager, PixelUnit, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowSizeConstraints,
 };
+use url::Url;
 use uuid::Uuid;
 use xcap::Monitor;
 
@@ -35,6 +38,7 @@ pub struct FloatingRect {
     y: Option<f64>,
     width: f64,
     height: f64,
+    has_screenshot: Option<bool>,
     hit_region: Option<HitRegionRect>,
 }
 
@@ -51,6 +55,7 @@ pub struct FloatingFlyRect {
     to: FloatingPoint,
     width: f64,
     height: f64,
+    has_screenshot: Option<bool>,
     duration_ms: Option<u64>,
 }
 
@@ -82,14 +87,24 @@ const VISION_DIALOG_VIEWPORT_RATIO: f64 = 0.45;
 // layout feedback rather than a user resize.
 const VISION_DIALOG_FRAME_COMPENSATION: f64 = 2.0;
 static VISION_FLOATING_RESIZABLE: AtomicBool = AtomicBool::new(false);
+static VISION_FLOATING_HAS_SCREENSHOT: AtomicBool = AtomicBool::new(true);
 
-fn vision_dialog_height(viewport_height: f64) -> f64 {
-    ((viewport_height * VISION_DIALOG_VIEWPORT_RATIO)
+fn vision_dialog_height_for_mode(viewport_height: f64, has_screenshot: bool) -> f64 {
+    let current_height = (viewport_height * VISION_DIALOG_VIEWPORT_RATIO)
         .clamp(VISION_DIALOG_MIN_HEIGHT, VISION_DIALOG_MAX_HEIGHT)
         .round()
         * 2.0
-        / 3.0)
-        .round()
+        / 3.0;
+    let current_height = current_height.round();
+    if has_screenshot {
+        current_height
+    } else {
+        (current_height * 3.0 / 2.0).round()
+    }
+}
+
+fn resolve_floating_screenshot_profile(requested: Option<bool>) -> bool {
+    requested.unwrap_or(true)
 }
 
 fn vision_dialog_minimum_height(initial_height: f64) -> f64 {
@@ -110,12 +125,16 @@ fn vision_monitor_logical_height(window: &WebviewWindow) -> f64 {
         .unwrap_or(800.0)
 }
 
-fn vision_chat_initial_height(window: &WebviewWindow) -> f64 {
-    vision_chat_frame_height(vision_dialog_height(vision_monitor_logical_height(window)))
+fn vision_chat_initial_height(window: &WebviewWindow, has_screenshot: bool) -> f64 {
+    vision_chat_frame_height(vision_dialog_height_for_mode(
+        vision_monitor_logical_height(window),
+        has_screenshot,
+    ))
 }
 
-fn vision_chat_min_height(window: &WebviewWindow) -> f64 {
-    let dialog_height = vision_dialog_height(vision_monitor_logical_height(window));
+fn vision_chat_min_height(window: &WebviewWindow, has_screenshot: bool) -> f64 {
+    let dialog_height =
+        vision_dialog_height_for_mode(vision_monitor_logical_height(window), has_screenshot);
     vision_chat_frame_height(vision_dialog_minimum_height(dialog_height))
 }
 
@@ -279,6 +298,7 @@ fn request_native_freeze_close() {}
 
 pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
+    VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     let state = app.state::<AppState>();
     let existing_vision_visible = app
         .get_webview_window("vision")
@@ -580,6 +600,7 @@ pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
 
 pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
+    VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     let mut failures = Vec::new();
     close_native_freeze(app);
     if let Some(window) = app.get_webview_window("vision") {
@@ -833,6 +854,7 @@ fn apply_floating_fly_rect(window: &WebviewWindow, rect: &FloatingFlyRect) -> Re
         y: Some(rect.to.y),
         width: rect.width,
         height: rect.height,
+        has_screenshot: rect.has_screenshot,
         hit_region: None,
     };
     apply_floating_rect(window, &final_rect)
@@ -849,6 +871,19 @@ fn should_defer_floating_resize(
 
 fn floating_height_for_initial(height: f64, initial_height: Option<f64>) -> f64 {
     initial_height.unwrap_or(height)
+}
+
+fn should_apply_initial_height(
+    resizable: bool,
+    already_resizable: bool,
+    profile_changed: bool,
+    positioned: bool,
+) -> bool {
+    resizable && (!already_resizable || profile_changed || positioned)
+}
+
+fn should_skip_floating_fly(screenshot_translation: bool, resizable: bool, height: f64) -> bool {
+    !screenshot_translation && resizable && height <= 96.0
 }
 
 #[cfg(target_os = "windows")]
@@ -881,16 +916,17 @@ fn native_window_is_sizing(_window: &WebviewWindow) -> bool {
 }
 
 #[tauri::command]
-pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), String> {
+pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, String> {
     let Some(window) = app.get_webview_window("vision") else {
         close_native_freeze(&app);
-        return Ok(());
+        return Ok(false);
     };
     let screenshot_translation = window
         .url()
         .map_err(|error| error.to_string())?
         .fragment()
         .is_some_and(|fragment| fragment.contains("mode=translate"));
+    let has_screenshot = resolve_floating_screenshot_profile(rect.has_screenshot);
     let positioned = rect.x.is_some() && rect.y.is_some();
     let mut rect = FloatingRect {
         height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
@@ -899,18 +935,27 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), Str
     let resizable = vision_floating_resizable(screenshot_translation, rect.height);
     let already_resizable = VISION_FLOATING_RESIZABLE.load(Ordering::Acquire)
         || window.is_resizable().map_err(|error| error.to_string())?;
-    if should_defer_floating_resize(
-        native_window_is_sizing(&window),
-        already_resizable,
-        resizable,
-        positioned,
-    ) {
-        return Ok(());
+    let previous_has_screenshot = VISION_FLOATING_HAS_SCREENSHOT.load(Ordering::Acquire);
+    let profile_changed = previous_has_screenshot != has_screenshot;
+    let native_sizing = native_window_is_sizing(&window);
+    if native_sizing {
+        return Ok(false);
+    }
+    // An already-resizable, unpositioned update with the same profile is the
+    // normal ResizeObserver feedback path. The native window already owns the
+    // current edge size, so treat this policy no-op as handled rather than a
+    // retryable native-sizing rejection. JS may safely record the requested
+    // geometry and wait for the next real layout change.
+    if should_defer_floating_resize(false, already_resizable, resizable, positioned)
+        && !profile_changed
+    {
+        return Ok(true);
     }
     close_native_freeze(&app);
-    let minimum_height = resizable.then(|| vision_chat_min_height(&window));
-    let initial_height = resizable.then(|| vision_chat_initial_height(&window));
-    if resizable && !already_resizable {
+    let mode_changed = profile_changed;
+    let minimum_height = resizable.then(|| vision_chat_min_height(&window, has_screenshot));
+    let initial_height = resizable.then(|| vision_chat_initial_height(&window, has_screenshot));
+    if should_apply_initial_height(resizable, already_resizable, profile_changed, positioned) {
         rect.height = floating_height_for_initial(rect.height, initial_height);
     }
     let resizable_changed = already_resizable != resizable;
@@ -919,13 +964,14 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), Str
             .set_resizable(resizable)
             .map_err(|error| error.to_string())?;
     }
-    if resizable_changed {
+    if resizable_changed || (resizable && mode_changed) {
         set_vision_floating_size_constraints(&window, minimum_height)?;
     }
     VISION_FLOATING_RESIZABLE.store(resizable, Ordering::Release);
     apply_floating_window_chrome(&window);
     apply_floating_rect(&window, &rect)?;
-    Ok(())
+    VISION_FLOATING_HAS_SCREENSHOT.store(has_screenshot, Ordering::Release);
+    Ok(true)
 }
 
 fn vision_floating_resizable(screenshot_translation: bool, height: f64) -> bool {
@@ -947,6 +993,13 @@ pub fn vision_fly_floating(app: AppHandle, rect: FloatingFlyRect) -> Result<(), 
             .map_err(|error| error.to_string())?
             .fragment()
             .is_some_and(|fragment| fragment.contains("mode=translate"));
+        if should_skip_floating_fly(
+            screenshot_translation,
+            VISION_FLOATING_RESIZABLE.load(Ordering::Acquire),
+            rect.height,
+        ) {
+            return Ok(());
+        }
         let rect = FloatingFlyRect {
             height: floating_height_for_stage(rect.height, screenshot_translation, true),
             ..rect
@@ -1250,12 +1303,21 @@ pub async fn vision_ask(
     state: State<'_, AppState>,
     image_id: String,
     messages: Vec<ExplainMessage>,
+    request_id: String,
 ) -> Result<Value, String> {
     Ok(
-        match run_vision_request(&app, &state, &image_id, &messages).await {
-            Ok(Some(response)) => json!({ "success": true, "response": response }),
-            Ok(None) => json!({ "success": true }),
-            Err(error) => json!({ "success": false, "error": error }),
+        match run_vision_request(&app, &state, &image_id, &messages, &request_id).await {
+            Ok(Some(response)) => json!({
+                "success": true,
+                "requestId": request_id,
+                "response": response,
+            }),
+            Ok(None) => json!({ "success": true, "requestId": request_id }),
+            Err(error) => json!({
+                "success": false,
+                "requestId": request_id,
+                "error": error,
+            }),
         },
     )
 }
@@ -1265,6 +1327,7 @@ async fn run_vision_request(
     state: &AppState,
     image_id: &str,
     messages: &[ExplainMessage],
+    request_id: &str,
 ) -> Result<Option<String>, String> {
     let settings = state.current()?;
     let selection = settings
@@ -1303,10 +1366,36 @@ async fn run_vision_request(
         settings.retry.attempts,
         settings.vision.stream,
     );
-    state.begin_reference_vision_stream();
+    let request_options = VisionRequestOptions::new(
+        settings.vision.thinking,
+        settings.vision.thinking_effort,
+        settings.vision.web_search,
+    );
+    let stream_generation = state.begin_reference_vision_stream();
+    let cancellation = state
+        .reference_vision_signal(stream_generation)
+        .ok_or("Vision request was superseded")?;
+    let emit_stream = |payload: Value| -> Result<(), String> {
+        // Re-check immediately before every emission. The cancellation signal
+        // stops the network task, while this guard closes the tiny window where
+        // a callback was already decoding an event as a newer generation began.
+        if !state.reference_vision_stream_current(stream_generation) {
+            return Ok(());
+        }
+        app.emit_to("vision", "vision-stream", payload)
+            .map_err(|error| error.to_string())
+    };
     if settings.vision.stream {
         let event_image_id = image_id.to_string();
-        let finish = stream_vision(
+        let mut stream_citations: Vec<(String, String)> = Vec::new();
+        // Keep a separate exact-once ledger for text, refusal, and reasoning.
+        // Providers may emit an unscoped delta before assigning an item id;
+        // each ledger retains its content/summary index and binds that pending
+        // fragment when a later scoped delta, done snapshot, or item identity
+        // arrives. This avoids suppressing unrelated parts/items.
+        let mut stream_ledgers = StreamLedgers::default();
+        let mut stream_error: Option<(String, Option<String>)> = None;
+        let finish = stream_vision_with_options_cancelled(
             VisionCompletion {
                 provider,
                 model: &selection.model,
@@ -1317,46 +1406,183 @@ async fn run_vision_request(
                 policy,
             },
             |delta| {
-                let payload = match delta {
-                    SseDelta::Text(delta) => json!({
-                        "imageId": event_image_id,
-                        "kind": "answer",
-                        "delta": delta,
-                    }),
-                    SseDelta::Reasoning(delta) => json!({
-                        "imageId": event_image_id,
-                        "kind": "answer",
-                        "delta": "",
-                        "reasoningDelta": delta,
-                    }),
-                    SseDelta::Done | SseDelta::Error(_) => return Ok(()),
+                let should_emit = stream_ledgers.dispatch(&delta);
+                let payload = match &delta {
+                    SseDelta::TextDelta { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": text,
+                        })
+                    }
+                    SseDelta::TextDone { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": text,
+                        })
+                    }
+                    SseDelta::Reasoning { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": "",
+                            "reasoningDelta": text,
+                        })
+                    }
+                    SseDelta::ReasoningDone { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": "",
+                            "reasoningDelta": text,
+                        })
+                    }
+                    SseDelta::TextForItemDelta { text, .. }
+                    | SseDelta::TextForItemDone { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": text,
+                        })
+                    }
+                    SseDelta::RefusalDelta { text, .. } | SseDelta::RefusalDone { text, .. } => {
+                        if !should_emit {
+                            return Ok(());
+                        }
+                        json!({
+                            "imageId": event_image_id,
+                            "requestId": request_id,
+                            "kind": "answer",
+                            "delta": text,
+                        })
+                    }
+                    SseDelta::Citation {
+                        item_id,
+                        title,
+                        url,
+                    } => {
+                        if item_id.as_ref().is_some_and(|item_id| {
+                            stream_ledgers.commentary_items.contains(item_id)
+                        }) {
+                            return Ok(());
+                        }
+                        if !stream_citations
+                            .iter()
+                            .any(|(_, existing_url)| existing_url == url)
+                        {
+                            stream_citations.push((title.clone(), url.clone()));
+                        }
+                        return Ok(());
+                    }
+                    SseDelta::ItemPhase { .. } | SseDelta::Done => return Ok(()),
+                    SseDelta::Error(error) => {
+                        stream_error = Some((error.clone(), None));
+                        return Ok(());
+                    }
+                    SseDelta::ErrorWithReason { message, reason } => {
+                        stream_error = Some((message.clone(), Some(reason.clone())));
+                        return Ok(());
+                    }
                 };
-                app.emit_to("vision", "vision-stream", payload)
-                    .map_err(|error| error.to_string())
+                emit_stream(payload)
             },
-            || state.reference_vision_stream_cancelled(),
+            || !state.reference_vision_stream_current(stream_generation),
+            request_options,
+            Some(cancellation),
         )
-        .await?;
+        .await;
+        let finish = match finish {
+            Ok(finish) => finish,
+            Err(error) => {
+                if !state.reference_vision_stream_current(stream_generation) {
+                    return Ok(None);
+                }
+                let (error, incomplete_reason) =
+                    stream_error.take().unwrap_or_else(|| (error.clone(), None));
+                let status = format!("\n\n⚠️ {error}");
+                let sources = citation_sources(&stream_citations);
+                if !sources.is_empty() {
+                    let _ = emit_stream(json!({
+                        "imageId": image_id,
+                        "requestId": request_id,
+                        "kind": "answer",
+                        "delta": sources,
+                    }));
+                }
+                let _ = emit_stream(json!({
+                    "imageId": image_id,
+                    "requestId": request_id,
+                    "kind": "answer",
+                    "delta": status,
+                    "error": error,
+                    "incompleteReason": incomplete_reason,
+                }));
+                let _ = emit_stream(json!({
+                    "imageId": image_id,
+                    "requestId": request_id,
+                    "kind": "answer",
+                    "delta": "",
+                    "done": true,
+                    "reason": "error",
+                }));
+                // The error is already rendered as a terminal status event. A
+                // successful command envelope prevents the vendor surface from
+                // replacing the partial assistant text with an error-only
+                // bubble after the stream listener has flushed it.
+                return Ok(None);
+            }
+        };
+        if !state.reference_vision_stream_current(stream_generation) {
+            return Ok(None);
+        }
+        if finish == AiStreamFinish::Done {
+            let sources = citation_sources(&stream_citations);
+            if !sources.is_empty() {
+                emit_stream(json!({
+                    "imageId": image_id,
+                    "requestId": request_id,
+                    "kind": "answer",
+                    "delta": sources,
+                }))?;
+            }
+        }
         let reason = if finish == AiStreamFinish::Done {
             "done"
         } else {
             "cancelled"
         };
-        app.emit_to(
-            "vision",
-            "vision-stream",
-            json!({
-                "imageId": image_id,
-                "kind": "answer",
-                "delta": "",
-                "done": true,
-                "reason": reason,
-            }),
-        )
-        .map_err(|error| error.to_string())?;
+        emit_stream(json!({
+            "imageId": image_id,
+            "requestId": request_id,
+            "kind": "answer",
+            "delta": "",
+            "done": true,
+            "reason": reason,
+        }))?;
         Ok(None)
     } else {
-        complete_vision(
+        let result = match complete_vision_with_options_result_cancelled(
             provider,
             &selection.model,
             &keys,
@@ -1364,10 +1590,330 @@ async fn run_vision_request(
             &ai_messages,
             image_url.as_deref(),
             policy,
+            request_options,
+            Some(cancellation),
         )
         .await
-        .map(Some)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if !state.reference_vision_stream_current(stream_generation) {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+        };
+        if !state.reference_vision_stream_current(stream_generation) {
+            return Ok(None);
+        }
+        if !result.reasoning_summary.is_empty() {
+            emit_stream(json!({
+                "imageId": image_id,
+                "requestId": request_id,
+                "kind": "answer",
+                "delta": "",
+                "reasoningDelta": result.reasoning_summary,
+            }))?;
+        }
+        let mut response_text = result.text
+            + &citation_sources(
+                &result
+                    .citations
+                    .iter()
+                    .map(|citation| (citation.title.clone(), citation.url.clone()))
+                    .collect::<Vec<_>>(),
+            );
+        if let Some(error) = result.error.as_ref() {
+            let status = format!("\n\n⚠️ {error}");
+            response_text.push_str(&status);
+        }
+        for citation in result.citations {
+            emit_stream(json!({
+                "imageId": image_id,
+                "requestId": request_id,
+                "kind": "answer",
+                "delta": "",
+                "citation": { "title": citation.title, "url": citation.url },
+            }))?;
+        }
+        Ok(Some(response_text))
     }
+}
+
+fn citation_markdown(title: &str, url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return String::new();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return String::new();
+    }
+    let title = title
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    format!("[{title}](<{url}>)")
+}
+
+fn citation_sources(citations: &[(String, String)]) -> String {
+    let mut seen_urls = HashSet::new();
+    let lines = citations
+        .iter()
+        .filter_map(|(title, url)| {
+            if !seen_urls.insert(url) {
+                return None;
+            }
+            let markdown = citation_markdown(title, url);
+            (!markdown.is_empty()).then_some(markdown)
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("\n\n来源：\n- {}", lines.join("\n- "))
+}
+
+#[derive(Default)]
+struct StreamItemLedger {
+    seen: HashSet<(Option<String>, Option<usize>)>,
+    pending: HashSet<Option<usize>>,
+    aliases: HashSet<(String, Option<usize>)>,
+}
+
+#[derive(Default)]
+struct StreamLedgers {
+    text: StreamItemLedger,
+    refusal: StreamItemLedger,
+    reasoning: StreamItemLedger,
+    commentary_items: HashSet<String>,
+    active_item: Option<String>,
+}
+
+impl StreamLedgers {
+    /// Dispatch the ledger portion of a decoded SSE event. Returning false
+    /// means the event is a duplicate snapshot, commentary item, or metadata
+    /// event and should not be emitted as answer text.
+    fn dispatch(&mut self, delta: &SseDelta) -> bool {
+        match delta {
+            SseDelta::TextDelta {
+                item_id,
+                content_index,
+                ..
+            } => {
+                match item_id {
+                    Some(item_id) => self.text.scoped_delta(item_id.clone(), *content_index),
+                    None => self.text.unscoped_delta(&self.active_item, *content_index),
+                }
+                true
+            }
+            SseDelta::TextDone {
+                item_id,
+                content_index,
+                text,
+            } => self
+                .text
+                .optional_snapshot_emit(item_id.as_ref(), *content_index, text),
+            SseDelta::TextForItemDelta {
+                item_id,
+                content_index,
+                ..
+            } => {
+                if self.commentary_items.contains(item_id) {
+                    return false;
+                }
+                self.text.scoped_delta(item_id.clone(), *content_index);
+                true
+            }
+            SseDelta::TextForItemDone {
+                item_id,
+                content_index,
+                text,
+            } => {
+                if self.commentary_items.contains(item_id) || text.is_empty() {
+                    return false;
+                }
+                self.text
+                    .scoped_snapshot_emit(item_id, *content_index, text)
+            }
+            SseDelta::Reasoning {
+                item_id,
+                summary_index,
+                ..
+            } => {
+                match item_id {
+                    Some(item_id) => self.reasoning.scoped_delta(item_id.clone(), *summary_index),
+                    None => self
+                        .reasoning
+                        .unscoped_delta(&self.active_item, *summary_index),
+                }
+                true
+            }
+            SseDelta::ReasoningDone {
+                item_id,
+                summary_index,
+                text,
+            } => self
+                .reasoning
+                .optional_snapshot_emit(item_id.as_ref(), *summary_index, text),
+            SseDelta::RefusalDelta {
+                item_id,
+                content_index,
+                ..
+            } => {
+                match item_id {
+                    Some(item_id) => self.refusal.scoped_delta(item_id.clone(), *content_index),
+                    None => self
+                        .refusal
+                        .unscoped_delta(&self.active_item, *content_index),
+                }
+                true
+            }
+            SseDelta::RefusalDone {
+                item_id,
+                content_index,
+                text,
+            } => self
+                .refusal
+                .optional_snapshot_emit(item_id.as_ref(), *content_index, text),
+            SseDelta::ItemPhase { item_id, phase } => {
+                if phase == "commentary" {
+                    self.commentary_items.insert(item_id.clone());
+                    self.active_item = None;
+                } else {
+                    self.commentary_items.remove(item_id);
+                    self.text.bind_all_pending(item_id);
+                    self.refusal.bind_all_pending(item_id);
+                    self.reasoning.bind_all_pending(item_id);
+                    self.active_item = Some(item_id.clone());
+                }
+                false
+            }
+            SseDelta::Citation { .. }
+            | SseDelta::Done
+            | SseDelta::Error(_)
+            | SseDelta::ErrorWithReason { .. } => true,
+        }
+    }
+}
+
+impl StreamItemLedger {
+    fn unscoped_delta(&mut self, active_item: &Option<String>, index: Option<usize>) {
+        record_unscoped_alias(active_item, &mut self.pending, &mut self.aliases, index);
+        self.seen.insert((None, index));
+    }
+
+    fn scoped_delta(&mut self, item_id: String, index: Option<usize>) {
+        bind_pending_alias(&mut self.pending, &mut self.aliases, &item_id, index);
+        self.seen.insert((Some(item_id), index));
+    }
+
+    fn bind_all_pending(&mut self, item_id: &str) {
+        bind_all_pending_aliases(&mut self.pending, &mut self.aliases, item_id);
+    }
+
+    fn snapshot_seen(&mut self, item_id: Option<&String>, index: Option<usize>) -> bool {
+        text_snapshot_seen(&self.seen, &mut self.aliases, item_id, index)
+    }
+
+    fn optional_snapshot_seen(&mut self, item_id: Option<&String>, index: Option<usize>) -> bool {
+        match item_id {
+            Some(item_id) => self.scoped_snapshot_seen(item_id, index),
+            None => self.snapshot_seen(None, index),
+        }
+    }
+
+    fn optional_snapshot_emit(
+        &mut self,
+        item_id: Option<&String>,
+        index: Option<usize>,
+        text: &str,
+    ) -> bool {
+        if text.is_empty() || self.optional_snapshot_seen(item_id, index) {
+            return false;
+        }
+        self.seen.insert((item_id.cloned(), index));
+        true
+    }
+
+    fn scoped_snapshot_seen(&mut self, item_id: &str, index: Option<usize>) -> bool {
+        bind_pending_alias(&mut self.pending, &mut self.aliases, item_id, index);
+        self.snapshot_seen(Some(&item_id.to_string()), index)
+    }
+
+    fn scoped_snapshot_emit(&mut self, item_id: &str, index: Option<usize>, text: &str) -> bool {
+        if text.is_empty() || self.scoped_snapshot_seen(item_id, index) {
+            return false;
+        }
+        self.seen.insert((Some(item_id.to_string()), index));
+        true
+    }
+}
+
+fn text_snapshot_seen(
+    seen: &HashSet<(Option<String>, Option<usize>)>,
+    unscoped_aliases: &mut HashSet<(String, Option<usize>)>,
+    item_id: Option<&String>,
+    content_index: Option<usize>,
+) -> bool {
+    seen.contains(&(item_id.cloned(), content_index))
+        || snapshot_alias_seen(unscoped_aliases, item_id, content_index)
+}
+
+fn record_unscoped_alias(
+    active_item: &Option<String>,
+    pending: &mut HashSet<Option<usize>>,
+    aliases: &mut HashSet<(String, Option<usize>)>,
+    index: Option<usize>,
+) {
+    if let Some(item_id) = active_item {
+        aliases.insert((item_id.clone(), index));
+    } else {
+        pending.insert(index);
+    }
+}
+
+fn bind_pending_alias(
+    pending: &mut HashSet<Option<usize>>,
+    aliases: &mut HashSet<(String, Option<usize>)>,
+    item_id: &str,
+    index: Option<usize>,
+) {
+    let bound_index = if let Some(index) = index {
+        pending.take(&Some(index)).or_else(|| pending.take(&None))
+    } else {
+        pending
+            .iter()
+            .next()
+            .copied()
+            .and_then(|candidate| pending.take(&candidate))
+            .map(|_| None)
+    };
+    if let Some(bound_index) = bound_index {
+        aliases.insert((item_id.to_string(), bound_index));
+    }
+}
+
+fn bind_all_pending_aliases(
+    pending: &mut HashSet<Option<usize>>,
+    aliases: &mut HashSet<(String, Option<usize>)>,
+    item_id: &str,
+) {
+    for index in pending.drain() {
+        aliases.insert((item_id.to_string(), index));
+    }
+}
+
+fn snapshot_alias_seen(
+    aliases: &mut HashSet<(String, Option<usize>)>,
+    item_id: Option<&String>,
+    index: Option<usize>,
+) -> bool {
+    let Some(item_id) = item_id else { return false };
+    if aliases.remove(&(item_id.clone(), index)) {
+        return true;
+    }
+    // An unknown index alias is one-shot: consume it for the first done part
+    // only, so a second content/summary part on the same item remains visible.
+    index.is_some() && aliases.remove(&(item_id.clone(), None))
 }
 
 #[tauri::command]
@@ -1381,30 +1927,38 @@ pub async fn vision_translate(
     state: State<'_, AppState>,
     image_id: String,
 ) -> Result<Value, String> {
-    state.begin_reference_vision_stream();
+    let generation = state.begin_reference_vision_stream();
     let result = match recognize_screenshot(&state, &image_id).await {
         Ok(source) => async_translation(&state, source).await,
         Err(error) => Err(error),
     };
     Ok(match result {
         Ok((source, translated)) => {
+            if !state.reference_vision_stream_current(generation) {
+                return Ok(json!({ "success": true, "cancelled": true }));
+            }
             let _ = arboard::Clipboard::new()
                 .and_then(|mut clipboard| clipboard.set_text(source.clone()));
-            let _ = app.emit_to(
-                "vision",
-                "vision-translate-stream",
-                json!({ "imageId": image_id, "kind": "original", "delta": source }),
-            );
-            let _ = app.emit_to(
-                "vision",
-                "vision-translate-stream",
-                json!({ "imageId": image_id, "kind": "translated", "delta": translated }),
-            );
-            let _ = app.emit_to(
-                "vision",
-                "vision-translate-stream",
-                json!({ "imageId": image_id, "done": true, "success": true }),
-            );
+            let emit_translate = |payload: Value| {
+                if state.reference_vision_stream_current(generation) {
+                    let _ = app.emit_to("vision", "vision-translate-stream", payload);
+                }
+            };
+            emit_translate(json!({
+                "imageId": image_id,
+                "kind": "original",
+                "delta": source,
+            }));
+            emit_translate(json!({
+                "imageId": image_id,
+                "kind": "translated",
+                "delta": translated,
+            }));
+            emit_translate(json!({
+                "imageId": image_id,
+                "done": true,
+                "success": true,
+            }));
             json!({ "success": true })
         }
         Err(error) => json!({ "success": false, "error": error }),
@@ -1451,7 +2005,7 @@ async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String
                 .ok_or("Select an AI OCR model in settings")?;
             let (provider, keys) = provider_and_keys(&settings, selection)?;
             let image_url = state.images.read_data_url(image_id)?;
-            complete_vision(
+            complete_vision_with_options(
                 provider,
                 &selection.model,
                 &keys,
@@ -1462,6 +2016,11 @@ async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String
                 }],
                 Some(&image_url),
                 AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
+                VisionRequestOptions::new(
+                    settings.screenshot_translation.thinking,
+                    settings.screenshot_translation.thinking_effort,
+                    false,
+                ),
             )
             .await
         }
@@ -1733,12 +2292,159 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_safe_citation_markdown_for_the_answer_stream() {
+        assert_eq!(
+            citation_markdown("A [source]", "https://example.com/a_(b)"),
+            "[A \\[source\\]](<https://example.com/a_(b)>)"
+        );
+        assert_eq!(citation_markdown("unsafe", "javascript:alert(1)"), "");
+        assert_eq!(
+            citation_sources(&[
+                ("A".into(), "https://example.com".into()),
+                ("A duplicate".into(), "https://example.com".into()),
+            ]),
+            "\n\n来源：\n- [A](<https://example.com>)"
+        );
+    }
+
+    #[test]
+    fn suppresses_scoped_done_snapshot_after_unscoped_delta_alias() {
+        let mut seen = HashSet::new();
+        seen.insert((None, None));
+        let mut aliases = HashSet::new();
+        aliases.insert(("message-1".to_string(), None));
+        let item = "message-1".to_string();
+        assert!(text_snapshot_seen(
+            &seen,
+            &mut aliases,
+            Some(&item),
+            Some(0)
+        ));
+        assert!(!text_snapshot_seen(
+            &seen,
+            &mut HashSet::new(),
+            Some(&item),
+            Some(0)
+        ));
+        let item_two = "message-2".to_string();
+        assert!(!text_snapshot_seen(
+            &seen,
+            &mut aliases,
+            Some(&item_two),
+            Some(0)
+        ));
+    }
+
+    #[test]
+    fn unscoped_refusal_and_reasoning_aliases_are_one_shot_per_part() {
+        let item = "message-1".to_string();
+        let mut refusal = HashSet::from([(item.clone(), None)]);
+        assert!(snapshot_alias_seen(&mut refusal, Some(&item), Some(0)));
+        assert!(!snapshot_alias_seen(&mut refusal, Some(&item), Some(1)));
+        let mut reasoning = HashSet::from([(item.clone(), None)]);
+        assert!(snapshot_alias_seen(&mut reasoning, Some(&item), Some(0)));
+        assert!(!snapshot_alias_seen(&mut reasoning, Some(&item), Some(1)));
+    }
+
+    #[test]
+    fn binds_real_unscoped_sequences_to_no_phase_scoped_done_for_all_modalities() {
+        let item = "message-without-phase".to_string();
+        // Text: two distinct unscoped parts, then scoped done snapshots with
+        // no ItemPhase event. The dispatch path must bind each index exactly.
+        let mut text = StreamLedgers::default();
+        assert!(text.dispatch(&SseDelta::TextDelta {
+            item_id: None,
+            content_index: Some(0),
+            text: "a".into(),
+        }));
+        assert!(text.dispatch(&SseDelta::TextDelta {
+            item_id: None,
+            content_index: Some(1),
+            text: "b".into(),
+        }));
+        assert!(!text.dispatch(&SseDelta::TextForItemDone {
+            item_id: item.clone(),
+            content_index: Some(0),
+            text: "a".into(),
+        }));
+        assert!(!text.dispatch(&SseDelta::TextForItemDone {
+            item_id: item.clone(),
+            content_index: Some(1),
+            text: "b".into(),
+        }));
+        assert!(text.dispatch(&SseDelta::TextForItemDone {
+            item_id: item.clone(),
+            content_index: Some(0),
+            text: "a again".into(),
+        }));
+
+        // Refusal and reasoning follow the same real match/dispatch path.
+        let mut refusal = StreamLedgers::default();
+        assert!(refusal.dispatch(&SseDelta::RefusalDelta {
+            item_id: None,
+            content_index: Some(0),
+            text: "no".into(),
+        }));
+        assert!(!refusal.dispatch(&SseDelta::RefusalDone {
+            item_id: Some(item.clone()),
+            content_index: Some(0),
+            text: "no".into(),
+        }));
+
+        let mut reasoning = StreamLedgers::default();
+        assert!(reasoning.dispatch(&SseDelta::Reasoning {
+            item_id: None,
+            summary_index: Some(0),
+            text: "think".into(),
+        }));
+        assert!(!reasoning.dispatch(&SseDelta::ReasoningDone {
+            item_id: Some(item),
+            summary_index: Some(0),
+            text: "think".into(),
+        }));
+    }
+
+    #[test]
+    fn unknown_index_alias_is_one_shot_when_bound_without_item_phase() {
+        let item = "message-with-unknown-part".to_string();
+        let mut ledger = StreamLedgers::default();
+        assert!(ledger.dispatch(&SseDelta::TextDelta {
+            item_id: None,
+            content_index: None,
+            text: "unknown".into(),
+        }));
+        assert!(!ledger.dispatch(&SseDelta::TextForItemDone {
+            item_id: item.clone(),
+            content_index: Some(0),
+            text: "unknown".into(),
+        }));
+        assert!(ledger.dispatch(&SseDelta::TextForItemDone {
+            item_id: item.clone(),
+            content_index: Some(1),
+            text: "second".into(),
+        }));
+
+        let mut known_pending = StreamLedgers::default();
+        assert!(known_pending.dispatch(&SseDelta::TextDelta {
+            item_id: None,
+            content_index: Some(0),
+            text: "known".into(),
+        }));
+        assert!(!known_pending.dispatch(&SseDelta::TextForItemDone {
+            item_id: item,
+            content_index: None,
+            text: "known".into(),
+        }));
+    }
+
+    #[test]
     fn validates_floating_fly_geometry() {
         let valid = FloatingFlyRect {
             from: FloatingPoint { x: 10.0, y: 20.0 },
             to: FloatingPoint { x: 30.0, y: 40.0 },
             width: 520.0,
             height: 300.0,
+            has_screenshot: Some(true),
             duration_ms: Some(260),
         };
         assert!(validate_floating_fly_rect(&valid).is_ok());
@@ -1798,16 +2504,25 @@ mod tests {
 
     #[test]
     fn vision_dialog_height_matches_the_frontend_answer_metrics() {
-        assert_eq!(vision_dialog_height(400.0), 147.0);
-        assert_eq!(vision_dialog_height(720.0), 216.0);
-        assert_eq!(vision_dialog_height(1440.0), 320.0);
+        assert_eq!(vision_dialog_height_for_mode(400.0, true), 147.0);
+        assert_eq!(vision_dialog_height_for_mode(720.0, true), 216.0);
+        assert_eq!(vision_dialog_height_for_mode(1440.0, true), 320.0);
+        assert_eq!(vision_dialog_height_for_mode(720.0, false), 324.0);
+        assert_eq!(vision_dialog_height_for_mode(400.0, false), 221.0);
         assert_eq!(
             VISION_READY_BAR_HEIGHT
                 + VISION_FLOATING_GAP
-                + vision_dialog_height(720.0)
+                + vision_dialog_height_for_mode(720.0, true)
                 + VISION_DIALOG_FRAME_COMPENSATION,
             282.0
         );
+    }
+
+    #[test]
+    fn missing_native_profile_metadata_defaults_to_compact_screenshot_sizing() {
+        assert!(resolve_floating_screenshot_profile(None));
+        assert!(resolve_floating_screenshot_profile(Some(true)));
+        assert!(!resolve_floating_screenshot_profile(Some(false)));
     }
 
     #[test]
@@ -1886,6 +2601,23 @@ mod tests {
     }
 
     #[test]
+    fn applies_mode_initial_height_for_new_or_positioned_dialogs() {
+        assert!(should_apply_initial_height(true, false, false, false));
+        assert!(should_apply_initial_height(true, true, true, false));
+        assert!(should_apply_initial_height(true, true, false, true));
+        assert!(!should_apply_initial_height(true, true, false, false));
+        assert!(!should_apply_initial_height(false, false, true, true));
+    }
+
+    #[test]
+    fn skips_a_stale_narrow_fly_after_a_resizable_dialog_starts() {
+        assert!(should_skip_floating_fly(false, true, 56.0));
+        assert!(!should_skip_floating_fly(false, true, 97.0));
+        assert!(!should_skip_floating_fly(true, true, 56.0));
+        assert!(!should_skip_floating_fly(false, false, 56.0));
+    }
+
+    #[test]
     fn uses_the_first_resizable_rect_initial_height() {
         assert_eq!(floating_height_for_initial(388.0, Some(282.0)), 282.0);
         assert_eq!(floating_height_for_initial(420.0, Some(282.0)), 282.0);
@@ -1896,6 +2628,10 @@ mod tests {
     fn uses_the_reduced_dialog_height_for_initial_and_followup_native_sizes() {
         assert_eq!(vision_dialog_minimum_height(216.0), 216.0);
         assert_eq!(vision_chat_frame_height(216.0), 282.0);
+        assert_eq!(
+            vision_chat_frame_height(vision_dialog_height_for_mode(720.0, false)),
+            390.0
+        );
     }
 
     #[cfg(target_os = "windows")]

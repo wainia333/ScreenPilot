@@ -10,6 +10,7 @@ import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
+import { appendVisionError, mergeVisionResponse, VisionRequestLifecycle } from '../../features/vision/request-lifecycle'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
@@ -18,6 +19,77 @@ type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMet
 type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
 
 const APPLE_INTELLIGENCE_BASE_URL = 'applefoundation://local'
+
+type FloatingRectRequest = Parameters<typeof api.visionSetFloating>[0]
+
+/**
+ * Native Windows can reject a geometry update while the user is still moving
+ * the window (GUI_INMOVESIZE). Keep retrying on animation frames until the
+ * exact request is applied, while letting every caller invalidate the loop when
+ * its geometry/profile or lifecycle changes.
+ */
+function setVisionFloatingWithRetry(
+  rect: FloatingRectRequest,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false
+    let retryFrame: number | null = null
+
+    const finish = (applied: boolean) => {
+      if (settled) return
+      settled = true
+      if (retryFrame !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(retryFrame)
+        retryFrame = null
+      }
+      resolve(applied)
+    }
+
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      if (retryFrame !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(retryFrame)
+        retryFrame = null
+      }
+      reject(error)
+    }
+
+    const attempt = () => {
+      if (settled || !isCurrent()) {
+        finish(false)
+        return
+      }
+      void api.visionSetFloating(rect)
+        .then((applied) => {
+          if (settled) return
+          if (!isCurrent()) {
+            finish(false)
+            return
+          }
+          if (applied) {
+            finish(true)
+            return
+          }
+          if (typeof window === 'undefined') {
+            finish(false)
+            return
+          }
+          retryFrame = window.requestAnimationFrame(() => {
+            retryFrame = null
+            attempt()
+          })
+        })
+        .catch((error) => {
+          if (!isCurrent()) finish(false)
+          else fail(error)
+        })
+    }
+
+    attempt()
+  })
+}
 
 function readModeFromHash(): Mode {
   if (typeof window === 'undefined') return 'chat'
@@ -1223,6 +1295,7 @@ export default function Vision() {
   const modeRef = useRef<Mode>(mode)
   const historyOpenRef = useRef(false)
   const imageIdRef = useRef('')
+  const hasScreenshot = !!imageIdRef.current
   // 纯文字会话的会话 id。多轮对话要落到同一条历史上，所以第一次入库时生成、
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
@@ -1236,6 +1309,8 @@ export default function Vision() {
   const visionStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const visionStreamBufferRef = useRef({ content: '', reasoning: '' })
   const preparingSendRef = useRef(false)
+  const visionRequestLifecycleRef = useRef(new VisionRequestLifecycle())
+  const visionTerminalErrorRef = useRef<{ requestId: string; error: string; incompleteReason?: string } | null>(null)
   const closingStreamRef = useRef(false)
   const closeResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const chatAutoFollowRef = useRef(true)
@@ -1254,7 +1329,7 @@ export default function Vision() {
   // 浮动模式下保存截图时的全屏 metrics，避免窗口缩小后 answerLayout 被压缩得太小
   const fullscreenMetricsRef = useRef<Metrics | null>(null)
   const hoverAnimationRef = useRef<{ rect: Rect | null; raf: number | null }>({ rect: null, raf: null })
-  const floatingSizeRef = useRef<{ width: number; height: number } | null>(null)
+  const floatingSizeRef = useRef<{ width: number; height: number; hasScreenshot: boolean } | null>(null)
   const cursorPassthroughRef = useRef(false)
   const panelDraggingRef = useRef(false)
 
@@ -1265,6 +1340,18 @@ export default function Vision() {
   showTranslateOriginalRef.current = showTranslateOriginal
   translateOriginalRef.current = translateOriginal
   translateTextRef.current = translateText
+
+  const invalidateVisionRequest = useCallback(() => {
+    const sequence = visionRequestLifecycleRef.current.invalidate()
+    visionTerminalErrorRef.current = null
+    preparingSendRef.current = false
+    nativeFlySeqRef.current++
+    return sequence
+  }, [])
+
+  const isVisionRequestCurrent = useCallback((requestId: string) => (
+    visionRequestLifecycleRef.current.isCurrent(requestId)
+  ), [])
 
   const cancelPromptOptimization = useCallback(() => {
     promptOptimizeSeqRef.current += 1
@@ -1410,6 +1497,7 @@ export default function Vision() {
   }, [])
 
   const enterSelect = useCallback(async () => {
+    invalidateVisionRequest()
     setVisionCursorPassthrough(false)
     void api.visionSetHitRegion(null).catch(err => console.error('[vision-floating] clear hit region failed:', err))
     setHitRegionRect(null)
@@ -1438,6 +1526,8 @@ export default function Vision() {
     chatAutoFollowRef.current = true
     resetVisionStreamBuffer()
     justFinishedStreamRef.current = false
+    imageIdRef.current = ''
+    textSessionIdRef.current = ''
     // 用 flushSync 同步提交所有 reset 后的状态：webview show 之前 DOM 必须已经反映新位置，
     // 否则 Rust 的 show() 会先把旧 frame 露出来。
     // barNoTransition 同 frame 一起置 true → bar 从老坐标 snap 到 select 坐标，不动画。
@@ -1482,8 +1572,6 @@ export default function Vision() {
       setCapturedFrame(null)
       setBarIntro(false)
     })
-    imageIdRef.current = ''
-    textSessionIdRef.current = ''
     try {
       const settings = await api.getSettings()
       const curMode = readModeFromHash()
@@ -1553,7 +1641,7 @@ export default function Vision() {
     }
     await api.showWindow()
     focusVisionInput()
-  }, [cancelPromptOptimization, focusVisionInput, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, focusVisionInput, invalidateVisionRequest, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     void enterSelect()
@@ -1658,15 +1746,24 @@ export default function Vision() {
     let cancelled = false
     let unlisten: (() => void) | undefined
     api.onVisionStream((payload: VisionStreamPayload) => {
-      if (payload.imageId !== imageIdRef.current) return
-      if (payload.done) {
-        clearVisionStreamFlushTimer()
-        flushVisionStreamBuffer(true)
-        if (payload.reason === 'done') {
-          justFinishedStreamRef.current = true
+      if (!visionRequestLifecycleRef.current.matchesStream(imageIdRef.current, payload)) return
+      if (payload.error) {
+        const previous = visionTerminalErrorRef.current
+        const isNewError = previous?.requestId !== payload.requestId
+          || previous.error !== payload.error
+          || previous.incompleteReason !== payload.incompleteReason
+        if (isNewError) {
+          visionTerminalErrorRef.current = {
+            requestId: payload.requestId,
+            error: payload.error,
+            incompleteReason: payload.incompleteReason,
+          }
+          if (!payload.delta?.includes(payload.error)) {
+            const reason = payload.incompleteReason ? ` (${payload.incompleteReason})` : ''
+            visionStreamBufferRef.current.content += `\n\n${appendVisionError('', `${payload.error}${reason}`)}`
+            scheduleVisionStreamFlush()
+          }
         }
-        setStreaming(false)
-        return
       }
       if (payload.reasoningDelta) {
         visionStreamBufferRef.current.reasoning += payload.reasoningDelta
@@ -1675,6 +1772,15 @@ export default function Vision() {
       if (payload.delta) {
         visionStreamBufferRef.current.content += payload.delta
         scheduleVisionStreamFlush()
+      }
+      if (payload.done) {
+        clearVisionStreamFlushTimer()
+        flushVisionStreamBuffer(true)
+        if (payload.reason === 'done' || payload.reason === 'error') {
+          justFinishedStreamRef.current = true
+        }
+        setStreaming(false)
+        return
       }
     }).then((dispose) => {
       if (cancelled) dispose()
@@ -1719,6 +1825,7 @@ export default function Vision() {
   // 否则下次 show 时可能先显示上次的 ready/result 态 surface 一帧，再被 vision:reset 覆盖。
   // barNoTransition：禁用 left/top/width transition，避免 380ms 动画被 hide 暂停后下次 show 续播。
   const resetBeforeHide = useCallback(() => {
+    invalidateVisionRequest()
     setVisionCursorPassthrough(false)
     void api.visionSetHitRegion(null).catch(err => console.error('[vision-floating] clear hit region failed:', err))
     setHitRegionRect(null)
@@ -1742,6 +1849,8 @@ export default function Vision() {
     resetVisionStreamBuffer()
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
     justFinishedStreamRef.current = false
+    imageIdRef.current = ''
+    textSessionIdRef.current = ''
     flushSync(() => {
       setBarNoTransition(true)
       setBarFlyOffset({ x: 0, y: 0 })
@@ -1775,12 +1884,10 @@ export default function Vision() {
       setCapturedFrame(null)
       setBarIntro(false)
     })
-    imageIdRef.current = ''
-    textSessionIdRef.current = ''
     // 让任何还没落地的 takeVisionSelection 老 promise 作废，避免关闭后 setSelectionText 拖回来
     selectionReqIdRef.current++
     focusReqIdRef.current++
-  }, [cancelPromptOptimization, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, invalidateVisionRequest, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
 
   const resetAfterClose = useCallback(() => {
     if (closeResetTimerRef.current) clearTimeout(closeResetTimerRef.current)
@@ -1791,7 +1898,7 @@ export default function Vision() {
   }, [resetBeforeHide])
 
   const closeLikeEscape = useCallback(async () => {
-    if (preparingSendRef.current && !streaming) return
+    invalidateVisionRequest()
     if (stageRef.current === 'answering' && streaming) {
       closingStreamRef.current = true
       try { await api.visionCancelStream() } catch (err) { console.error(err) }
@@ -1802,7 +1909,7 @@ export default function Vision() {
     setVisionCursorPassthrough(false)
     try { await api.visionClose() } catch (err) { console.error(err) }
     resetAfterClose()
-  }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, resetAfterClose, setVisionCursorPassthrough, streaming])
+  }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, invalidateVisionRequest, resetAfterClose, setVisionCursorPassthrough, streaming])
 
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
@@ -2060,20 +2167,21 @@ export default function Vision() {
       })
 
       try {
-        await api.visionSetFloating({
+        const applied = await setVisionFloatingWithRetry({
           x: fromOrigin.x,
           y: fromOrigin.y,
           width,
           height,
-        })
-        if (flySeq !== nativeFlySeqRef.current) return
+          hasScreenshot: true,
+        }, () => flySeq === nativeFlySeqRef.current)
+        if (!applied || flySeq !== nativeFlySeqRef.current) return
         flushSync(() => {
           setFloatingRebased(true)
           setWinOrigin(fromOrigin)
           setViewport({ w: width, h: height })
           setBarRect({ x: 0, y: 0, width })
           setBarRebaseHidden(false)
-          floatingSizeRef.current = { width, height }
+          floatingSizeRef.current = { width, height, hasScreenshot: true }
         })
 
         await api.visionFlyFloating({
@@ -2081,6 +2189,7 @@ export default function Vision() {
           to: targetOrigin,
           width,
           height,
+          hasScreenshot: true,
           durationMs: NATIVE_FLOATING_FLY_MS,
         })
         if (flySeq !== nativeFlySeqRef.current) return
@@ -2092,7 +2201,7 @@ export default function Vision() {
           setBarRebaseHidden(false)
           setBarNoTransition(false)
           setJellyActive(false)
-          floatingSizeRef.current = { width, height }
+          floatingSizeRef.current = { width, height, hasScreenshot: true }
         })
         requestAnimationFrame(() => {
           if (flySeq === nativeFlySeqRef.current) setJellyActive(true)
@@ -2666,7 +2775,13 @@ export default function Vision() {
    *
    * beforeFlush 让调用方把自己的状态塞进同一次 flushSync，避免多一帧闪烁。
    */
-  const flyBarToTopSlot = useCallback(async (beforeFlush?: () => void) => {
+  const flyBarToTopSlot = useCallback(async (
+    requestId?: string,
+    beforeFlush?: () => void,
+    hasScreenshot = false,
+  ) => {
+    const requestIsCurrent = () => requestId === undefined || visionRequestLifecycleRef.current.isCurrent(requestId)
+    if (!requestIsCurrent()) return false
     const width = Math.round(barRect.width)   // 长度不变
     const height = READY_BAR_H
     const slot = computeTopSlot(viewport.w, viewport.h, width)
@@ -2703,21 +2818,24 @@ export default function Vision() {
     })
 
     try {
+      if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
       await api.visionSetHitRegion(null)
-      await api.visionSetFloating({
+      if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
+      const applied = await setVisionFloatingWithRetry({
         x: fromOrigin.x,
         y: fromOrigin.y,
         width,
         height,
-      })
-      if (flySeq !== nativeFlySeqRef.current) return false
+        hasScreenshot,
+      }, () => flySeq === nativeFlySeqRef.current && requestIsCurrent())
+      if (!applied || flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
       flushSync(() => {
         setFloatingRebased(true)
         setWinOrigin(fromOrigin)
         setViewport({ w: width, h: height })
         setBarRect({ x: 0, y: 0, width })
         setBarRebaseHidden(false)
-        floatingSizeRef.current = { width, height }
+        floatingSizeRef.current = { width, height, hasScreenshot }
       })
 
       await api.visionFlyFloating({
@@ -2725,9 +2843,10 @@ export default function Vision() {
         to: targetOrigin,
         width,
         height,
+        hasScreenshot,
         durationMs: NATIVE_FLOATING_FLY_MS,
       })
-      if (flySeq !== nativeFlySeqRef.current) return false
+      if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
 
       flushSync(() => {
         setWinOrigin(targetOrigin)
@@ -2736,13 +2855,14 @@ export default function Vision() {
         setBarRebaseHidden(false)
         setBarNoTransition(false)
         setJellyActive(false)
-        floatingSizeRef.current = { width, height }
+        floatingSizeRef.current = { width, height, hasScreenshot }
       })
       requestAnimationFrame(() => {
-        if (flySeq === nativeFlySeqRef.current) setJellyActive(true)
+        if (flySeq === nativeFlySeqRef.current && requestIsCurrent()) setJellyActive(true)
       })
       return true
     } catch (err) {
+      if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
       console.error('[vision-floating] fly to top slot failed:', err)
       flushSync(() => {
         setFloatingRebased(false)
@@ -2754,10 +2874,11 @@ export default function Vision() {
     }
   }, [barRect, metrics, viewport, winOrigin])
 
-  const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[]) => {
+  const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[], requestId: string) => {
     // 先只把输入条飞上去（此时还是单条高度），落地后再置 answering，
     // 让回答面板从落点向下展开 —— 而不是边飞边长高。
-    const ok = await flyBarToTopSlot()
+    const ok = await flyBarToTopSlot(requestId)
+    if (!isVisionRequestCurrent(requestId)) return false
     flushSync(() => {
       setMessages(nextMessages)
       setStage('answering')
@@ -2765,7 +2886,7 @@ export default function Vision() {
     })
     if (ok) focusVisionInput([30, 120, 260])
     return ok
-  }, [flyBarToTopSlot, focusVisionInput])
+  }, [flyBarToTopSlot, focusVisionInput, isVisionRequestCurrent])
 
   // 优化提示词：全程不动输入框。原文留在 input 里，结果进预览卡，
   // 由用户决定是否「采纳」。优化中再点一次按钮 = 取消。
@@ -2791,7 +2912,7 @@ export default function Vision() {
     // stage 必须一并切到 ready：isFloatingLayout 和悬浮尺寸 effect 都假定
     // select 态等于全屏，停在 select 会让窗口不跟随卡片高度。
     if (stageRef.current === 'select' || !floatingRebased) {
-      const ok = await flyBarToTopSlot()
+      const ok = await flyBarToTopSlot(undefined, undefined, hasScreenshot)
       if (seq !== promptOptimizeSeqRef.current) return
       if (ok) focusVisionInput([30, 120])
     }
@@ -2808,7 +2929,7 @@ export default function Vision() {
       setPromptPreviewStatus('error')
       setPromptOptimizing(false)
     }
-  }, [cancelPromptOptimization, floatingRebased, flyBarToTopSlot, focusVisionInput, input, promptOptimizing, streaming])
+  }, [cancelPromptOptimization, floatingRebased, flyBarToTopSlot, focusVisionInput, hasScreenshot, input, promptOptimizing, streaming])
 
   const acceptOptimizedPrompt = useCallback(() => {
     const next = promptPreviewText.trim()
@@ -2837,6 +2958,8 @@ export default function Vision() {
       && !!imageIdRef.current
     )
     if (!question && !allowBlankImageAnalysis) return
+    const requestId = visionRequestLifecycleRef.current.begin()
+    visionTerminalErrorRef.current = null
     const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
     setHistoryOpen(false)
     // 发送即视为放弃这次优化建议：预览卡和答案面板都挂在悬浮条正下方，
@@ -2866,7 +2989,8 @@ export default function Vision() {
       && !floatingRebased
     )
     if (textOnlyFloating) {
-      await enterTextOnlyFloatingAnswer(nextMessages)
+      await enterTextOnlyFloatingAnswer(nextMessages, requestId)
+      if (!isVisionRequestCurrent(requestId)) return
     } else {
       flushSync(() => {
         setMessages(nextMessages)
@@ -2877,6 +3001,7 @@ export default function Vision() {
 
     // 默认沿用当前 image_id;若有箭头则先合成 + 注册新图,把后续 ask 切到合成版
     try {
+      if (!isVisionRequestCurrent(requestId)) return
       let effectiveImageId = imageIdRef.current
       if (arrows.length > 0 && imagePreview && capturedFrame) {
         try {
@@ -2886,7 +3011,9 @@ export default function Vision() {
             capturedFrame.width,
             capturedFrame.height,
           )
+          if (!isVisionRequestCurrent(requestId)) return
           const result = await api.visionRegisterAnnotatedImage(base64)
+          if (!isVisionRequestCurrent(requestId)) return
           if (result.success && result.imageId) {
             effectiveImageId = result.imageId
             imageIdRef.current = result.imageId
@@ -2898,11 +3025,16 @@ export default function Vision() {
             console.warn('[vision-arrow] register annotated image failed:', result.error)
           }
         } catch (err) {
-          console.warn('[vision-arrow] compose failed, fallback to original:', err)
+          if (isVisionRequestCurrent(requestId)) {
+            console.warn('[vision-arrow] compose failed, fallback to original:', err)
+          }
         }
       }
+      if (!isVisionRequestCurrent(requestId)) return
       preparingSendRef.current = false
-      const result = await api.visionAsk(effectiveImageId || '', sendMessages)
+      const result = await api.visionAsk(effectiveImageId || '', sendMessages, requestId)
+      if (!isVisionRequestCurrent(requestId) || !visionRequestLifecycleRef.current.matchesResult(requestId, result)) return
+      if (!visionRequestLifecycleRef.current.acceptResult(requestId, result.requestId)) return
       clearVisionStreamFlushTimer()
       flushVisionStreamBuffer(true)
       if (!result.success) {
@@ -2910,38 +3042,47 @@ export default function Vision() {
         setMessages(prev => {
           const last = prev[prev.length - 1]
           if (!last || last.role !== 'assistant') return prev
-          return [...prev.slice(0, -1), { role: 'assistant', content: errText }]
+          const content = appendVisionError(last.content, errText)
+          return [...prev.slice(0, -1), { ...last, content }]
         })
       } else if (result.response) {
         // 非流式:把完整答案塞进占位 assistant;流式情况已在 onVisionStream 累积,避免覆盖
+        const canonicalResponse = result.response
         setMessages(prev => {
           const last = prev[prev.length - 1]
           if (!last || last.role !== 'assistant') return prev
-          if (last.content.length > 0) return prev
-          return [...prev.slice(0, -1), { role: 'assistant', content: result.response! }]
+          const content = mergeVisionResponse(last.content, canonicalResponse)
+          if (content === last.content) return prev
+          return [...prev.slice(0, -1), { ...last, content }]
         })
       }
     } catch (err) {
+      if (!isVisionRequestCurrent(requestId)) return
+      if (!visionRequestLifecycleRef.current.settleError(requestId)) return
       clearVisionStreamFlushTimer()
       flushVisionStreamBuffer(true)
       const msg = err instanceof Error ? err.message : String(err)
       setMessages(prev => {
         const last = prev[prev.length - 1]
         if (!last || last.role !== 'assistant') return prev
-        return [...prev.slice(0, -1), { role: 'assistant', content: `${t.visionError}: ${msg}` }]
+        return [...prev.slice(0, -1), { ...last, content: appendVisionError(last.content, `${t.visionError}: ${msg}`) }]
       })
     } finally {
+      if (!visionRequestLifecycleRef.current.canFinalize(requestId)) return
       preparingSendRef.current = false
       // ref 在 setStreaming(false) 之前置 true,让持久化 effect 在本次 rerun 中识别这是"流刚结束"路径
       if (!closingStreamRef.current) {
         justFinishedStreamRef.current = true
       }
       setStreaming(false)
+      visionTerminalErrorRef.current = null
     }
   }
 
   const handleStop = async () => {
+    const stopSequence = invalidateVisionRequest()
     try { await api.visionCancelStream() } catch (err) { console.error(err) }
+    if (!visionRequestLifecycleRef.current.isCurrentInvalidation(stopSequence)) return
     clearVisionStreamFlushTimer()
     flushVisionStreamBuffer(true)
     // 用户主动取消但已经流出部分内容，也持久化 —— 关掉再开历史能接着问
@@ -3024,6 +3165,7 @@ export default function Vision() {
   // 点击历史项：把当前会话恢复到该 item（image / appLabel / messages / capturedFrame）
   // 取消任何正在跑的流，避免后端继续 emit delta 灌入新恢复的 messages（如果新旧 imageId 巧合相同会污染）
   const restoreHistory = async (item: HistoryItem) => {
+    invalidateVisionRequest()
     setHistoryOpen(false)
     cancelPromptOptimization()
     stopSpeechPlayback()
@@ -3086,13 +3228,14 @@ export default function Vision() {
 
     try {
       await api.visionSetHitRegion(null)
-      await api.visionSetFloating({
+      const applied = await setVisionFloatingWithRetry({
         x: origin.x,
         y: origin.y,
         width,
         height,
-      })
-      if (restoreSeq !== nativeFlySeqRef.current) return
+        hasScreenshot: !restoreTextOnly,
+      }, () => restoreSeq === nativeFlySeqRef.current)
+      if (!applied || restoreSeq !== nativeFlySeqRef.current) return
       flushSync(() => {
         setFloatingRebased(true)
         setWinOrigin(origin)
@@ -3100,7 +3243,7 @@ export default function Vision() {
         setBarRect({ x: 0, y: 0, width })
         setBarRebaseHidden(false)
         setBarNoTransition(false)
-        floatingSizeRef.current = { width, height }
+        floatingSizeRef.current = { width, height, hasScreenshot: !restoreTextOnly }
       })
       focusVisionInput([30, 120, 260])
     } catch (err) {
@@ -3128,6 +3271,7 @@ export default function Vision() {
 
   useEffect(() => () => {
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
+    invalidateVisionRequest()
     nativeFlySeqRef.current++
     if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
     if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
@@ -3136,7 +3280,7 @@ export default function Vision() {
     stopSpeechPlayback()
     focusReqIdRef.current++
     setVisionCursorPassthrough(false)
-  }, [setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [invalidateVisionRequest, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     if (!historyOpen) return
@@ -3641,6 +3785,8 @@ export default function Vision() {
     if (!floatingRebased) return
     if (barNoTransition) return
 
+    let cancelled = false
+
     const w = barRect.width + FLOATING_PADDING * 2
     let h = READY_BAR_H + FLOATING_PADDING * 2
 
@@ -3665,15 +3811,25 @@ export default function Vision() {
     }
 
     const last = floatingSizeRef.current
-    if (last && Math.round(last.width) === Math.round(w) && Math.round(last.height) === Math.round(h)) {
+    if (
+      last
+      && Math.round(last.width) === Math.round(w)
+      && Math.round(last.height) === Math.round(h)
+      && last.hasScreenshot === hasScreenshot
+    ) {
       return
     }
 
-    api.visionSetFloating({ width: w, height: h })
-      .then(() => {
-        floatingSizeRef.current = { width: w, height: h }
+    setVisionFloatingWithRetry({ width: w, height: h, hasScreenshot }, () => !cancelled)
+      .then((applied) => {
+        if (!applied || cancelled) return
+        floatingSizeRef.current = { width: w, height: h, hasScreenshot }
       })
       .catch(err => console.error('[vision-floating] resize failed:', err))
+
+    return () => {
+      cancelled = true
+    }
   }, [
     stage,
     answerLayout,
@@ -3687,6 +3843,7 @@ export default function Vision() {
     showPromptPreview,
     stableAnswerHeight,
     translateCardHeight,
+    hasScreenshot,
   ])
 
   const beginFloatingPanelDrag = useCallback((e: React.MouseEvent<HTMLElement>) => {
@@ -3939,6 +4096,7 @@ export default function Vision() {
         >
           <div
             className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 ring-1 ring-[color:var(--kv-panel-edge)] ${stage === 'select' ? 'cursor-default' : 'cursor-move'}`}
+            data-screenpilot-vision-image={hasScreenshot ? 'true' : 'false'}
             onMouseDown={beginFloatingPanelDrag}
             data-tauri-drag-region="false"
           >

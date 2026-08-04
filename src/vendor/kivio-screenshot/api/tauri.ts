@@ -7,12 +7,22 @@ export type ExplainMessage = { role: 'user' | 'assistant'; content: string; reas
 
 export type VisionStreamPayload = {
   imageId: string
+  requestId: string
   kind: 'answer'
   delta: string
   reasoningDelta?: string
   done?: boolean
   reason?: 'done' | 'cancelled' | 'error'
   full?: string
+  error?: string
+  incompleteReason?: string
+}
+
+export type VisionAskResult = {
+  success: boolean
+  requestId: string
+  response?: string
+  error?: string
 }
 
 export type VisionTranslateStreamPayload = {
@@ -262,8 +272,8 @@ export const api = {
     invoke<{ success: boolean; data?: string; error?: string }>(
       'synthesize_speech', { text }
     ),
-  visionAsk: (imageId: string, messages: ExplainMessage[]) =>
-    invoke<{ success: boolean; response?: string; error?: string }>('vision_ask', { imageId, messages }),
+  visionAsk: (imageId: string, messages: ExplainMessage[], requestId: string) =>
+    invoke<VisionAskResult>('vision_ask', { imageId, messages, requestId }),
   visionCancelStream: () => invoke<void>('vision_cancel_stream'),
   visionClose: () => invoke<void>('vision_close'),
   visionCommitImageToHistory: (imageId: string) =>
@@ -275,14 +285,16 @@ export const api = {
     y?: number
     width: number
     height: number
+    hasScreenshot?: boolean
     hitRegion?: { x: number; y: number; width: number; height: number } | null
   }) =>
-    invoke<void>('vision_set_floating', { rect }),
+    invoke<boolean>('vision_set_floating', { rect }),
   visionFlyFloating: (rect: {
     from: { x: number; y: number }
     to: { x: number; y: number }
     width: number
     height: number
+    hasScreenshot?: boolean
     durationMs?: number
   }) =>
     invoke<void>('vision_fly_floating', { rect }),

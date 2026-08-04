@@ -42,8 +42,8 @@ export function VisionSection({
         <SettingRow label="流式输出">
           <Toggle checked={current.stream} label="Vision 流式输出" onChange={(stream) => update({ stream })} />
         </SettingRow>
-        <SettingRow label="思考过程">
-          <Toggle checked={current.thinking} label="Vision 思考过程" onChange={(thinking) => update({ thinking })} />
+        <SettingRow label="显示思考过程/摘要">
+          <Toggle checked={current.thinking} label="Vision 显示思考过程/摘要" onChange={(thinking) => update({ thinking })} />
         </SettingRow>
         {current.thinking ? (
           <SettingRow label="思考强度">

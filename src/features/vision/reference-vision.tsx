@@ -6,6 +6,8 @@ import ReferenceVision from '../../vendor/kivio-screenshot/Vision'
 import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
 import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
+import { safeExternalUrl } from './citation-links'
+import { visionDialogHeight } from './dialog-sizing'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
@@ -66,10 +68,6 @@ const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
 const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
 const OCR_FLOATING_MAX_HEIGHT = 400
-const VISION_ANSWER_MIN_HEIGHT = 220
-const VISION_ANSWER_MAX_HEIGHT = 480
-const VISION_ANSWER_VIEWPORT_RATIO = 0.45
-const VISION_DIALOG_MINIMUM_RATIO = 2 / 3
 languageHost.dataset.screenpilotTargetLanguage = 'true'
 sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
@@ -105,17 +103,6 @@ function setCssPropertyIfChanged(element: HTMLElement, name: string, value: stri
 
 function clearCssProperty(element: HTMLElement, name: string) {
   if (element.style.getPropertyValue(name)) element.style.removeProperty(name)
-}
-
-function visionAnswerHeight(viewportHeight: number): number {
-  return Math.round(Math.max(
-    VISION_ANSWER_MIN_HEIGHT,
-    Math.min(VISION_ANSWER_MAX_HEIGHT, viewportHeight * VISION_ANSWER_VIEWPORT_RATIO),
-  ))
-}
-
-function visionDialogMinimumHeight(initialHeight: number): number {
-  return Math.round(initialHeight * VISION_DIALOG_MINIMUM_RATIO)
 }
 
 function initialVisionViewportHeight(): number {
@@ -183,6 +170,26 @@ export default function ReferenceVisionAdapter() {
   const aiAvailabilityLoadedRef = useRef(false)
 
   useEffect(() => installOcrDebounceTimingAdapter(), [])
+
+  useEffect(() => {
+    const onLinkClick = (event: MouseEvent) => {
+      if (event.defaultPrevented) return
+      if (!(event.target instanceof Element)) return
+      const anchor = event.target.closest<HTMLAnchorElement>('a[href]')
+      if (anchor === null) return
+      const href = anchor.getAttribute('href')
+      if (href === null) return
+      const safeUrl = safeExternalUrl(href)
+      event.preventDefault()
+      event.stopPropagation()
+      if (safeUrl === null) return
+      void invoke('open_external', { url: safeUrl }).catch((error: unknown) => {
+        console.error('Failed to open citation link', error)
+      })
+    }
+    document.addEventListener('click', onLinkClick, true)
+    return () => document.removeEventListener('click', onLinkClick, true)
+  }, [])
 
   const clearOverride = useCallback(() => {
     overrideLockedRef.current = false
@@ -284,9 +291,8 @@ export default function ReferenceVisionAdapter() {
             clearFloatingDialogLayout(card)
           }
         })
-        const dialogInitialHeight = visionDialogMinimumHeight(
-          visionAnswerHeight(referenceViewportHeightRef.current),
-        )
+        const hasScreenshot = promptBar?.dataset.screenpilotVisionImage !== 'false'
+        const dialogInitialHeight = visionDialogHeight(referenceViewportHeightRef.current, hasScreenshot)
         const dialogMinimumHeight = dialogInitialHeight
         if (promptPreviewCard !== null) {
           setAttributeIfChanged(promptPreviewCard, 'data-screenpilot-vision-prompt-preview', 'true')
@@ -309,7 +315,11 @@ export default function ReferenceVisionAdapter() {
           && child.classList.contains('transition-all')
           && child.classList.contains('absolute')
         ))
-        if (answerCard instanceof HTMLElement) {
+        if (
+          answerCard instanceof HTMLElement
+          && answerCard.style.opacity !== '0'
+          && answerCard.style.height !== '0px'
+        ) {
           setAttributeIfChanged(answerCard, 'data-screenpilot-answer-panel', 'true')
           setCssPropertyIfChanged(
             answerCard,
@@ -499,7 +509,7 @@ export default function ReferenceVisionAdapter() {
     applyAdapters()
     const observer = new MutationObserver(applyAdapters)
     observer.observe(document.body, {
-      attributeFilter: ['class', 'style'],
+      attributeFilter: ['class', 'style', 'data-screenpilot-vision-image'],
       attributes: true,
       childList: true,
       subtree: true,
