@@ -22,6 +22,32 @@ describe('sanitizeSettings', () => {
     expect(settings.translation.targetLanguage).toBe('auto')
   })
 
+  it('accepts max for Vision and prompt optimization but not screenshot translation', () => {
+    const settings = sanitizeSettings({
+      vision: { thinkingEffort: 'max' },
+      screenshotTranslation: { thinkingEffort: 'max' },
+      promptOptimizer: { thinkingEffort: 'max' },
+    })
+    expect(settings.vision.thinkingEffort).toBe('max')
+    expect(settings.promptOptimizer.thinkingEffort).toBe('max')
+    expect(settings.screenshotTranslation.thinkingEffort).toBe('medium')
+  })
+
+  it('falls back to medium for missing or invalid thinking effort values', () => {
+    const settings = sanitizeSettings({
+      vision: { thinkingEffort: 'MAX' },
+      screenshotTranslation: { thinkingEffort: 'MAX' },
+      promptOptimizer: { thinkingEffort: '中文' },
+    })
+    expect(settings.vision.thinkingEffort).toBe('medium')
+    expect(settings.screenshotTranslation.thinkingEffort).toBe('medium')
+    expect(settings.promptOptimizer.thinkingEffort).toBe('medium')
+    const missing = sanitizeSettings({})
+    expect(missing.vision.thinkingEffort).toBe('medium')
+    expect(missing.screenshotTranslation.thinkingEffort).toBe('medium')
+    expect(missing.promptOptimizer.thinkingEffort).toBe('medium')
+  })
+
   it('migrates missing source languages and rejects unsupported values', () => {
     const legacy = sanitizeSettings({})
     expect(legacy.translation.sourceLanguage).toBe('auto')

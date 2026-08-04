@@ -1,5 +1,5 @@
 use crate::application::state::AppState;
-use crate::infrastructure::ai_http::{complete_text, AiRequestPolicy};
+use crate::infrastructure::ai_http::{complete_text, complete_text_with_effort, AiRequestPolicy};
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::translation;
 use arboard::Clipboard;
@@ -218,7 +218,7 @@ pub async fn optimizer_run(
         &settings.prompt_optimizer.response_language,
         &request.text,
     );
-    let text = complete_text(
+    let text = complete_text_with_effort(
         provider,
         &selection.model,
         &keys,
@@ -229,6 +229,7 @@ pub async fn optimizer_run(
             language_name,
         ),
         AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
+        settings.prompt_optimizer.thinking_effort,
     )
     .await?;
     Ok(PromptOptimizationResult {

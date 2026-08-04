@@ -1,6 +1,6 @@
 import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
-import type { AppSettings } from '../types'
+import type { AppSettings, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
 
 export function OptimizerSection({
@@ -37,6 +37,20 @@ export function OptimizerSection({
             providers={settings.providers}
             label="提示词优化模型"
             onChange={(model) => update({ model })}
+          />
+        </SettingRow>
+        <SettingRow label="思考强度">
+          <SelectField<ThinkingEffort>
+            value={current.thinkingEffort}
+            label="提示词优化思考强度"
+            options={[
+              { value: 'low', label: 'low' },
+              { value: 'medium', label: 'medium' },
+              { value: 'high', label: 'high' },
+              { value: 'xhigh', label: 'xhigh' },
+              { value: 'max', label: 'max' },
+            ]}
+            onChange={(thinkingEffort) => update({ thinkingEffort })}
           />
         </SettingRow>
       </SettingGroup>

@@ -51,10 +51,11 @@ export function VisionSection({
               value={current.thinkingEffort}
               label="Vision 思考强度"
               options={[
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' },
-                { value: 'xhigh', label: '极高' },
+                { value: 'low', label: 'low' },
+                { value: 'medium', label: 'medium' },
+                { value: 'high', label: 'high' },
+                { value: 'xhigh', label: 'xhigh' },
+                { value: 'max', label: 'max' },
               ]}
               onChange={(thinkingEffort) => update({ thinkingEffort })}
             />

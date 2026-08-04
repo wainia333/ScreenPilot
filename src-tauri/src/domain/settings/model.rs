@@ -60,6 +60,7 @@ pub enum ThinkingEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -207,6 +208,8 @@ pub struct PromptOptimizerSettings {
     pub enabled: bool,
     pub response_language: String,
     pub model: Option<ModelSelection>,
+    #[serde(default = "default_thinking_effort")]
+    pub thinking_effort: ThinkingEffort,
     pub system_prompt: String,
     pub optimize_prompt: String,
 }
@@ -291,6 +294,7 @@ impl Default for AppSettings {
                 enabled: true,
                 response_language: "auto".into(),
                 model: None,
+                thinking_effort: ThinkingEffort::Medium,
                 system_prompt: OPTIMIZER_SYSTEM_PROMPT.into(),
                 optimize_prompt: OPTIMIZER_PROMPT.into(),
             },
@@ -460,6 +464,10 @@ fn default_source_language() -> String {
     "auto".into()
 }
 
+fn default_thinking_effort() -> ThinkingEffort {
+    ThinkingEffort::Medium
+}
+
 fn valid_model_selection(providers: &[ProviderSettings], selection: &ModelSelection) -> bool {
     providers
         .iter()
@@ -487,6 +495,7 @@ mod tests {
         assert_eq!(json["schemaVersion"], 1);
         assert_eq!(json["shortcuts"]["promptOptimizer"], "Control+Alt+P");
         assert_eq!(json["screenshotTranslation"]["ocrMethod"], "chaoxing");
+        assert_eq!(json["promptOptimizer"]["thinkingEffort"], "medium");
         assert_eq!(json["translation"]["aiEnabled"], false);
         assert_eq!(json["translation"]["sourceLanguage"], "auto");
         assert_eq!(json["screenshotTranslation"]["ocrAiEnabled"], false);
@@ -535,6 +544,34 @@ mod tests {
         let restored = serde_json::from_value::<AppSettings>(json).expect("deserialize legacy");
         assert_eq!(restored.translation.source_language, "auto");
         assert_eq!(restored.screenshot_translation.source_language, "auto");
+    }
+
+    #[test]
+    fn fills_missing_prompt_optimizer_thinking_effort() {
+        let settings = AppSettings::default();
+        let mut json = serde_json::to_value(settings).expect("serialize defaults");
+        json["promptOptimizer"]
+            .as_object_mut()
+            .expect("prompt optimizer settings")
+            .remove("thinkingEffort");
+        let restored = serde_json::from_value::<AppSettings>(json).expect("deserialize legacy");
+        assert_eq!(
+            restored.prompt_optimizer.thinking_effort,
+            ThinkingEffort::Medium
+        );
+    }
+
+    #[test]
+    fn serializes_max_thinking_effort_as_lowercase_max() {
+        assert_eq!(
+            serde_json::to_value(ThinkingEffort::Max).expect("serialize max effort"),
+            serde_json::Value::String("max".into())
+        );
+        assert_eq!(
+            serde_json::from_value::<ThinkingEffort>(serde_json::json!("max"))
+                .expect("deserialize max effort"),
+            ThinkingEffort::Max
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { Check, Clipboard, Clock3, Languages, Trash2, X } from 'lucide-react'
+import { Check, Clipboard, Languages, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
@@ -9,6 +9,7 @@ import { DEFAULT_SETTINGS } from '../settings/defaults'
 import type { TranslationSettingsPatch } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
+import { HistoryMenu } from '../history/history-menu'
 
 type TargetLanguage = TranslationLanguage
 
@@ -67,7 +68,6 @@ export function TranslatorPage() {
   const [output, setOutput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [arrivalCycle, setArrivalCycle] = useState(0)
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
@@ -76,6 +76,7 @@ export function TranslatorPage() {
   const composing = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const immediateRequest = useRef<string | null>(null)
+  const skipNextInputRequest = useRef<string | null>(null)
   const { ratio, beginResize } = useSplitRatio(
     'screenpilot:translator-ocr-golden-split',
     goldenSectionRatio,
@@ -92,7 +93,6 @@ export function TranslatorPage() {
       setOutput('')
       setError(null)
       setLoading(false)
-      setHistoryOpen(false)
       setCopied(false)
       setArrivalCycle((value) => value + 1)
     }).then((unlisten) => {
@@ -143,6 +143,10 @@ export function TranslatorPage() {
   }, [desktop])
   useEffect(() => {
     if (settings === null || input.trim().length === 0) return
+    if (skipNextInputRequest.current === input) {
+      skipNextInputRequest.current = null
+      return
+    }
     const requestKey = translationRequestKey(input, settings)
     const delay = immediateRequest.current === requestKey ? 0 : TRANSLATOR_INPUT_DEBOUNCE_MS
     if (delay === 0) immediateRequest.current = null
@@ -205,6 +209,16 @@ export function TranslatorPage() {
     await desktop.commitText(text, settings?.general.autoPaste ?? false)
     await desktop.hideWindow()
   }
+  const restoreHistory = (item: TranslationHistory) => {
+    generation.current += 1
+    skipNextInputRequest.current = item.input === input ? null : item.input
+    setInput(item.input)
+    setOutput(item.output)
+    setError(null)
+    setLoading(false)
+    roundId.current = item.id
+    queueMicrotask(() => inputRef.current?.focus())
+  }
   const canUseAi = settings !== null
     && settings.translation.aiEnabled
     && isValidModelSelection(settings.translation.aiModel, settings.providers)
@@ -228,19 +242,15 @@ export function TranslatorPage() {
           {loading ? '翻译中…' : input.trim().length > 0 ? 'Ctrl+Enter 提交' : '等待输入'}
         </span>
         <div className="ocr-result-header-actions">
-          <button
-            type="button"
-            className="ocr-header-button history-button"
-            aria-label="翻译历史"
-            aria-describedby="translator-history-count"
-            onClick={() => setHistoryOpen(!historyOpen)}
-          >
-            <Clock3 size={16} />
-            {history.length > 0 ? <span className="history-count-badge" aria-hidden="true">{history.length}</span> : null}
-            <span id="translator-history-count" className="history-count-announcement">
-              {history.length > 0 ? `历史记录：${history.length} 条` : '暂无历史记录'}
-            </span>
-          </button>
+          <HistoryMenu
+            items={history}
+            title="翻译历史"
+            countAnnouncementId="translator-history-count"
+            getMeta={(item) => translationMethodOptions.find((option) => option.value === item.method)?.label ?? item.method}
+            onRestore={restoreHistory}
+            onRemove={(id) => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== id)))}
+            onClear={() => setHistory((items) => saveHistory(localStorage, historyKey, items.length === 0 ? items : []))}
+          />
           <button type="button" className="ocr-header-button" aria-label="关闭翻译" onClick={() => void desktop.hideWindow()}>
             <X size={14} />
           </button>
@@ -356,21 +366,6 @@ export function TranslatorPage() {
           ) : null}
         </section>
       </div>
-      {historyOpen ? (
-        <aside className="history-popover ocr-history-popover" aria-label="翻译历史">
-          <header><strong>最近翻译</strong><button type="button" className="text-button" onClick={() => { setHistory([]); saveHistory(localStorage, historyKey, []) }}>清空</button></header>
-          <div>
-            {history.length === 0 ? <p>暂无历史</p> : history.map((item) => (
-              <article key={item.id}>
-                <button type="button" onClick={() => { setInput(item.input); setOutput(item.output); roundId.current = item.id; setHistoryOpen(false) }}>
-                  <strong>{item.input}</strong><span>{item.output}</span>
-                </button>
-                <button type="button" className="icon-button" aria-label="删除历史" onClick={() => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== item.id)))}><Trash2 size={13} /></button>
-              </article>
-            ))}
-          </div>
-        </aside>
-      ) : null}
     </main>
   )
 }

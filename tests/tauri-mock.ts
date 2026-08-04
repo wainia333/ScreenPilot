@@ -11,13 +11,17 @@ export async function installVisionTauriMock(
   translatedText = 'ScreenPilot 视觉测试\n可见内容识别、英文 OCR 与公式 E = mc²',
   visionStreamDelayMs = 0,
   deferFloatingSetResponses = 0,
+  nativeResizeClientWidthDelta = 0,
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
     let listenerSequence = 0
     let imageSequence = 0
+    let nativeResizeFeedbackFlip = false
+    let nativeResizeFeedbackCount = 0
+    let nativeResizeFeedbackBaseWidth: number | null = null
     const visionTestState = {
       showCount: 0,
       translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string }[],
@@ -27,6 +31,8 @@ export async function installVisionTauriMock(
       floatingRects: [] as { width: number; height: number }[],
       floatingAppliedRects: [] as { width: number; height: number }[],
       floatingDeferredRects: [] as { width: number; height: number }[],
+      floatingHitRegion: null as { x: number; y: number; width: number; height: number } | null,
+      floatingHitRegionHistory: [] as ({ x: number; y: number; width: number; height: number } | null)[],
       floatingResizable: false,
       floatingHasScreenshot: true,
       floatingMinimumHeight: 0,
@@ -97,6 +103,7 @@ export async function installVisionTauriMock(
         providerId: 'test-provider',
         model: 'test-model',
         defaultLanguage: 'zh',
+        thinkingEffort: 'medium',
         systemPrompt: '',
         optimizePrompt: '',
       },
@@ -215,13 +222,40 @@ export async function installVisionTauriMock(
       }
       if (command === 'optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
       if (command === 'synthesize_speech') return { success: true, data: '' }
-      if (command === 'vision_set_hit_region') return true
       if (command === 'vision_close') {
         visionTestState.floatingRect = null
+        visionTestState.floatingHitRegion = null
+        visionTestState.floatingHitRegionHistory.push(null)
         visionTestState.floatingResizable = false
         visionTestState.floatingHasScreenshot = true
         visionTestState.floatingMinimumHeight = 0
         return null
+      }
+      if (command === 'vision_set_hit_region') {
+        const requested = args.rect as {
+          x?: unknown
+          y?: unknown
+          width?: unknown
+          height?: unknown
+        } | null | undefined
+        const valid = requested !== null
+          && requested !== undefined
+          && Number.isFinite(Number(requested.x))
+          && Number.isFinite(Number(requested.y))
+          && Number.isFinite(Number(requested.width))
+          && Number.isFinite(Number(requested.height))
+          && Number(requested.width) > 0
+          && Number(requested.height) > 0
+        visionTestState.floatingHitRegion = valid
+          ? {
+              x: Number(requested.x),
+              y: Number(requested.y),
+              width: Number(requested.width),
+              height: Number(requested.height),
+            }
+          : null
+        visionTestState.floatingHitRegionHistory.push(visionTestState.floatingHitRegion)
+        return true
       }
       if (command === 'vision_set_floating') {
         const rect = args.rect as {
@@ -251,7 +285,24 @@ export async function installVisionTauriMock(
             ? Math.min(requestedHeight, positionedTranslation ? 224 : 400)
             : requestedHeight,
         }
+        if (!screenshotTranslation && requestedHeight > 96) {
+          // Mirrors the Windows command's defensive SetWindowRgn(clear)
+          // before accepting a resizable floating geometry.
+          visionTestState.floatingHitRegion = null
+          visionTestState.floatingHitRegionHistory.push(null)
+        }
         visionTestState.floatingRects.push(floatingRect)
+        if (nativeWidthDelta !== 0 && !positionedTranslation && nativeResizeFeedbackCount < 24) {
+          nativeResizeFeedbackCount += 1
+          nativeResizeFeedbackBaseWidth ??= Number(rect?.width)
+          const feedbackWidth = nativeResizeFeedbackBaseWidth + (nativeResizeFeedbackFlip ? nativeWidthDelta : 0)
+          nativeResizeFeedbackFlip = !nativeResizeFeedbackFlip
+          Object.defineProperty(window, 'innerWidth', {
+            configurable: true,
+            value: Math.max(1, Math.round(feedbackWidth)),
+          })
+          window.dispatchEvent(new Event('resize'))
+        }
         const positioned = Number.isFinite(Number(rect?.x)) && Number.isFinite(Number(rect?.y))
         const enteringResizable = !screenshotTranslation && requestedHeight > 96 && !visionTestState.floatingResizable
         const modeChanged = hasScreenshot !== visionTestState.floatingHasScreenshot
@@ -329,5 +380,6 @@ export async function installVisionTauriMock(
     translatedResult: translatedText,
     streamDelayMs: visionStreamDelayMs,
     deferSetResponses: deferFloatingSetResponses,
+    nativeWidthDelta: nativeResizeClientWidthDelta,
   })
 }

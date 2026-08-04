@@ -85,6 +85,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     enabled: true,
     responseLanguage: 'auto',
     model: null,
+    thinkingEffort: 'medium',
     systemPrompt: DEFAULT_OPTIMIZER_SYSTEM_PROMPT,
     optimizePrompt: DEFAULT_OPTIMIZER_PROMPT,
   },

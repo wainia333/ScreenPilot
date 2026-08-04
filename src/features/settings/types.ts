@@ -2,7 +2,7 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 
 export type InterfaceLanguage = 'zh' | 'en'
 
-export type ThinkingEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type ThinkingEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type MessageOrder = 'asc' | 'desc'
 
@@ -101,6 +101,7 @@ export type PromptOptimizerSettings = {
   enabled: boolean
   responseLanguage: string
   model: ModelSelection | null
+  thinkingEffort: ThinkingEffort
   systemPrompt: string
   optimizePrompt: string
 }

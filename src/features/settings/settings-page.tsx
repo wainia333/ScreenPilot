@@ -8,7 +8,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDesktop } from '../../desktop/use-desktop'
 import { normalizeAiAvailability, sanitizeSettings, validateSettings } from './sanitize'
 import { AboutSection } from './sections/about-section'
@@ -24,6 +24,15 @@ import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 
 type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
+
+const SAVE_SUCCESS_TOAST_VISIBLE_MS = 3_200
+const SAVE_SUCCESS_TOAST_EXIT_MS = 200
+
+type SaveSuccessToast = {
+  key: number
+  message: string
+  phase: 'visible' | 'leaving'
+}
 
 const navigation = [
   { id: 'general', label: '常规', icon: Settings2 },
@@ -116,12 +125,55 @@ export function SettingsPage() {
   const [draft, setDraft] = useState<AppSettings | null>(null)
   const [providerKeyDrafts, setProviderKeyDrafts] = useState<ProviderKeyChanges>({})
   const [loadingError, setLoadingError] = useState<string | null>(null)
-  const [status, setStatus] = useState<string | null>(null)
+  const [status, setStatusState] = useState<string | null>(null)
+  const [saveSuccessToast, setSaveSuccessToast] = useState<SaveSuccessToast | null>(null)
+  const saveSuccessToastSequence = useRef(0)
+  const saveSuccessToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveSuccessToastExitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [saving, setSaving] = useState(false)
   const [dialog, setDialog] = useState<DialogState>('none')
   const [pendingImport, setPendingImport] = useState<SettingsExport | null>(null)
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>()
   const dirty = !sameSettings(saved, draft) || Object.keys(providerKeyDrafts).length > 0
+  const clearSaveSuccessToastTimer = useCallback(() => {
+    if (saveSuccessToastTimer.current !== null) {
+      clearTimeout(saveSuccessToastTimer.current)
+      saveSuccessToastTimer.current = null
+    }
+    if (saveSuccessToastExitTimer.current !== null) {
+      clearTimeout(saveSuccessToastExitTimer.current)
+      saveSuccessToastExitTimer.current = null
+    }
+  }, [])
+  const dismissSaveSuccessToast = useCallback(() => {
+    clearSaveSuccessToastTimer()
+    setSaveSuccessToast(null)
+  }, [clearSaveSuccessToastTimer])
+  const setStatus = useCallback((message: string | null) => {
+    dismissSaveSuccessToast()
+    setStatusState(message)
+  }, [dismissSaveSuccessToast])
+  const showSaveSuccessToast = useCallback(() => {
+    clearSaveSuccessToastTimer()
+    setStatusState(null)
+    const key = saveSuccessToastSequence.current + 1
+    saveSuccessToastSequence.current = key
+    setSaveSuccessToast({
+      key,
+      message: '设置已保存并立即生效',
+      phase: 'visible',
+    })
+    saveSuccessToastTimer.current = setTimeout(() => {
+      saveSuccessToastTimer.current = null
+      if (saveSuccessToastSequence.current !== key) return
+      setSaveSuccessToast((current) => current?.key === key ? { ...current, phase: 'leaving' } : current)
+      saveSuccessToastExitTimer.current = setTimeout(() => {
+        saveSuccessToastExitTimer.current = null
+        if (saveSuccessToastSequence.current === key) setSaveSuccessToast(null)
+      }, SAVE_SUCCESS_TOAST_EXIT_MS)
+    }, SAVE_SUCCESS_TOAST_VISIBLE_MS)
+  }, [clearSaveSuccessToastTimer])
+  useEffect(() => () => clearSaveSuccessToastTimer(), [clearSaveSuccessToastTimer])
   const load = useCallback(async () => {
     setLoadingError(null)
     try {
@@ -139,7 +191,7 @@ export function SettingsPage() {
     } catch (error) {
       setLoadingError(String(error))
     }
-  }, [desktop])
+  }, [desktop, setStatus])
   useEffect(() => {
     queueMicrotask(() => void load())
   }, [load])
@@ -185,7 +237,7 @@ export function SettingsPage() {
           : mergeSavedProviderKeyCounts(current, result.settings)
       })
       setProviderKeyDrafts((current) => sameProviderKeyDrafts(current, keyDraftSnapshot) ? {} : current)
-      setStatus('设置已保存并立即生效')
+      showSaveSuccessToast()
       return true
     } catch (error) {
       setStatus(`保存失败：${String(error)}`)
@@ -193,15 +245,17 @@ export function SettingsPage() {
     } finally {
       setSaving(false)
     }
-  }, [desktop, draft, issues.length, providerKeyDrafts, saved, saving])
+  }, [desktop, draft, issues.length, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast])
   const hide = useCallback(() => {
+    dismissSaveSuccessToast()
     void desktop.hideWindow()
-  }, [desktop])
+  }, [desktop, dismissSaveSuccessToast])
   const requestClose = useCallback(() => {
     if (saving) return
+    dismissSaveSuccessToast()
     if (dirty) setDialog('close')
     else hide()
-  }, [dirty, hide, saving])
+  }, [dirty, dismissSaveSuccessToast, hide, saving])
   const restoreDraft = useCallback(() => {
     if (saved === null) return
     setDraft(normalizeAiAvailability(structuredClone(saved)))
@@ -209,7 +263,7 @@ export function SettingsPage() {
     setStatus(null)
     setPendingImport(null)
     setDialog('none')
-  }, [saved])
+  }, [saved, setStatus])
   const cancel = useCallback(() => {
     if (saving) return
     restoreDraft()
@@ -236,7 +290,7 @@ export function SettingsPage() {
       setPendingImport(null)
       setDialog('none')
     },
-    [],
+    [setStatus],
   )
   if (loadingError !== null) {
     return (
@@ -313,6 +367,7 @@ export function SettingsPage() {
           void desktop.importSettings().then((value) => {
             if (value === null) return
             if (dirty) {
+              dismissSaveSuccessToast()
               setPendingImport(value)
               setDialog('import')
             } else {
@@ -405,6 +460,24 @@ export function SettingsPage() {
           </button>
         </footer>
       </section>
+      <div
+        className="save-success-toast-region"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-label={saveSuccessToast?.message}
+      >
+        {saveSuccessToast === null ? null : (
+          <div
+            key={saveSuccessToast.key}
+            className={`save-success-toast${saveSuccessToast.phase === 'leaving' ? ' is-leaving' : ''}`}
+            data-toast-sequence={saveSuccessToast.key}
+            data-toast-phase={saveSuccessToast.phase}
+          >
+            {saveSuccessToast.message}
+          </div>
+        )}
+      </div>
       {dialog === 'close' ? (
         <div className="dialog-backdrop unsaved-close-backdrop" role="presentation">
           <div className="decision-dialog unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">

@@ -2,9 +2,9 @@ use crate::application::lifecycle::TRANSLATOR_HEIGHT;
 use crate::application::state::AppState;
 use crate::domain::settings::{AppSettings, ModelSelection, OcrMethod, TranslationMethod};
 use crate::infrastructure::ai_http::{
-    complete_text, complete_vision_with_options, complete_vision_with_options_result_cancelled,
-    stream_vision_with_options_cancelled, AiMessage, AiRequestPolicy, AiStreamFinish,
-    VisionCompletion, VisionRequestOptions,
+    complete_text, complete_text_with_effort, complete_vision_with_options,
+    complete_vision_with_options_result_cancelled, stream_vision_with_options_cancelled, AiMessage,
+    AiRequestPolicy, AiStreamFinish, VisionCompletion, VisionRequestOptions,
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::sse::SseDelta;
@@ -941,6 +941,13 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
     if native_sizing {
         return Ok(false);
     }
+    // A fullscreen pass-through region can outlive the DOM transition into a
+    // resizable floating HWND. Clear it before accepting the floating
+    // geometry (including the ordinary ResizeObserver no-op path), otherwise
+    // a stale region may leave transparent pixels intercepting desktop clicks.
+    if resizable {
+        apply_vision_window_region(&window, None)?;
+    }
     // An already-resizable, unpositioned update with the same profile is the
     // normal ResizeObserver feedback path. The native window already owns the
     // current edge size, so treat this policy no-op as handled rather than a
@@ -1185,6 +1192,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
             "providerId": optimizer_provider,
             "model": optimizer_model,
             "defaultLanguage": settings.prompt_optimizer.response_language,
+            "thinkingEffort": settings.prompt_optimizer.thinking_effort,
             "systemPrompt": settings.prompt_optimizer.system_prompt,
             "optimizePrompt": settings.prompt_optimizer.optimize_prompt,
         },
@@ -2196,7 +2204,7 @@ pub async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result
     let (provider, keys) = provider_and_keys(&settings, selection)?;
     let language =
         optimizer_response_language_name(&settings.prompt_optimizer.response_language, &text);
-    complete_text(
+    complete_text_with_effort(
         provider,
         &selection.model,
         &keys,
@@ -2208,6 +2216,7 @@ pub async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result
             &settings.prompt_optimizer.optimize_prompt,
         ),
         AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
+        settings.prompt_optimizer.thinking_effort,
     )
     .await
 }

@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
@@ -113,6 +113,7 @@ class DeferredProviderDesktop extends ClosingDesktop {
 
 describe('SettingsPage', () => {
   afterEach(() => {
+    vi.useRealTimers()
     cleanup()
     localStorage.clear()
   })
@@ -198,6 +199,53 @@ describe('SettingsPage', () => {
     fireEvent.change(screen.getByRole('combobox', { name: '源语言' }), { target: { value: 'zh-CN' } })
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en')
+  })
+
+  it('shows a replayable save-success toast and dismisses it after a short delay', async () => {
+    vi.useFakeTimers()
+    const desktop = new CountingSettingsDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+
+    const firstToastRegion = screen.getByRole('status', { name: '设置已保存并立即生效' })
+    const firstToast = firstToastRegion.querySelector<HTMLElement>('.save-success-toast')
+    expect(firstToastRegion).toHaveClass('save-success-toast-region')
+    expect(firstToastRegion.parentElement).toBe(document.querySelector('.settings-window'))
+    expect(firstToastRegion).toHaveAttribute('aria-live', 'polite')
+    expect(firstToast).not.toBeNull()
+    expect(firstToast).toHaveAttribute('data-toast-sequence', '1')
+    expect(firstToast).toHaveAttribute('data-toast-phase', 'visible')
+    expect(screen.queryByText('设置已保存并立即生效', { selector: '.settings-scroll .status-banner' })).not.toBeInTheDocument()
+
+    await act(() => { vi.advanceTimersByTime(2_000); return Promise.resolve() })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('radio', { name: '系统' }))
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await Promise.resolve()
+    })
+    await act(async () => Promise.resolve())
+    expect(desktop.saves).toBe(2)
+
+    const replayedToastRegion = screen.getByRole('status', { name: '设置已保存并立即生效' })
+    const replayedToast = replayedToastRegion.querySelector<HTMLElement>('.save-success-toast')
+    expect(replayedToast).not.toBeNull()
+    expect(replayedToast).toHaveAttribute('data-toast-sequence', '2')
+    expect(replayedToast).toHaveAttribute('data-toast-phase', 'visible')
+    await act(() => { vi.advanceTimersByTime(3_200); return Promise.resolve() })
+    const leavingToast = replayedToastRegion.querySelector<HTMLElement>('.save-success-toast')
+    expect(leavingToast).toHaveAttribute('data-toast-phase', 'leaving')
+    await act(() => { vi.advanceTimersByTime(199); return Promise.resolve() })
+    expect(replayedToastRegion.querySelector('.save-success-toast')).toBeInTheDocument()
+    await act(() => { vi.advanceTimersByTime(1); return Promise.resolve() })
+    expect(replayedToastRegion.querySelector('.save-success-toast')).not.toBeInTheDocument()
   })
 
   it('uses the successful save as the cancel baseline and blocks cancel during saving', async () => {
@@ -344,17 +392,22 @@ describe('SettingsPage', () => {
     await act(async () => Promise.resolve())
     const brand = container.querySelector('.settings-brand')
     const heading = screen.getByRole('heading', { name: '常规' })
+    const toolbar = heading.closest('.settings-toolbar')
     expect(brand).not.toBeNull()
+    expect(toolbar).not.toBeNull()
     if (brand === null) throw new Error('settings brand drag region is missing')
+    if (toolbar === null) throw new Error('settings toolbar drag region is missing')
     fireEvent.pointerDown(brand, { button: 0 })
     expect(desktop.drags).toBe(1)
-    fireEvent.pointerDown(heading, { button: 0 })
+    fireEvent.pointerDown(toolbar, { button: 0 })
     expect(desktop.drags).toBe(2)
     fireEvent.pointerDown(heading, { button: 0 })
     expect(desktop.drags).toBe(3)
+    fireEvent.pointerDown(heading, { button: 0 })
+    expect(desktop.drags).toBe(4)
     fireEvent.pointerDown(brand, { button: 1 })
     fireEvent.pointerDown(heading, { button: 2 })
-    expect(desktop.drags).toBe(3)
+    expect(desktop.drags).toBe(4)
   })
 
   it('does not drag from settings title actions or form controls', async () => {
@@ -408,6 +461,47 @@ describe('SettingsPage', () => {
     await act(async () => Promise.resolve())
     expect(screen.getByRole('button', { name: 'OCR' })).toBeVisible()
     expect(screen.queryByRole('button', { name: 'OCR/截图翻译' })).not.toBeInTheDocument()
+  })
+
+  it('uses lowercase thinking effort options for Vision, OCR and prompt optimization', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    const optionData = (select: HTMLElement) => Array.from(select.querySelectorAll('option')).map((option) => ({
+      label: option.textContent,
+      value: option.getAttribute('value') ?? '',
+    }))
+    const fullEfforts = ['low', 'medium', 'high', 'xhigh', 'max']
+    const screenshotEfforts = ['low', 'medium', 'high', 'xhigh']
+    const assertEfforts = (select: HTMLElement, values: string[]) => {
+      expect(optionData(select)).toEqual(values.map((value) => ({ label: value, value })))
+      expect(select.textContent).not.toMatch(/[低中高极]/u)
+      expect(select.textContent).not.toContain('MAX')
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Vision' }))
+    const vision = screen.getByRole('combobox', { name: 'Vision 思考强度' })
+    assertEfforts(vision, fullEfforts)
+    fireEvent.change(vision, { target: { value: 'max' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.click(screen.getByRole('switch', { name: '显示思考过程' }))
+    const screenshot = screen.getByRole('combobox', { name: '截图翻译思考强度' })
+    assertEfforts(screenshot, screenshotEfforts)
+    fireEvent.change(screenshot, { target: { value: 'xhigh' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '提示词优化' }))
+    const optimizer = screen.getByRole('combobox', { name: '提示词优化思考强度' })
+    assertEfforts(optimizer, fullEfforts)
+    fireEvent.change(optimizer, { target: { value: 'max' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    const saved = await desktop.loadSettings()
+    expect(saved.vision.thinkingEffort).toBe('max')
+    expect(saved.screenshotTranslation.thinkingEffort).toBe('xhigh')
+    expect(saved.promptOptimizer.thinkingEffort).toBe('max')
   })
 
   it('gates AI interfaces and model selectors by independent switches and selections', async () => {

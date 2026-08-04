@@ -1,5 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { safeExternalUrl } from './citation-links'
+
+const adapterStyles = readFileSync(resolve(process.cwd(), 'src/features/vision/vision-adapter.css'), 'utf8')
+const adapterStyleElement = document.createElement('style')
+adapterStyleElement.textContent = adapterStyles
+document.head.append(adapterStyleElement)
 
 describe('Vision citation links', () => {
   it('allows only absolute HTTP(S) links for the external opener', () => {
@@ -8,5 +15,42 @@ describe('Vision citation links', () => {
     expect(safeExternalUrl('/inside-vision')).toBeNull()
     expect(safeExternalUrl('javascript:alert(1)')).toBeNull()
     expect(safeExternalUrl('data:text/html,alert(1)')).toBeNull()
+  })
+})
+
+describe('Vision prompt input layout', () => {
+  it.each([
+    ['Chinese', '这是一段很长的中文输入内容，用于验证光标继续输入时不会被右侧操作按钮遮挡。'],
+    ['English', 'This is a long English prompt used to keep the caret visible while typing past the input width.'],
+  ])('keeps the %s prompt input shrinkable and horizontally scrollable', (_language, value) => {
+    const promptBar = document.createElement('div')
+    promptBar.dataset.screenpilotPromptBar = 'true'
+    const input = document.createElement('input')
+    input.value = value.repeat(4)
+    promptBar.append(input)
+    document.body.append(promptBar)
+
+    const style = getComputedStyle(input)
+    expect(style.width).toBe('0px')
+    expect(style.minWidth).toBe('0px')
+    expect(style.maxWidth).toBe('100%')
+    expect(style.flex).toBe('1 1 0%')
+    expect(style.appearance).toBe('none')
+    expect(Number.parseFloat(style.paddingLeft)).toBe(0)
+    expect(Number.parseFloat(style.paddingRight)).toBe(8)
+    expect(style.borderRightWidth).toBe('1px')
+    expect(style.borderRightStyle).toBe('solid')
+    expect(style.borderRightColor).toBe('rgba(0, 0, 0, 0)')
+    expect(style.overflowX).toBe('auto')
+    expect(style.overflowY).toBe('hidden')
+    expect(style.whiteSpace).toBe('nowrap')
+
+    input.focus()
+    input.setSelectionRange(input.value.length, input.value.length)
+    expect(input.selectionStart).toBe(input.value.length)
+    const beforeDelete = input.value
+    input.value = input.value.slice(0, -1)
+    expect(input.value).toHaveLength(beforeDelete.length - 1)
+    promptBar.remove()
   })
 })

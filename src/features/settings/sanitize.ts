@@ -18,7 +18,8 @@ type UnknownRecord = Record<string, unknown>
 
 const themes = new Set<ThemeMode>(['system', 'light', 'dark'])
 const languages = new Set<InterfaceLanguage>(['zh', 'en'])
-const thinkingEfforts = new Set<ThinkingEffort>(['low', 'medium', 'high', 'xhigh'])
+const thinkingEfforts = new Set<ThinkingEffort>(['low', 'medium', 'high', 'xhigh', 'max'])
+const screenshotThinkingEfforts = new Set<Exclude<ThinkingEffort, 'max'>>(['low', 'medium', 'high', 'xhigh'])
 const messageOrders = new Set<MessageOrder>(['asc', 'desc'])
 const ocrMethods = new Set<OcrMethod>(['ai', 'baidu', 'chaoxing', 'system'])
 const screenshotTargetLanguages = new Set<TranslationLanguage>(['auto', 'zh-CN', 'en', 'ja', 'ko'])
@@ -200,7 +201,7 @@ export function sanitizeSettings(value: unknown): AppSettings {
       thinking: flag(screenshot.thinking, DEFAULT_SETTINGS.screenshotTranslation.thinking),
       thinkingEffort: choice(
         screenshot.thinkingEffort,
-        thinkingEfforts,
+        screenshotThinkingEfforts,
         DEFAULT_SETTINGS.screenshotTranslation.thinkingEffort,
       ),
       ocrPrompt: text(screenshot.ocrPrompt, DEFAULT_SETTINGS.screenshotTranslation.ocrPrompt),
@@ -230,6 +231,7 @@ export function sanitizeSettings(value: unknown): AppSettings {
         50,
       ),
       model: validModel(modelSelection(optimizer.model)),
+      thinkingEffort: choice(optimizer.thinkingEffort, thinkingEfforts, DEFAULT_SETTINGS.promptOptimizer.thinkingEffort),
       systemPrompt: text(optimizer.systemPrompt, DEFAULT_SETTINGS.promptOptimizer.systemPrompt),
       optimizePrompt: text(optimizer.optimizePrompt, DEFAULT_SETTINGS.promptOptimizer.optimizePrompt),
     },

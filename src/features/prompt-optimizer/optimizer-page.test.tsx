@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
@@ -140,13 +140,19 @@ describe('OptimizerPage', () => {
     render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const historyButton = screen.getByRole('button', { name: '优化历史' })
-    expect(historyButton).toHaveClass('history-button')
+    expect(historyButton).toHaveClass('ocr-header-button', 'history-button')
+    expect(historyButton).toHaveClass('history-button-count-1')
     expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
     expect(screen.getByText('历史记录：1 条')).toBeInTheDocument()
     fireEvent.click(historyButton)
+    const menu = screen.getByRole('complementary', { name: '优化历史' })
+    expect(menu.querySelector('.history-menu-input')).toHaveTextContent('saved prompt')
+    expect(menu.querySelector('.history-menu-output')).toBeNull()
+    expect(menu).not.toHaveTextContent('saved result')
     fireEvent.click(screen.getByRole('button', { name: '删除历史' }))
     expect(historyButton.querySelector('.history-count-badge')).toBeNull()
-    expect(screen.getByText('暂无历史记录')).toBeInTheDocument()
+    expect(historyButton).not.toHaveClass('history-button-count-1')
+    expect(within(screen.getByRole('complementary', { name: '优化历史' })).getByText('暂无历史记录')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '原始提示词' }), {
       target: { value: 'new prompt' },
     })
@@ -154,6 +160,7 @@ describe('OptimizerPage', () => {
       fireEvent.click(screen.getByRole('button', { name: '优化' }))
       await Promise.resolve()
     })
+    expect(historyButton).toHaveClass('history-button-count-1')
     expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
   })
 })

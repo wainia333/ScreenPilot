@@ -191,19 +191,64 @@ describe('TranslatorPage', () => {
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     const historyButton = screen.getByRole('button', { name: '翻译历史' })
-    expect(historyButton).toHaveClass('history-button')
+    expect(historyButton).toHaveClass('ocr-header-button', 'history-button')
+    expect(historyButton).toHaveClass('history-button-count-2')
     expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('20')
     expect(screen.getByText('历史记录：20 条')).toBeInTheDocument()
     fireEvent.click(historyButton)
     fireEvent.click(screen.getByRole('button', { name: '清空' }))
     expect(historyButton.querySelector('.history-count-badge')).toBeNull()
+    expect(historyButton).not.toHaveClass('history-button-count-1', 'history-button-count-2')
     expect(screen.getByText('暂无历史记录')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('原文'), { target: { value: 'new source' } })
     await act(async () => {
       vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
       await Promise.resolve()
     })
+    expect(historyButton).toHaveClass('history-button-count-1')
+    expect(historyButton).not.toHaveClass('history-button-count-2')
     expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
+  })
+
+  it('matches the compact reference history menu and restores entries', async () => {
+    localStorage.setItem('screenpilot:translator-history', JSON.stringify([{
+      id: 'saved-translation',
+      input: 'saved source',
+      output: 'saved result',
+      method: 'microsoft',
+      updatedAt: Date.now(),
+    }]))
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    const historyButton = screen.getByRole('button', { name: '翻译历史' })
+    expect(historyButton).toHaveClass('ocr-header-button', 'history-button')
+    expect(historyButton).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(historyButton)
+    const menu = screen.getByRole('complementary', { name: '翻译历史' })
+    expect(menu).toHaveClass('history-menu-popover')
+    expect(menu.querySelector('.history-menu-list')).not.toBeNull()
+    expect(menu.querySelector('.history-menu-input')).toHaveTextContent('saved source')
+    expect(menu.querySelector('.history-menu-output')).toHaveTextContent('saved result')
+    expect(menu.querySelector('.history-menu-meta')).toHaveTextContent(/Microsoft · 刚刚/u)
+
+    const restore = menu.querySelector<HTMLButtonElement>('.history-menu-restore')
+    expect(restore).not.toBeNull()
+    if (restore === null) throw new Error('History restore control is missing')
+    fireEvent.click(restore)
+    expect(screen.getByLabelText('原文')).toHaveValue('saved source')
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('saved result')
+    expect(screen.queryByRole('complementary', { name: '翻译历史' })).toBeNull()
+
+    fireEvent.click(historyButton)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('complementary', { name: '翻译历史' })).toBeNull()
+    expect(document.activeElement).not.toBe(historyButton)
+    expect(desktop.hides).toBe(0)
+    fireEvent.click(historyButton)
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByRole('complementary', { name: '翻译历史' })).toBeNull()
   })
 
   it('submits an explicit source language and retranslates immediately', async () => {

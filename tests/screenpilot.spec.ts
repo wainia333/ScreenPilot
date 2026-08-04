@@ -2,8 +2,10 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { installVisionTauriMock } from './tauri-mock'
 
-async function expectAccessible(page: Page) {
-  const result = await new AxeBuilder({ page }).analyze()
+async function expectAccessible(page: Page, excludedSelectors: readonly string[] = []) {
+  let builder = new AxeBuilder({ page })
+  for (const selector of excludedSelectors) builder = builder.exclude(selector)
+  const result = await builder.analyze()
   expect(result.violations).toEqual([])
 }
 
@@ -113,13 +115,18 @@ async function expectHistoryCountBadge(button: Locator) {
   await expect(badge).toHaveCSS('box-shadow', 'none')
 
   const geometry = await button.evaluate((element) => {
+    const buttonBounds = element.getBoundingClientRect()
     const icon = element.querySelector('svg')?.getBoundingClientRect()
     const count = element.querySelector('.history-count-badge')?.getBoundingClientRect()
     const badgeStyle = element.querySelector('.history-count-badge')
     if (icon === undefined || count === undefined || badgeStyle === null) return null
     return {
+      buttonLeft: buttonBounds.left,
+      buttonRight: buttonBounds.right,
+      buttonTop: buttonBounds.top,
       iconBottom: icon.bottom,
       iconColor: getComputedStyle(element.querySelector('svg') as SVGElement).color,
+      iconLeft: icon.left,
       iconRight: icon.right,
       iconTop: icon.top,
       badgeBottom: count.bottom,
@@ -132,16 +139,56 @@ async function expectHistoryCountBadge(button: Locator) {
   expect(geometry).not.toBeNull()
   if (geometry === null) throw new Error('History count badge geometry is missing')
 
-  // The number sits in the icon's upper-right corner, with only a small gap
-  // from the clock circle and no detached notification bubble.
-  expect(geometry.badgeRight).toBeGreaterThanOrEqual(geometry.iconRight)
-  expect(geometry.badgeRight).toBeLessThanOrEqual(geometry.iconRight + 6)
-  expect(geometry.badgeLeft).toBeLessThanOrEqual(geometry.iconRight + 1)
+  expect(geometry.iconLeft - geometry.buttonLeft).toBeCloseTo(6, 1)
+  const horizontalGap = geometry.badgeLeft - geometry.iconRight
+  expect(horizontalGap).toBeGreaterThanOrEqual(0)
+  expect(horizontalGap).toBeLessThanOrEqual(1.5)
+  expect(geometry.badgeRight).toBeCloseTo(geometry.buttonRight - 2, 1)
   expect(geometry.badgeTop).toBeGreaterThanOrEqual(geometry.iconTop - 6)
   expect(geometry.badgeTop).toBeLessThanOrEqual(geometry.iconTop + 1)
   expect(geometry.badgeBottom).toBeGreaterThanOrEqual(geometry.iconTop)
   expect(geometry.badgeBottom).toBeLessThanOrEqual(geometry.iconTop + 6)
+  expect(geometry.badgeTop).toBeCloseTo(geometry.buttonTop + 2, 1)
   expect(geometry.badgeColor).toBe(geometry.iconColor)
+}
+
+async function referenceHistoryPopoverStyle(popover: Locator) {
+  return popover.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    const list = element.querySelector<HTMLElement>('.history-menu-list')
+    const input = element.querySelector<HTMLElement>('.history-menu-input')
+    const output = element.querySelector<HTMLElement>('.history-menu-output')
+    const meta = element.querySelector<HTMLElement>('.history-menu-meta')
+    const clear = element.querySelector<HTMLElement>('.history-menu-clear')
+    return {
+      width: element.getBoundingClientRect().width,
+      borderRadius: computed.borderRadius,
+      overflow: computed.overflow,
+      backgroundColor: computed.backgroundColor,
+      borderColor: computed.borderTopColor,
+      fontFamily: computed.fontFamily,
+      animationName: computed.animationName,
+      animationDuration: computed.animationDuration,
+      animationTimingFunction: computed.animationTimingFunction,
+      listMaxHeight: list === null ? '' : getComputedStyle(list).maxHeight,
+      listOverflowX: list === null ? '' : getComputedStyle(list).overflowX,
+      listOverflowY: list === null ? '' : getComputedStyle(list).overflowY,
+      listClientWidth: list?.clientWidth ?? 0,
+      listScrollWidth: list?.scrollWidth ?? 0,
+      listClientHeight: list?.clientHeight ?? 0,
+      listScrollHeight: list?.scrollHeight ?? 0,
+      inputFontSize: input === null ? '' : getComputedStyle(input).fontSize,
+      inputLineHeight: input === null ? '' : getComputedStyle(input).lineHeight,
+      outputFontSize: output === null ? '' : getComputedStyle(output).fontSize,
+      outputLineHeight: output === null ? '' : getComputedStyle(output).lineHeight,
+      metaFontSize: meta === null ? '' : getComputedStyle(meta).fontSize,
+      metaLineHeight: meta === null ? '' : getComputedStyle(meta).lineHeight,
+      clearHeight: clear?.getBoundingClientRect().height ?? 0,
+      clearFontSize: clear === null ? '' : getComputedStyle(clear).fontSize,
+      portalParent: element.parentElement === document.body,
+      insideWindowFrame: element.closest('[data-screenpilot-window-frame="true"]') !== null,
+    }
+  })
 }
 
 async function expectNeutralSelectFocus(select: Locator) {
@@ -202,6 +249,7 @@ async function focusPaintStyle(control: Locator) {
   return control.evaluate((element) => {
     const computed = getComputedStyle(element)
     return {
+      borderRadius: computed.borderRadius,
       outlineStyle: computed.outlineStyle,
       outlineWidth: computed.outlineWidth,
       outlineColor: computed.outlineColor,
@@ -210,6 +258,48 @@ async function focusPaintStyle(control: Locator) {
       boxShadow: computed.boxShadow,
     }
   })
+}
+
+async function expectOutlineFitsClippingAncestors(control: Locator) {
+  const geometry = await control.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    const outlineWidth = Number.parseFloat(computed.outlineWidth)
+    const outlineOffset = Number.parseFloat(computed.outlineOffset)
+    const extent = outlineWidth + outlineOffset
+    const bounds = element.getBoundingClientRect()
+    const expanded = {
+      bottom: bounds.bottom + extent,
+      left: bounds.left - extent,
+      right: bounds.right + extent,
+      top: bounds.top - extent,
+    }
+    const clippingAncestors: { element: string; containsOutline: boolean }[] = []
+    let ancestor = element.parentElement
+    while (ancestor !== null) {
+      const ancestorStyle = getComputedStyle(ancestor)
+      const isViewportRoot = ancestor === document.body || ancestor === document.documentElement || ancestor.id === 'root'
+      if (!isViewportRoot && [ancestorStyle.overflowX, ancestorStyle.overflowY].some((value) => (
+        value === 'auto' || value === 'clip' || value === 'hidden' || value === 'scroll'
+      ))) {
+        const ancestorBounds = ancestor.getBoundingClientRect()
+        clippingAncestors.push({
+          element: ancestor.className,
+          containsOutline: expanded.left >= ancestorBounds.left - 0.5
+            && expanded.top >= ancestorBounds.top - 0.5
+            && expanded.right <= ancestorBounds.right + 0.5
+            && expanded.bottom <= ancestorBounds.bottom + 0.5,
+        })
+      }
+      ancestor = ancestor.parentElement
+    }
+    return { clippingAncestors, extent }
+  })
+  expect(geometry.extent).toBe(2)
+  expect(geometry.clippingAncestors.length).toBeGreaterThan(0)
+  expect(
+    geometry.clippingAncestors.every((ancestor) => ancestor.containsOutline),
+    JSON.stringify(geometry.clippingAncestors),
+  ).toBe(true)
 }
 
 async function settingsNavigationIndicator(button: Locator) {
@@ -287,7 +377,16 @@ async function settingsNavigationKeyframes(page: Page) {
 test('settings supports seven sections, unsaved close choices and accessible layout', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await page.goto('/')
-  await expect(page.getByRole('navigation', { name: '设置分区' })).toBeVisible()
+  const settingsNavigation = page.getByRole('navigation', { name: '设置分区' })
+  const settingsToolbar = page.locator('.settings-toolbar')
+  const settingsBrand = page.locator('.settings-brand')
+  const closeSettings = page.getByRole('button', { name: '关闭设置' })
+  await expect(settingsNavigation).toBeVisible()
+  await expect(settingsBrand).toHaveCSS('cursor', 'move')
+  await expect(settingsToolbar).toHaveCSS('cursor', 'move')
+  await expect(settingsToolbar.getByRole('heading', { name: '常规' })).toHaveCSS('cursor', 'move')
+  await expect(closeSettings).toHaveCSS('cursor', 'pointer')
+  await expect(settingsNavigation.getByRole('button', { name: '常规', exact: true })).toHaveCSS('cursor', 'pointer')
   const permissionStatus = page.getByRole('status', { name: '当前运行权限' })
   await expect(permissionStatus).toHaveText('权限：普通用户')
   await expect(permissionStatus.locator('xpath=following-sibling::*[1]')).toContainText('所有更改已保存')
@@ -334,7 +433,7 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await expect(page.getByRole('option', { name: 'AI', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: '常规', exact: true }).click()
   await page.getByRole('radio', { name: '深色', exact: true }).click()
-  await page.getByRole('button', { name: '关闭设置' }).click()
+  await closeSettings.click()
   const dialog = page.getByRole('dialog', { name: '保存更改后关闭？' })
   await expect(dialog.getByRole('button', { name: '保存并关闭' })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '放弃更改' })).toBeVisible()
@@ -355,6 +454,48 @@ test('settings cancel restores the loaded draft without closing the page', async
   await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
   await expect(cancel).toBeDisabled()
   await expect(page.getByRole('heading', { name: '常规', exact: true })).toBeVisible()
+})
+
+test('thinking effort controls use lowercase values and persist without legacy labels', async ({ page }) => {
+  await page.goto('/')
+
+  const fullEfforts = ['low', 'medium', 'high', 'xhigh', 'max']
+  const screenshotEfforts = ['low', 'medium', 'high', 'xhigh']
+  const assertOptions = async (select: Locator, values: string[]) => {
+    await expect(select).toHaveValue('medium')
+    const options = await select.locator('option').evaluateAll((elements) => elements.map((element) => ({
+      label: element.textContent,
+      value: (element as HTMLOptionElement).value,
+    })))
+    expect(options).toEqual(values.map((value) => ({ label: value, value })))
+    expect(options.some((option) => /[低中高极]/u.test(option.label))).toBe(false)
+    expect(options.some((option) => option.label === 'MAX' || option.value === 'MAX')).toBe(false)
+  }
+
+  await page.getByRole('button', { name: 'Vision', exact: true }).click()
+  const vision = page.getByRole('combobox', { name: 'Vision 思考强度', exact: true })
+  await assertOptions(vision, fullEfforts)
+  await vision.selectOption('max')
+  await expect(vision).toHaveValue('max')
+
+  await page.getByRole('button', { name: 'OCR', exact: true }).click()
+  await page.getByRole('switch', { name: '显示思考过程', exact: true }).click()
+  const screenshot = page.getByRole('combobox', { name: '截图翻译思考强度', exact: true })
+  await assertOptions(screenshot, screenshotEfforts)
+  await screenshot.selectOption('xhigh')
+  await expect(screenshot).toHaveValue('xhigh')
+
+  await page.getByRole('button', { name: '提示词优化', exact: true }).click()
+  const optimizer = page.getByRole('combobox', { name: '提示词优化思考强度', exact: true })
+  await assertOptions(optimizer, fullEfforts)
+  await optimizer.selectOption('max')
+  await expect(optimizer).toHaveValue('max')
+
+  const save = page.locator('.settings-footer').getByRole('button', { name: '保存', exact: true })
+  await save.click()
+  await expect(save).toBeDisabled()
+  await expect(page.locator('.settings-save-state')).toHaveAttribute('data-dirty', 'false')
+  await expect(page.getByText('设置已保存并立即生效')).toBeVisible()
 })
 
 test('settings footer actions keep matching dimensions across disabled and enabled states', async ({ page }) => {
@@ -479,6 +620,143 @@ test('provider key drafts use the global footer save and cancel actions', async 
   expect(pageErrors).toEqual([])
 })
 
+test('settings save success uses a floating replayable toast without shifting content', async ({ page }) => {
+  await page.clock.install()
+  await page.setViewportSize({ width: 680, height: 520 })
+  await page.goto('/')
+
+  const scroll = page.locator('.settings-scroll')
+  const before = await scroll.boundingBox()
+  await page.getByRole('radio', { name: '深色', exact: true }).click()
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+
+  const region = page.locator('.save-success-toast-region')
+  const toast = region.locator('.save-success-toast')
+  await expect(toast).toBeVisible()
+  await expect(toast).toHaveAttribute('data-toast-phase', 'visible')
+  await expect(region).toHaveAttribute('aria-live', 'polite')
+  await expect(region).toHaveAttribute('aria-label', '设置已保存并立即生效')
+  const bounceSamples = await toast.evaluate((element) => {
+    const animation = element.getAnimations().find((candidate) => (
+      (candidate as Animation & { animationName?: string }).animationName
+        === 'screenpilot-settings-save-toast-in'
+    ))
+    if (animation === undefined) return null
+    const timing = animation.effect?.getComputedTiming()
+    const duration = typeof timing?.duration === 'number' ? timing.duration : 380
+    animation.pause()
+    const sample = (time: number) => {
+      animation.currentTime = time
+      const transform = getComputedStyle(element).transform
+      const matrix = transform === 'none' ? new DOMMatrix() : new DOMMatrix(transform)
+      return { y: matrix.m42, scale: matrix.a }
+    }
+    return {
+      start: sample(0),
+      middle: sample(duration * 0.42),
+      end: sample(duration),
+    }
+  })
+  expect(bounceSamples).not.toBeNull()
+  expect(bounceSamples?.start.y).toBeLessThan(-5)
+  expect(bounceSamples?.start.scale).toBeLessThan(0.98)
+  expect(bounceSamples?.middle.y).toBeGreaterThan(0)
+  expect(bounceSamples?.middle.scale).toBeGreaterThan(1)
+  expect(bounceSamples?.end.y).toBeCloseTo(0, 0)
+  expect(bounceSamples?.end.scale).toBeCloseTo(1, 1)
+  const geometry = await page.evaluate(() => {
+    const settingsWindow = document.querySelector<HTMLElement>('.settings-window')
+    const main = document.querySelector<HTMLElement>('.settings-main')
+    const scroll = document.querySelector<HTMLElement>('.settings-scroll')
+    const region = document.querySelector<HTMLElement>('.save-success-toast-region')
+    const toast = document.querySelector<HTMLElement>('.save-success-toast')
+    if (settingsWindow === null || main === null || scroll === null || region === null || toast === null) return null
+    const settingsWindowRect = settingsWindow.getBoundingClientRect()
+    const mainRect = main.getBoundingClientRect()
+    const scrollRect = scroll.getBoundingClientRect()
+    const regionRect = region.getBoundingClientRect()
+    const toastStyle = getComputedStyle(toast)
+    return {
+      centered: Math.abs((regionRect.left + regionRect.width / 2) - (settingsWindowRect.left + settingsWindowRect.width / 2)) < 1,
+      centeredInMain: Math.abs((regionRect.left + regionRect.width / 2) - (mainRect.left + mainRect.width / 2)) < 1,
+      directChild: region.parentElement === settingsWindow,
+      top: regionRect.top - settingsWindowRect.top,
+      topStyle: getComputedStyle(region).top,
+      regionWidth: regionRect.width,
+      toastWidth: toastStyle.width,
+      textAlign: toastStyle.textAlign,
+      pointerEvents: toastStyle.pointerEvents,
+      animationName: toastStyle.animationName,
+      scrollTop: scrollRect.top,
+      scrollHeight: scrollRect.height,
+    }
+  })
+  expect(geometry).toEqual(expect.objectContaining({
+    centered: true,
+    centeredInMain: false,
+    directChild: true,
+    top: 19,
+    topStyle: '18px',
+    regionWidth: 320,
+    toastWidth: '320px',
+    textAlign: 'center',
+    pointerEvents: 'none',
+    animationName: 'screenpilot-settings-save-toast-in',
+  }))
+  expect(geometry?.scrollTop).toBe(before?.y)
+  expect(geometry?.scrollHeight).toBe(before?.height)
+
+  await page.setViewportSize({ width: 300, height: 520 })
+  const narrowGeometry = await page.evaluate(() => {
+    const settingsWindow = document.querySelector<HTMLElement>('.settings-window')
+    const region = document.querySelector<HTMLElement>('.save-success-toast-region')
+    const toast = document.querySelector<HTMLElement>('.save-success-toast')
+    if (settingsWindow === null || region === null || toast === null) return null
+    const windowRect = settingsWindow.getBoundingClientRect()
+    const regionRect = region.getBoundingClientRect()
+    const toastStyle = getComputedStyle(toast)
+    const textRange = document.createRange()
+    textRange.selectNodeContents(toast)
+    const textRect = textRange.getBoundingClientRect()
+    return {
+      centered: Math.abs((regionRect.left + regionRect.width / 2) - (windowRect.left + windowRect.width / 2)) < 1,
+      fitsWindow: regionRect.left >= windowRect.left
+        && regionRect.right <= windowRect.right
+        && regionRect.width <= windowRect.width - 31,
+      textCentered: Math.abs((textRect.left + textRect.width / 2) - (toast.getBoundingClientRect().left + toast.getBoundingClientRect().width / 2)) < 1,
+      regionWidth: regionRect.width,
+      textAlign: toastStyle.textAlign,
+    }
+  })
+  expect(narrowGeometry).toEqual(expect.objectContaining({
+    centered: true,
+    fitsWindow: true,
+    textCentered: true,
+    textAlign: 'center',
+  }))
+  expect(narrowGeometry?.regionWidth).toBeLessThan(320)
+  await page.setViewportSize({ width: 680, height: 520 })
+
+  await page.clock.fastForward(3_200)
+  await expect(toast).toHaveAttribute('data-toast-phase', 'leaving')
+  await page.clock.fastForward(200)
+  await expect(toast).toHaveCount(0)
+
+  await page.getByRole('radio', { name: '浅色', exact: true }).click()
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(toast).toHaveAttribute('data-toast-sequence', '2')
+  await page.getByRole('radio', { name: '深色', exact: true }).click()
+  await page.getByRole('button', { name: '关闭设置', exact: true }).click()
+  await expect(page.locator('.decision-dialog')).toBeVisible()
+  await expect(toast).toHaveCount(0)
+
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.getByRole('button', { name: '继续编辑', exact: true }).click()
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(toast).toHaveAttribute('data-toast-sequence', '3')
+  await expect.poll(() => toast.evaluate((element) => getComputedStyle(element).animationDuration)).toMatch(/^(?:0|0\.01)s$/u)
+})
+
 test('provider model lists stay bounded while retaining model actions', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await page.goto('/')
@@ -535,6 +813,127 @@ test('provider model lists stay bounded while retaining model actions', async ({
   expect(finalModelVisibility).toBe(true)
   await finalModel.click()
   await expect(finalModel).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('provider add controls stay on one line at supported and stress widths', async ({ page }) => {
+  for (const width of [760, 680, 507, 380]) {
+    await page.setViewportSize({ width, height: 620 })
+    await page.goto('/')
+    await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+    await page.getByRole('button', { name: '新增', exact: true }).click()
+
+    const providerSettings = page.locator('[data-screenpilot-provider-settings="true"]')
+    const addProvider = providerSettings.locator('.section-heading > .secondary-button')
+    const manualModel = providerSettings.locator('.manual-model').first()
+    const addModel = manualModel.getByRole('button', { name: '添加', exact: true })
+
+    const metrics = await manualModel.evaluate((element) => {
+      const input = element.querySelector('.text-field')
+      const button = element.querySelector('button')
+      if (!(input instanceof HTMLElement) || !(button instanceof HTMLElement)) return null
+      const inputRect = input.getBoundingClientRect()
+      const buttonRect = button.getBoundingClientRect()
+      const rowRect = element.getBoundingClientRect()
+      const buttonStyle = getComputedStyle(button)
+      const textNode = Array.from(button.childNodes).find((node) => (
+        node.nodeType === Node.TEXT_NODE && node.textContent?.trim().length
+      ))
+      if (textNode === undefined) return null
+      const textRange = document.createRange()
+      textRange.selectNodeContents(textNode)
+      const textRect = textRange.getBoundingClientRect()
+      return {
+        inputTop: inputRect.top,
+        inputBottom: inputRect.bottom,
+        buttonTop: buttonRect.top,
+        buttonBottom: buttonRect.bottom,
+        rowTop: rowRect.top,
+        rowBottom: rowRect.bottom,
+        rowOverflowing: element.scrollWidth > element.clientWidth,
+        buttonFits: button.scrollWidth <= button.clientWidth,
+        buttonWhiteSpace: buttonStyle.whiteSpace,
+        textInsideButton: textRect.top >= buttonRect.top
+          && textRect.bottom <= buttonRect.bottom
+          && textRect.left >= buttonRect.left
+          && textRect.right <= buttonRect.right,
+        textLineCount: textRange.getClientRects().length,
+        textHeight: textRect.height,
+      }
+    })
+    expect(metrics).not.toBeNull()
+    expect(metrics?.buttonTop).toBeCloseTo(metrics?.inputTop ?? 0, 0)
+    expect(metrics?.buttonTop).toBeGreaterThanOrEqual(metrics?.rowTop ?? 0)
+    expect(metrics?.buttonBottom).toBeLessThanOrEqual(metrics?.rowBottom ?? 0)
+    expect(metrics?.rowOverflowing).toBe(false)
+    expect(metrics?.buttonFits).toBe(true)
+    expect(metrics?.buttonWhiteSpace).toBe('nowrap')
+    expect(metrics?.textInsideButton).toBe(true)
+    expect(metrics?.textLineCount).toBe(1)
+    expect(metrics?.textHeight).toBeLessThanOrEqual(30)
+
+    await expect(addProvider).toHaveCSS('white-space', 'nowrap')
+    await expect(addModel).toHaveCSS('white-space', 'nowrap')
+    await expect(addModel).toBeVisible()
+
+    const actionMetrics = await providerSettings.locator('.provider-actions > .secondary-button').evaluateAll((buttons) => (
+      buttons.map((button) => {
+        const bounds = button.getBoundingClientRect()
+        const textNode = Array.from(button.childNodes).find((node) => (
+          node.nodeType === Node.TEXT_NODE && node.textContent?.trim().length
+        ))
+        if (textNode === undefined) return null
+        const textRange = document.createRange()
+        textRange.selectNodeContents(textNode)
+        const textBounds = textRange.getBoundingClientRect()
+        const style = getComputedStyle(button)
+        return {
+          whiteSpace: style.whiteSpace,
+          textInside: textBounds.top >= bounds.top
+            && textBounds.bottom <= bounds.bottom
+            && textBounds.left >= bounds.left
+            && textBounds.right <= bounds.right,
+          textLineCount: textRange.getClientRects().length,
+          textHeight: textBounds.height,
+        }
+      })
+    ))
+    expect(actionMetrics).toHaveLength(2)
+    for (const action of actionMetrics) {
+      if (action === null) throw new Error('provider action text is missing')
+      expect(action.whiteSpace).toBe('nowrap')
+      expect(action.textInside).toBe(true)
+      expect(action.textLineCount).toBe(1)
+      expect(action.textHeight).toBeLessThanOrEqual(30)
+    }
+    const deleteMetrics = await providerSettings.locator('.provider-actions > .icon-button').evaluate((button) => {
+      const bounds = button.getBoundingClientRect()
+      const actions = button.parentElement?.getBoundingClientRect()
+      if (actions === undefined) return null
+      const overlapsTextButton = Array.from(button.parentElement?.querySelectorAll('.secondary-button') ?? [])
+        .some((candidate) => {
+          const candidateBounds = candidate.getBoundingClientRect()
+          return bounds.left < candidateBounds.right
+            && bounds.right > candidateBounds.left
+            && bounds.top < candidateBounds.bottom
+            && bounds.bottom > candidateBounds.top
+        })
+      return {
+        width: bounds.width,
+        height: bounds.height,
+        insideActions: bounds.left >= actions.left
+          && bounds.right <= actions.right
+          && bounds.top >= actions.top
+          && bounds.bottom <= actions.bottom,
+        overlapsTextButton,
+      }
+    })
+    expect(deleteMetrics).toEqual({
+      width: 30,
+      height: 30,
+      insideActions: true,
+      overlapsTextButton: false,
+    })
+  }
 })
 
 test('prompt reset controls stay beside original titles without overlap', async ({ page }) => {
@@ -739,6 +1138,7 @@ test('settings prompt fields match the provider focus frame in both themes', asy
     await providerName.click()
     const providerFocus = await focusPaintStyle(providerName)
     const expectedFocus = {
+      borderRadius: providerFocus.borderRadius,
       outlineStyle: providerFocus.outlineStyle,
       outlineWidth: providerFocus.outlineWidth,
       outlineColor: providerFocus.outlineColor,
@@ -746,11 +1146,13 @@ test('settings prompt fields match the provider focus frame in both themes', asy
       boxShadow: providerFocus.boxShadow,
     }
     expect({
+      borderRadius: '8px',
       outlineStyle: 'solid',
       outlineWidth: '1px',
       outlineOffset: '1px',
       boxShadow: 'none',
     }).toEqual({
+      borderRadius: expectedFocus.borderRadius,
       outlineStyle: expectedFocus.outlineStyle,
       outlineWidth: expectedFocus.outlineWidth,
       outlineOffset: expectedFocus.outlineOffset,
@@ -762,14 +1164,22 @@ test('settings prompt fields match the provider focus frame in both themes', asy
       await page.getByRole('button', { name: field.section, exact: true }).click()
       const prompt = page.getByRole('textbox', { name: field.label })
       await prompt.click()
-      const pointerFocus = await focusPaintStyle(prompt)
+      const promptFrame = prompt.locator('..')
+      const pointerFocus = await focusPaintStyle(promptFrame)
       expect({
+        borderRadius: pointerFocus.borderRadius,
         outlineStyle: pointerFocus.outlineStyle,
         outlineWidth: pointerFocus.outlineWidth,
         outlineColor: pointerFocus.outlineColor,
         outlineOffset: pointerFocus.outlineOffset,
         boxShadow: pointerFocus.boxShadow,
       }).toEqual(expectedFocus)
+      await expectOutlineFitsClippingAncestors(promptFrame)
+      const pointerChildFocus = await focusPaintStyle(prompt)
+      expect(pointerChildFocus.outlineStyle).toBe('none')
+      expect(pointerChildFocus.outlineWidth).toBe('0px')
+      expect(pointerChildFocus.outlineOffset).toBe('0px')
+      expect(pointerChildFocus.boxShadow).toBe('none')
 
       // Move away and back with Tab so the keyboard focus-visible path is
       // covered independently from Chromium's pointer focus behavior.
@@ -777,14 +1187,21 @@ test('settings prompt fields match the provider focus frame in both themes', asy
       await page.keyboard.press('Tab')
       await page.keyboard.press('Shift+Tab')
       await expect.poll(() => prompt.evaluate((element) => document.activeElement === element && element.matches(':focus-visible'))).toBe(true)
-      const keyboardFocus = await focusPaintStyle(prompt)
+      const keyboardFocus = await focusPaintStyle(promptFrame)
       expect({
+        borderRadius: keyboardFocus.borderRadius,
         outlineStyle: keyboardFocus.outlineStyle,
         outlineWidth: keyboardFocus.outlineWidth,
         outlineColor: keyboardFocus.outlineColor,
         outlineOffset: keyboardFocus.outlineOffset,
         boxShadow: keyboardFocus.boxShadow,
       }).toEqual(expectedFocus)
+      await expectOutlineFitsClippingAncestors(promptFrame)
+      const keyboardChildFocus = await focusPaintStyle(prompt)
+      expect(keyboardChildFocus.outlineStyle).toBe('none')
+      expect(keyboardChildFocus.outlineWidth).toBe('0px')
+      expect(keyboardChildFocus.outlineOffset).toBe('0px')
+      expect(keyboardChildFocus.boxShadow).toBe('none')
     }
   }
 })
@@ -863,11 +1280,12 @@ test('translator debounces, commits and restores its history', async ({ page }) 
   await expect(page).toHaveScreenshot('translator-source-language-controls.png')
   const translatorHistoryButton = page.getByRole('button', { name: '翻译历史' })
   await expect(translatorHistoryButton.locator('.history-count-badge')).toHaveText('1')
-  await expect(translatorHistoryButton).toHaveCSS('width', '28px')
+  await expect(translatorHistoryButton).toHaveClass(/history-button-count-1/u)
+  await expect(translatorHistoryButton).toHaveCSS('width', '30px')
   await expectHistoryCountBadge(translatorHistoryButton)
   await translatorHistoryButton.click()
   await expect(page.getByRole('complementary', { name: '翻译历史' })).toContainText('A concise synthetic translation sample.')
-  await expectAccessible(page)
+  await expectAccessible(page, ['.history-menu-meta'])
   await expect(page).toHaveScreenshot('translator-result.png')
 })
 
@@ -917,10 +1335,310 @@ test('prompt optimizer requests only on demand and keeps editable output', async
   await expect(page.getByRole('textbox', { name: '优化结果' })).toContainText('明确目标、约束和输出格式')
   const optimizerHistoryButton = page.getByRole('button', { name: '优化历史' })
   await expect(optimizerHistoryButton.locator('.history-count-badge')).toHaveText('1')
-  await expect(optimizerHistoryButton).toHaveCSS('width', '28px')
+  await expect(optimizerHistoryButton).toHaveClass(/history-button-count-1/u)
+  await expect(optimizerHistoryButton).toHaveCSS('width', '30px')
   await expectHistoryCountBadge(optimizerHistoryButton)
-  await expectAccessible(page)
+  await optimizerHistoryButton.click()
+  const optimizerHistory = page.getByRole('complementary', { name: '优化历史' })
+  await expect(optimizerHistory).toContainText('Summarize the supplied material.')
+  await expect(optimizerHistory).toBeVisible()
+  await optimizerHistory.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map(async (animation) => animation.finished))
+  })
   await expect(page).toHaveScreenshot('optimizer-result.png')
+  await expectAccessible(page, ['.history-menu-meta'])
+})
+
+test('translation and prompt optimization keep their original history triggers and match the reference popover', async ({ page }) => {
+  test.setTimeout(60_000)
+  const longSource = `Reference history source ${'很长的原始内容'.repeat(40)}`
+  const longOutput = `Reference history output ${'很长的处理结果'.repeat(40)}`
+  const entries = Array.from({ length: 20 }, (_, index) => ({
+    id: `history-${String(index)}`,
+    input: `${longSource} ${String(index + 1)}`,
+    output: `${longOutput} ${String(index + 1)}`,
+    method: 'microsoft',
+    updatedAt: Date.now() - index * 60_000,
+  }))
+  const routes = [
+    { route: 'translator', key: 'screenpilot:translator-history', button: '翻译历史' },
+    { route: 'prompt-optimizer', key: 'screenpilot:optimizer-history', button: '优化历史' },
+  ] as const
+
+  for (const route of routes) {
+    await page.setViewportSize({ width: 680, height: 300 })
+    await page.goto(`/?route=${route.route}`)
+    await page.evaluate(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), {
+      key: route.key,
+      value: entries.map((entry) => route.route === 'translator' ? entry : {
+        id: entry.id,
+        input: entry.input,
+        output: entry.output,
+        updatedAt: entry.updatedAt,
+      }),
+    })
+    await page.reload()
+    await page.locator('[data-screenpilot-window-frame="true"]').evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map(async (animation) => animation.finished))
+    })
+    const trigger = page.getByRole('button', { name: route.button })
+    await expect(trigger).toHaveClass(/ocr-header-button/u)
+    await expect(trigger).toHaveClass(/history-button/u)
+    await expect(trigger).toHaveClass(/history-button-count-2/u)
+    await expect(trigger).toHaveCSS('width', '35px')
+    await expect(trigger).toHaveCSS('height', '28px')
+    await expect(trigger.locator('svg')).toHaveCSS('width', '16px')
+    await expect(trigger.locator('svg')).toHaveCSS('height', '16px')
+    await expect(trigger.locator('.history-count-badge')).toHaveText('20')
+    await expectHistoryCountBadge(trigger)
+    await expect(page.locator('.ocr-result-header-actions').getByRole('button', { name: route.button })).toHaveCount(1)
+    await expect(page.locator('.ocr-result-section-heading').getByRole('button', { name: route.button })).toHaveCount(0)
+    await trigger.click()
+    const popover = page.getByRole('complementary', { name: route.button })
+    await expect(popover).toBeVisible()
+    const popoverStyle = await referenceHistoryPopoverStyle(popover)
+    expect(popoverStyle.width).toBe(340)
+    expect(popoverStyle.borderRadius).toBe('12px')
+    expect(popoverStyle.overflow).toBe('hidden')
+    expect(popoverStyle.backgroundColor).toBe('rgb(255, 255, 255)')
+    expect(popoverStyle.borderColor).toBe('rgba(0, 0, 0, 0.06)')
+    expect(popoverStyle.fontFamily).toContain('system-ui')
+    expect(popoverStyle.animationName).toBe('history-menu-in')
+    expect(popoverStyle.animationDuration).toBe('0.15s')
+    expect(popoverStyle.animationTimingFunction).toBe('cubic-bezier(0.22, 1, 0.36, 1)')
+    expect(popoverStyle.listMaxHeight).toBe('210px')
+    expect(popoverStyle.listOverflowX).toBe('hidden')
+    expect(popoverStyle.listOverflowY).toBe('auto')
+    expect(popoverStyle.listClientHeight).toBe(210)
+    expect(popoverStyle.listScrollWidth).toBeLessThanOrEqual(popoverStyle.listClientWidth + 1)
+    expect(popoverStyle.inputFontSize).toBe('11.5px')
+    expect(popoverStyle.inputLineHeight).toBe('14.375px')
+    expect(popoverStyle.metaFontSize).toBe('9.5px')
+    expect(popoverStyle.metaLineHeight).toBe('11.875px')
+    expect(popoverStyle.clearHeight).toBe(26)
+    expect(popoverStyle.clearFontSize).toBe('11.5px')
+    expect(popoverStyle.portalParent).toBe(true)
+    expect(popoverStyle.insideWindowFrame).toBe(false)
+    expect(popoverStyle.listScrollHeight).toBeGreaterThan(popoverStyle.listClientHeight)
+    if (route.route === 'translator') {
+      expect(popoverStyle.outputFontSize).toBe('11px')
+      expect(popoverStyle.outputLineHeight).toBe('13.75px')
+      await expect(popover.locator('.history-menu-output')).toHaveCount(20)
+    } else {
+      expect(popoverStyle.outputFontSize).toBe('')
+      expect(popoverStyle.outputLineHeight).toBe('')
+      await expect(popover.locator('.history-menu-output')).toHaveCount(0)
+      await expect(popover).not.toContainText(longOutput)
+    }
+    const source = popover.locator('.history-menu-input').first()
+    const sourceOverflow = await source.evaluate((element) => {
+      const computed = getComputedStyle(element)
+      return {
+        overflow: computed.overflow,
+        textOverflow: computed.textOverflow,
+        whiteSpace: computed.whiteSpace,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }
+    })
+    expect(sourceOverflow.overflow).toBe('hidden')
+    expect(sourceOverflow.textOverflow).toBe('ellipsis')
+    expect(sourceOverflow.whiteSpace).toBe('nowrap')
+    expect(sourceOverflow.scrollWidth).toBeGreaterThan(sourceOverflow.clientWidth)
+    const popoverBox = await popover.boundingBox()
+    const triggerBox = await trigger.boundingBox()
+    expect(popoverBox).not.toBeNull()
+    expect(triggerBox).not.toBeNull()
+    if (popoverBox === null || triggerBox === null) throw new Error('History menu geometry is missing')
+    expect(popoverBox.x).toBeGreaterThanOrEqual(0)
+    expect(popoverBox.x + popoverBox.width).toBeLessThanOrEqual(680)
+    expect(Math.abs(popoverBox.y - (triggerBox.y + triggerBox.height + 6))).toBeLessThanOrEqual(0.6)
+    expect(popoverBox.x + popoverBox.width).toBeCloseTo(triggerBox.x + triggerBox.width, 0)
+    const firstItem = popover.locator('.history-menu-item').first()
+    const deleteButton = firstItem.getByRole('button', { name: '删除历史' })
+    const itemGeometry = await firstItem.evaluate((element) => {
+      const popoverElement = element.closest<HTMLElement>('.history-menu-popover')
+      const restoreElement = element.querySelector<HTMLElement>('.history-menu-restore')
+      const inputElement = element.querySelector<HTMLElement>('.history-menu-input')
+      const deleteElement = element.querySelector<HTMLElement>('.history-menu-delete')
+      if (popoverElement === null || restoreElement === null || inputElement === null || deleteElement === null) return null
+      const popoverBounds = popoverElement.getBoundingClientRect()
+      const itemBounds = element.getBoundingClientRect()
+      const restoreBounds = restoreElement.getBoundingClientRect()
+      const inputBounds = inputElement.getBoundingClientRect()
+      const deleteBounds = deleteElement.getBoundingClientRect()
+      const deleteStyle = getComputedStyle(deleteElement)
+      return {
+        gap: getComputedStyle(element).columnGap,
+        popoverRight: popoverBounds.right,
+        itemRight: itemBounds.right,
+        restoreRight: restoreBounds.right,
+        inputRight: inputBounds.right,
+        deleteLeft: deleteBounds.left,
+        deleteRight: deleteBounds.right,
+        deleteWidth: deleteBounds.width,
+        deleteFlexShrink: deleteStyle.flexShrink,
+        deleteFlexBasis: deleteStyle.flexBasis,
+        deleteMinWidth: deleteStyle.minWidth,
+      }
+    })
+    expect(itemGeometry).not.toBeNull()
+    if (itemGeometry === null) throw new Error('History item geometry is missing')
+    expect(itemGeometry.gap).toBe('12px')
+    expect(itemGeometry.deleteLeft - itemGeometry.restoreRight).toBeGreaterThanOrEqual(12)
+    expect(itemGeometry.deleteLeft - itemGeometry.inputRight).toBeGreaterThanOrEqual(12)
+    expect(itemGeometry.deleteRight).toBeLessThanOrEqual(itemGeometry.itemRight + 0.5)
+    expect(itemGeometry.itemRight).toBeLessThanOrEqual(itemGeometry.popoverRight)
+    expect(itemGeometry.deleteWidth).toBe(24)
+    expect(itemGeometry.deleteFlexShrink).toBe('0')
+    expect(itemGeometry.deleteFlexBasis).toBe('24px')
+    expect(itemGeometry.deleteMinWidth).toBe('24px')
+    await deleteButton.hover()
+    await expect(deleteButton).toHaveCSS('color', 'rgb(244, 63, 94)')
+    await expect(trigger).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(popover).toHaveCount(0)
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('[data-screenpilot-window-frame="true"]')).toBeVisible()
+    const focusAfterEscape = await trigger.evaluate((element) => {
+      const computed = getComputedStyle(element)
+      const outlineVisible = computed.outlineStyle !== 'none'
+        && Number.parseFloat(computed.outlineWidth) > 0
+        && computed.outlineColor !== 'rgba(0, 0, 0, 0)'
+      return {
+        active: document.activeElement === element,
+        outlineVisible,
+        boxShadow: computed.boxShadow,
+      }
+    })
+    expect(focusAfterEscape.active).toBe(false)
+    expect(focusAfterEscape.outlineVisible).toBe(false)
+    expect(focusAfterEscape.boxShadow).toBe('none')
+  }
+})
+
+test('history menus use the reference light, dark and system theme colors', async ({ page }) => {
+  const entries = [{
+    id: 'theme-history',
+    input: 'Theme source',
+    output: 'Theme output',
+    method: 'microsoft',
+    updatedAt: Date.now(),
+  }]
+  await page.addInitScript((value) => localStorage.setItem('screenpilot:translator-history', JSON.stringify(value)), entries)
+  const cases = [
+    { theme: 'light', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(163, 163, 163)' },
+    { theme: 'dark', scheme: 'light', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(115, 115, 115)' },
+    { theme: 'system', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(163, 163, 163)' },
+    { theme: 'system', scheme: 'dark', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(115, 115, 115)' },
+  ] as const
+  for (const current of cases) {
+    await page.emulateMedia({ colorScheme: current.scheme })
+    await page.goto('/?route=translator')
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme }, current.theme)
+    const trigger = page.getByRole('button', { name: '翻译历史' })
+    await trigger.click()
+    const popover = page.getByRole('complementary', { name: '翻译历史' })
+    await expect(popover).toHaveCSS('background-color', current.surface)
+    await expect(popover.locator('.history-menu-input')).toHaveCSS('color', current.input)
+    await expect(popover.locator('.history-menu-meta')).toHaveCSS('color', current.meta)
+  }
+})
+
+test('Vision keeps the end of long prompts visible before and after capture', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const expectLongPromptEndVisible = async (value: string) => {
+    const prompt = page.getByPlaceholder('问点什么...')
+    await prompt.fill('')
+    await prompt.pressSequentially(value)
+    await prompt.evaluate((element) => {
+      const input = element as HTMLInputElement
+      const maximumScroll = Math.max(0, input.scrollWidth - input.clientWidth)
+      input.scrollLeft = Math.max(0, maximumScroll - 48)
+      input.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        data: input.value.slice(-3),
+        inputType: 'insertCompositionText',
+      }))
+      input.dispatchEvent(new CompositionEvent('compositionend', {
+        bubbles: true,
+        data: input.value.slice(-3),
+      }))
+    })
+    await expect.poll(() => prompt.evaluate((element) => {
+      const input = element as HTMLInputElement
+      return input.scrollWidth - input.clientWidth - input.scrollLeft
+    })).toBeLessThanOrEqual(1)
+    const metrics = await prompt.evaluate((element) => {
+      const input = element as HTMLInputElement
+      const inputRect = input.getBoundingClientRect()
+      const barRect = input.parentElement?.getBoundingClientRect()
+      const historyRect = input.nextElementSibling?.getBoundingClientRect()
+      const lastControlRect = input.parentElement?.lastElementChild?.getBoundingClientRect()
+      const style = getComputedStyle(input)
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d')
+      if (context !== null) context.font = style.font
+      const textWidth = context?.measureText(input.value).width ?? 0
+      const paddingLeft = Number.parseFloat(style.paddingLeft)
+      const paddingRight = Number.parseFloat(style.paddingRight)
+      return {
+        selectionStart: input.selectionStart,
+        valueLength: input.value.length,
+        scrollLeft: input.scrollLeft,
+        scrollWidth: input.scrollWidth,
+        clientWidth: input.clientWidth,
+        inputRight: inputRect.right,
+        barRight: barRect?.right ?? 0,
+        historyLeft: historyRect?.left ?? 0,
+        lastControlRight: lastControlRect?.right ?? 0,
+        paddingLeft,
+        paddingRight,
+        textWidth,
+        visibleTextEnd: paddingLeft + textWidth - input.scrollLeft,
+        visibleTextLimit: input.clientWidth - paddingRight,
+      }
+    })
+    expect(metrics.selectionStart).toBe(metrics.valueLength)
+    expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth)
+    expect(metrics.scrollLeft).toBeGreaterThan(0)
+    expect(metrics.scrollWidth - metrics.scrollLeft).toBeLessThanOrEqual(metrics.clientWidth + 2)
+    expect(metrics.visibleTextEnd).toBeLessThanOrEqual(metrics.clientWidth - 4)
+    expect(metrics.inputRight).toBeLessThanOrEqual(metrics.historyLeft)
+    expect(metrics.lastControlRight).toBeLessThanOrEqual(metrics.barRight + 1)
+    await page.getByTitle('历史').click({ trial: true })
+
+    const middleState = await prompt.evaluate((element) => {
+      const input = element as HTMLInputElement
+      const position = Math.floor(input.value.length / 2)
+      input.setSelectionRange(position, position)
+      input.scrollLeft = Math.floor(Math.max(0, input.scrollWidth - input.clientWidth) / 2)
+      const scrollLeft = input.scrollLeft
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      return { position, scrollLeft }
+    })
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    const middleResult = await prompt.evaluate((element) => {
+      const input = element as HTMLInputElement
+      return { selectionStart: input.selectionStart, scrollLeft: input.scrollLeft }
+    })
+    expect(middleResult.selectionStart).toBe(middleState.position)
+    expect(Math.abs(middleResult.scrollLeft - middleState.scrollLeft)).toBeLessThanOrEqual(1)
+  }
+
+  await expectLongPromptEndVisible(`${'这是一段用于验证 Vision 输入框横向滚动行为的长文本。'.repeat(18)}截图前末尾`)
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
+  await expectLongPromptEndVisible(`${'这是一段用于验证截图后 Vision 输入框末尾文字仍然完整可见的长文本。'.repeat(18)}截图后末尾`)
 })
 
 test('vision captures, annotates and answers without stale stream pollution', async ({ page }) => {
@@ -991,6 +1709,80 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await expect(page.getByRole('button', { name: /What is visible/ })).toBeVisible()
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('vision-answer.png')
+})
+
+test('Vision and OCR selection ants keep a continuous phase at animation loop boundaries', async ({ page }) => {
+  test.setTimeout(60_000)
+
+  for (const mode of ['chat', 'translate'] as const) {
+    await installVisionTauriMock(page)
+    await page.setViewportSize({ width: 1280, height: 720 })
+    await page.goto(`/?window=vision#vision?mode=${mode}`)
+    await waitForVisionSelection(page)
+
+    await page.mouse.move(900, 140)
+    const ants = page.locator('rect.sharex-selection-dash[stroke="white"]')
+    await expect(ants).toHaveCount(1)
+    await expect(ants).toBeVisible()
+
+    const samples = await ants.evaluate((element) => {
+      const animation = element.getAnimations().find((candidate) => candidate instanceof CSSAnimation)
+      if (animation === undefined) throw new Error('Selection dash animation is missing')
+      const duration = Number(animation.effect?.getComputedTiming().duration)
+      if (!Number.isFinite(duration) || duration <= 0) throw new Error('Selection dash duration is invalid')
+      const animationStyle = getComputedStyle(element)
+      const dashPattern = (element.getAttribute('stroke-dasharray') ?? '')
+        .trim()
+        .split(/\s+/u)
+        .map(Number)
+      const period = dashPattern.reduce((total, length) => total + length, 0)
+      if (!Number.isFinite(period) || period <= 0) throw new Error('Selection dash pattern is invalid')
+
+      animation.pause()
+      const sample = (time: number) => {
+        animation.currentTime = time
+        void element.getBoundingClientRect()
+        return Number.parseFloat(getComputedStyle(element).strokeDashoffset)
+      }
+      const before = sample(duration - 0.5)
+      const after = sample(duration + 0.5)
+      const beforeSecond = sample(duration * 2 - 0.5)
+      const afterSecond = sample(duration * 2 + 0.5)
+      const middleBefore = sample(duration / 2 - 0.5)
+      const middleAfter = sample(duration / 2 + 0.5)
+      const normalizedPhase = (offset: number) => ((offset % period) + period) % period
+      const circularDistance = (a: number, b: number) => {
+        const distance = Math.abs(a - b)
+        return Math.min(distance, period - distance)
+      }
+
+      return {
+        before,
+        after,
+        beforeSecond,
+        afterSecond,
+        animationDuration: duration,
+        animationIterationCount: animationStyle.animationIterationCount,
+        animationName: animationStyle.animationName,
+        animationTimingFunction: animationStyle.animationTimingFunction,
+        middleBoundaryDistance: circularDistance(normalizedPhase(middleBefore), normalizedPhase(middleAfter)),
+        firstBoundaryDistance: circularDistance(normalizedPhase(before), normalizedPhase(after)),
+        secondBoundaryDistance: circularDistance(normalizedPhase(beforeSecond), normalizedPhase(afterSecond)),
+      }
+    })
+
+    expect(samples.animationDuration).toBe(1000)
+    expect(samples.animationIterationCount).toBe('infinite')
+    expect(samples.animationName).toBe('screenpilot-sharex-marching-ants')
+    expect(samples.animationTimingFunction).toBe('linear')
+    expect(samples.firstBoundaryDistance).toBeLessThan(0.25)
+    expect(samples.secondBoundaryDistance).toBeLessThan(0.25)
+    expect(Math.abs(samples.firstBoundaryDistance - samples.middleBoundaryDistance)).toBeLessThan(0.05)
+    expect(Math.abs(samples.secondBoundaryDistance - samples.middleBoundaryDistance)).toBeLessThan(0.05)
+
+    expect(samples.before).toBeLessThan(0)
+    expect(samples.after).toBeGreaterThan(-1)
+  }
 })
 
 test('Vision prompt optimization preview keeps pointer focus free of red paint', async ({ page }) => {
@@ -1290,6 +2082,193 @@ test('Vision text-only answer and prompt optimization use the expanded native fr
   await promptPage.setViewportSize({ width: Math.round(promptNative.floatingRect.width), height: 510 })
   await expect.poll(async () => Math.round((await preview.boundingBox())?.height ?? 0)).toBeGreaterThan(424)
   await promptPage.close()
+})
+
+test('Vision floating surface keeps its client geometry after horizontal and vertical edge resizes', async ({ page }) => {
+  test.setTimeout(180_000)
+
+  const exercise = async (
+    targetPage: Page,
+    hasScreenshot: boolean,
+    horizontalFirst: boolean,
+    surface: 'answer' | 'prompt',
+  ) => {
+    await installVisionTauriMock(targetPage, undefined, false)
+    await targetPage.setViewportSize({ width: 1280, height: 720 })
+    await targetPage.goto(`/?window=vision#vision?mode=chat`)
+    await waitForVisionSelection(targetPage)
+
+    if (hasScreenshot) {
+      await targetPage.mouse.move(120, 160)
+      await targetPage.mouse.down()
+      await targetPage.mouse.move(620, 460, { steps: 8 })
+      await targetPage.mouse.up()
+      await expect(targetPage.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
+
+      // keepFullscreen=false normally clears the fullscreen region while the
+      // capture is rebased. Seed one stale region after that transition so
+      // the next floating feedback update proves the native clear path rather
+      // than merely observing an initially-null mock value.
+      await targetPage.evaluate(async () => {
+        const testWindow = window as typeof window & {
+          __TAURI_INTERNALS__: {
+            invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>
+          }
+        }
+        await testWindow.__TAURI_INTERNALS__.invoke('vision_set_hit_region', {
+          rect: { x: 0, y: 0, width: 24, height: 24 },
+        })
+      })
+      await expect.poll(async () => targetPage.evaluate(() => (
+        window as typeof window & {
+          __SCREENPILOT_TEST__: { floatingHitRegion: unknown }
+        }
+      ).__SCREENPILOT_TEST__.floatingHitRegion)).not.toBeNull()
+    }
+    await targetPage.getByPlaceholder('问点什么...').fill(
+      hasScreenshot ? 'Resize the captured frame.' : 'Resize the text-only frame.',
+    )
+    if (surface === 'prompt') {
+      await targetPage.getByRole('button', { name: '优化', exact: true }).click()
+    } else {
+      await targetPage.locator('button:has(svg.lucide-arrow-up)').click()
+    }
+
+    const cardSelector = surface === 'prompt'
+      ? '[data-screenpilot-vision-prompt-preview="true"]'
+      : '[data-screenpilot-answer-panel="true"]'
+    const card = targetPage.locator(cardSelector)
+    await expect(card).toBeVisible()
+    await expect.poll(async () => targetPage.evaluate(() => (
+      window as typeof window & {
+        __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+      }
+    ).__SCREENPILOT_TEST__.floatingRect)).not.toBeNull()
+    const native = await targetPage.evaluate(() => (
+      window as typeof window & {
+        __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } }
+      }
+    ).__SCREENPILOT_TEST__.floatingRect)
+    const resizedWidth = Math.round(native.width + 160)
+    const resizedHeight = Math.round(native.height + 120)
+
+    const assertSurfaceMatchesViewport = async () => {
+      await expect.poll(async () => targetPage.evaluate((selector: string) => {
+        const panel = document.querySelector<HTMLElement>(selector)
+        const frame = document.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
+        if (panel === null || frame === null) return null
+        const panelRect = panel.getBoundingClientRect()
+        const frameRect = frame.getBoundingClientRect()
+        return {
+          floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
+          viewportWidth: Math.round(window.innerWidth),
+          viewportHeight: Math.round(window.innerHeight),
+          frameRight: Math.round(frameRect.right),
+          panelRight: Math.round(panelRect.right),
+          panelBottom: Math.round(panelRect.bottom),
+          hitRegionCleared: (window as typeof window & {
+            __SCREENPILOT_TEST__: { floatingHitRegion: unknown }
+          }).__SCREENPILOT_TEST__.floatingHitRegion === null,
+        }
+      }, cardSelector)).toEqual({
+        floating: true,
+        viewportWidth: horizontalFirst ? resizedWidth : Math.round(native.width),
+        viewportHeight: horizontalFirst ? Math.round(native.height) : resizedHeight,
+        frameRight: horizontalFirst ? resizedWidth : Math.round(native.width),
+        panelRight: horizontalFirst ? resizedWidth : Math.round(native.width),
+        panelBottom: horizontalFirst ? Math.round(native.height) : resizedHeight,
+        hitRegionCleared: true,
+      })
+    }
+
+    if (horizontalFirst) {
+      await targetPage.setViewportSize({ width: resizedWidth, height: Math.round(native.height) })
+      await assertSurfaceMatchesViewport()
+      await targetPage.setViewportSize({ width: resizedWidth, height: resizedHeight })
+    } else {
+      await targetPage.setViewportSize({ width: Math.round(native.width), height: resizedHeight })
+      await assertSurfaceMatchesViewport()
+      await targetPage.setViewportSize({ width: resizedWidth, height: resizedHeight })
+    }
+    await expect.poll(async () => targetPage.evaluate((selector: string) => {
+      const panel = document.querySelector<HTMLElement>(selector)
+      const frame = document.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
+      if (panel === null || frame === null) return null
+      const panelRect = panel.getBoundingClientRect()
+      const frameRect = frame.getBoundingClientRect()
+      return {
+        floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
+        viewportWidth: Math.round(window.innerWidth),
+        viewportHeight: Math.round(window.innerHeight),
+        frameRight: Math.round(frameRect.right),
+        panelRight: Math.round(panelRect.right),
+        panelBottom: Math.round(panelRect.bottom),
+        hitRegionCleared: (window as typeof window & {
+          __SCREENPILOT_TEST__: { floatingHitRegion: unknown }
+        }).__SCREENPILOT_TEST__.floatingHitRegion === null,
+      }
+    }, cardSelector)).toEqual({
+      floating: true,
+      viewportWidth: resizedWidth,
+      viewportHeight: resizedHeight,
+      frameRight: resizedWidth,
+      panelRight: resizedWidth,
+      panelBottom: resizedHeight,
+      hitRegionCleared: true,
+    })
+
+    // Shrink both edges again while staying above the native profile minimum;
+    // this catches stale width/height feedback in the reverse direction.
+    const shrinkWidth = Math.round(native.width + 80)
+    const shrinkHeight = Math.round(native.height + 40)
+    await targetPage.setViewportSize({ width: shrinkWidth, height: shrinkHeight })
+    await expect.poll(async () => targetPage.evaluate((selector) => {
+      const panel = document.querySelector<HTMLElement>(selector)
+      const frame = document.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
+      if (panel === null || frame === null) return null
+      const panelRect = panel.getBoundingClientRect()
+      const frameRect = frame.getBoundingClientRect()
+      return {
+        floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
+        viewportWidth: Math.round(window.innerWidth),
+        viewportHeight: Math.round(window.innerHeight),
+        frameRight: Math.round(frameRect.right),
+        panelRight: Math.round(panelRect.right),
+        panelBottom: Math.round(panelRect.bottom),
+      }
+    }, cardSelector)).toEqual({
+      floating: true,
+      viewportWidth: shrinkWidth,
+      viewportHeight: shrinkHeight,
+      frameRight: shrinkWidth,
+      panelRight: shrinkWidth,
+      panelBottom: shrinkHeight,
+    })
+  }
+
+  await exercise(page, true, true, 'answer')
+  const verticalFirstScreenshot = await page.context().newPage()
+  await exercise(verticalFirstScreenshot, true, false, 'answer')
+  await verticalFirstScreenshot.close()
+  const horizontalFirstText = await page.context().newPage()
+  await exercise(horizontalFirstText, false, true, 'answer')
+  await horizontalFirstText.close()
+  const verticalFirstText = await page.context().newPage()
+  await exercise(verticalFirstText, false, false, 'answer')
+  await verticalFirstText.close()
+
+  const horizontalFirstPromptScreenshot = await page.context().newPage()
+  await exercise(horizontalFirstPromptScreenshot, true, true, 'prompt')
+  await horizontalFirstPromptScreenshot.close()
+  const verticalFirstPromptScreenshot = await page.context().newPage()
+  await exercise(verticalFirstPromptScreenshot, true, false, 'prompt')
+  await verticalFirstPromptScreenshot.close()
+  const horizontalFirstPromptText = await page.context().newPage()
+  await exercise(horizontalFirstPromptText, false, true, 'prompt')
+  await horizontalFirstPromptText.close()
+  const verticalFirstPromptText = await page.context().newPage()
+  await exercise(verticalFirstPromptText, false, false, 'prompt')
+  await verticalFirstPromptText.close()
 })
 
 test('Vision floating layout retries a deferred native resize before recording success', async ({ page }) => {
@@ -1847,6 +2826,62 @@ test('OCR floating window follows measured text height without viewport resize f
   }))
   expect(shortSourceGeometry.scrollHeight).toBeLessThanOrEqual(shortSourceGeometry.clientHeight + 1)
 
+})
+
+test('OCR floating geometry ignores one-pixel native width feedback', async ({ page }) => {
+  await installVisionTauriMock(page, 'Short OCR text.', false, undefined, 0, 0, 1)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.getByText('Short OCR text.')).toBeVisible()
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & { __SCREENPILOT_TEST__: { floatingRect: unknown } }).__SCREENPILOT_TEST__
+    return state.floatingRect !== null
+  })).toBe(true)
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })).toBeGreaterThan(5)
+  const requestCountBeforeTransform = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })
+  await page.locator('[data-screenpilot-window-frame="true"]').evaluate((element) => {
+    const card = element as HTMLElement
+    card.style.transform = 'scale(0.8)'
+  })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })).toBeGreaterThan(requestCountBeforeTransform)
+  const samples = await page.evaluate(async () => {
+    const card = document.querySelector<HTMLElement>('[data-screenpilot-window-frame="true"]')
+    if (card === null) return null
+    const values: { x: number; width: number }[] = []
+    for (let index = 0; index < 30; index += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      const rect = card.getBoundingClientRect()
+      values.push({ x: rect.x, width: rect.width })
+    }
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return { values, floatingRects: state.floatingRects.slice() }
+  })
+  expect(samples).not.toBeNull()
+  if (samples === null) throw new Error('OCR geometry sample is missing')
+  expect(new Set(samples.values.map((rect) => `${Math.round(rect.x)}:${Math.round(rect.width)}`)).size).toBe(1)
+  expect(new Set(samples.floatingRects.map((rect) => Math.round(rect.width))).size).toBe(1)
 })
 
 test('long OCR source scrolls independently without pushing translation below the card', async ({ page }) => {

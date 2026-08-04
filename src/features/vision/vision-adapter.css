@@ -1,3 +1,12 @@
+main[data-screenpilot-vision-adapter="true"] .sharex-selection-dash {
+  animation: screenpilot-sharex-marching-ants 1s linear infinite;
+}
+
+@keyframes screenpilot-sharex-marching-ants {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -10; }
+}
+
 [data-screenpilot-prompt-bar="true"] > input:focus,
 [data-screenpilot-prompt-bar="true"] > input:focus-visible {
   box-shadow: none !important;
@@ -71,6 +80,20 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
 
 [data-screenpilot-prompt-bar="true"] > input:not([aria-disabled="true"]) {
   opacity: 1 !important;
+}
+
+[data-screenpilot-prompt-bar="true"] > input {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 100%;
+  flex: 1 1 0%;
+  appearance: none !important;
+  padding-left: 0 !important;
+  padding-right: 8px !important;
+  border-right: 1px solid transparent !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  white-space: nowrap !important;
 }
 
 [data-screenpilot-answer-panel="true"] {

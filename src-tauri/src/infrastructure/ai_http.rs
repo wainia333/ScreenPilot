@@ -252,6 +252,81 @@ pub async fn complete_text(
     .await
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextRequestOptions {
+    pub thinking_effort: Option<ThinkingEffort>,
+}
+
+impl TextRequestOptions {
+    pub fn new(thinking_effort: ThinkingEffort) -> Self {
+        Self {
+            thinking_effort: Some(thinking_effort),
+        }
+    }
+}
+
+pub async fn complete_text_with_options(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    system: &str,
+    user: &str,
+    policy: AiRequestPolicy,
+    options: TextRequestOptions,
+) -> Result<String, String> {
+    let endpoints = derive_endpoints(&provider.base_url)?;
+    let mut body = match endpoints.protocol {
+        ApiProtocol::ChatCompletions => json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "stream": policy.stream
+        }),
+        ApiProtocol::Responses => json!({
+            "model": model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": system}]},
+                {"role": "user", "content": [{"type": "input_text", "text": user}]}
+            ],
+            "stream": policy.stream
+        }),
+    };
+    apply_text_options(&mut body, endpoints.protocol, options);
+    send_completion_at(
+        provider,
+        model,
+        keys,
+        body,
+        endpoints.protocol,
+        policy,
+        endpoints.request,
+    )
+    .await
+}
+
+pub async fn complete_text_with_effort(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    system: &str,
+    user: &str,
+    policy: AiRequestPolicy,
+    thinking_effort: ThinkingEffort,
+) -> Result<String, String> {
+    complete_text_with_options(
+        provider,
+        model,
+        keys,
+        system,
+        user,
+        policy,
+        TextRequestOptions::new(thinking_effort),
+    )
+    .await
+}
+
 #[allow(dead_code)]
 pub async fn complete_vision(
     provider: &ProviderSettings,
@@ -788,6 +863,26 @@ where
     Ok(false)
 }
 
+fn apply_text_options(body: &mut Value, protocol: ApiProtocol, options: TextRequestOptions) {
+    let Some(effort) = options.thinking_effort else {
+        return;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    match protocol {
+        ApiProtocol::ChatCompletions => {
+            object.insert("reasoning_effort".into(), json!(reasoning_effort(effort)));
+        }
+        ApiProtocol::Responses => {
+            object.insert(
+                "reasoning".into(),
+                json!({"effort": reasoning_effort(effort)}),
+            );
+        }
+    }
+}
+
 fn apply_responses_options(body: &mut Value, options: VisionRequestOptions) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -835,6 +930,7 @@ fn reasoning_effort(effort: ThinkingEffort) -> &'static str {
         ThinkingEffort::Medium => "medium",
         ThinkingEffort::High => "high",
         ThinkingEffort::Xhigh => "xhigh",
+        ThinkingEffort::Max => "max",
     }
 }
 
@@ -1475,11 +1571,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn constructs_responses_request_and_rotates_auth_key() {
+    async fn constructs_chat_optimizer_request_with_reasoning_effort() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer optimizer-chat-secret"))
+            .and(body_json(json!({
+                "model": "model:vision",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "user"}
+                ],
+                "stream": false,
+                "reasoning_effort": "max"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "answer"}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let answer = complete_text_with_effort(
+            &provider(format!("{}/v1/chat/completions", server.uri())),
+            "model:vision",
+            &["optimizer-chat-secret".into()],
+            "system",
+            "user",
+            AiRequestPolicy::new(false, 1, false),
+            ThinkingEffort::Max,
+        )
+        .await
+        .expect("optimizer chat completion");
+        assert_eq!(answer, "answer");
+    }
+
+    #[tokio::test]
+    async fn constructs_responses_optimizer_request_with_reasoning_effort() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer optimizer-responses-secret"))
+            .and(body_json(json!({
+                "model": "model:vision",
+                "input": [
+                    {"role": "system", "content": [{"type": "input_text", "text": "system"}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": "user"}]}
+                ],
+                "stream": false,
+                "reasoning": {"effort": "max"}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [{"content": [{"type": "output_text", "text": "answer"}]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let answer = complete_text_with_effort(
+            &provider(format!("{}/v1/responses", server.uri())),
+            "model:vision",
+            &["optimizer-responses-secret".into()],
+            "system",
+            "user",
+            AiRequestPolicy::new(false, 1, false),
+            ThinkingEffort::Max,
+        )
+        .await
+        .expect("optimizer responses completion");
+        assert_eq!(answer, "answer");
+    }
+
+    #[test]
+    fn maps_max_reasoning_effort_to_provider_value() {
+        assert_eq!(reasoning_effort(ThinkingEffort::Max), "max");
+    }
+
+    #[tokio::test]
+    async fn constructs_responses_request_and_rotates_auth_key() {
+        let server = MockServer::start().await;
+        let ordinary_responses_body = json!({
+            "model": "model:vision",
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": "system"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "user"}]}
+            ],
+            "stream": false
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
             .and(header("authorization", "Bearer rejected"))
+            .and(body_json(ordinary_responses_body.clone()))
             .respond_with(
                 ResponseTemplate::new(401).set_body_json(json!({"error": {"message": "bad key"}})),
             )
@@ -1488,6 +1668,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/responses"))
             .and(header("authorization", "Bearer working"))
+            .and(body_json(ordinary_responses_body))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "output": [{"content": [{"type": "output_text", "text": "response answer"}]}]
             })))
@@ -1582,6 +1763,45 @@ mod tests {
         .await
         .expect("vision completion without optional fields");
         assert_eq!(answer, "answer-2");
+    }
+
+    #[tokio::test]
+    async fn constructs_responses_vision_max_reasoning_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer vision-max-secret"))
+            .and(body_json(json!({
+                "model": "model:vision",
+                "input": [
+                    {"role": "system", "content": [{"type": "input_text", "text": "system"}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": "question"}]}
+                ],
+                "stream": false,
+                "reasoning": {"effort": "max", "summary": "auto"}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [{"content": [{"type": "output_text", "text": "answer"}]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let answer = complete_vision_with_options(
+            &provider(format!("{}/v1/responses", server.uri())),
+            "model:vision",
+            &["vision-max-secret".into()],
+            "system",
+            &[AiMessage {
+                role: "user",
+                content: "question",
+            }],
+            None,
+            AiRequestPolicy::new(false, 1, false),
+            VisionRequestOptions::new(true, ThinkingEffort::Max, false),
+        )
+        .await
+        .expect("vision max completion");
+        assert_eq!(answer, "answer");
     }
 
     #[tokio::test]

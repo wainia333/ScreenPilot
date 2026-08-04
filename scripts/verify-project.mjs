@@ -18,7 +18,7 @@ const exactFiles = new Map([
   ['src-tauri/src/windows.rs', ['src-tauri/src/windows.rs', 'F25A5100D024E40C4579B780BAEEA3FEA7EA47E17C9220601D83C19BB31EC1B6']],
 ])
 const authorizedPatchedFiles = new Map([
-  ['src/vendor/kivio-screenshot/Vision.tsx', 'A068D44890AF085AF6EE7661BEABA47641508FEECBEBC3A054514B65F6EB15E6'],
+  ['src/vendor/kivio-screenshot/Vision.tsx', 'DE0BDE52AAF733D7D4EB13A5A66DD9403C213B742C6EF30226A5F99F5154CFBF'],
   ['src/vendor/kivio-screenshot/api/tauri.ts', '3D47CE11CF1EC20057551AFFE97ABA94B388B3880596EC859ACF7058DB5916AF'],
 ])
 const ignoredDirectories = new Set([

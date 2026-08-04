@@ -8,6 +8,7 @@ import './vision-adapter.css'
 import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 import { safeExternalUrl } from './citation-links'
 import { visionDialogHeight } from './dialog-sizing'
+import { isVisionPromptInput, scheduleVisionPromptCaretSync } from './prompt-input-scroll'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
@@ -115,6 +116,34 @@ function initialVisionViewportHeight(): number {
 
 function isFloatingResultSurface(element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect()
+  // Vision marks the compact native layout explicitly. During a real edge
+  // resize React may commit the measured client width one frame after the
+  // browser's `resize` event; keep the floating dialog contract alive during
+  // that hand-off instead of treating the temporarily narrower card as a
+  // fullscreen surface and dropping its height variables.
+  const floatingLayout = element.closest('[data-screenpilot-floating-layout="true"]') !== null
+  if (floatingLayout) {
+    const floatingRoot = element.closest<HTMLElement>('[data-screenpilot-floating-layout="true"]')
+    const expectedWidth = Number(floatingRoot?.dataset.screenpilotFloatingWidth ?? '')
+    const viewportMatchesFloatingWidth = Number.isFinite(expectedWidth)
+      && Math.abs(window.innerWidth - expectedWidth) <= 24
+    if (!viewportMatchesFloatingWidth) {
+      // Before the native resize reaches WebView2 (or in a fullscreen mock),
+      // fall back to the original surface geometry rather than trusting the
+      // marker against an unrelated viewport.
+      return rect.left >= -2
+        && rect.left <= 24
+        && Math.abs(rect.right - window.innerWidth) <= 24
+        && rect.width >= window.innerWidth - 24
+        && window.innerHeight > 96
+    }
+    return rect.left >= -24
+      && rect.top >= -24
+      && rect.width > 0
+      && rect.height > 0
+      && window.innerWidth > 0
+      && window.innerHeight > 96
+  }
   return rect.left >= -2
     && rect.left <= 24
     && Math.abs(rect.right - window.innerWidth) <= 24
@@ -416,6 +445,9 @@ export default function ReferenceVisionAdapter() {
       const translateRect = translateCard instanceof HTMLElement
         ? translateCard.getBoundingClientRect()
         : null
+      const translateLayoutWidth = translateCard instanceof HTMLElement
+        ? translateCard.offsetWidth
+        : 0
       const floatingTranslateSurface = translateCard instanceof HTMLElement
         && isFloatingResultSurface(translateCard)
       const floatingTranslateMatchesViewport = floatingTranslateSurface
@@ -438,7 +470,10 @@ export default function ReferenceVisionAdapter() {
           if (requestedTranslateHeights.get(translateCard) !== desiredHeight) {
             requestedTranslateHeights.set(translateCard, desiredHeight)
             void invoke('vision_set_floating', {
-              rect: { width: Math.ceil(translateRect.width), height: desiredHeight },
+              rect: {
+                width: Math.ceil(translateLayoutWidth > 0 ? translateLayoutWidth : translateRect.width),
+                height: desiredHeight,
+              },
             }).catch((error: unknown) => console.error('Failed to expand screenshot translation window', error))
           }
         } else {
@@ -509,7 +544,13 @@ export default function ReferenceVisionAdapter() {
     applyAdapters()
     const observer = new MutationObserver(applyAdapters)
     observer.observe(document.body, {
-      attributeFilter: ['class', 'style', 'data-screenpilot-vision-image'],
+      attributeFilter: [
+        'class',
+        'style',
+        'data-screenpilot-vision-image',
+        'data-screenpilot-floating-layout',
+        'data-screenpilot-floating-width',
+      ],
       attributes: true,
       childList: true,
       subtree: true,
@@ -523,8 +564,17 @@ export default function ReferenceVisionAdapter() {
     const handleChange = (event: Event) => {
       if (event.target === findTranslationMethodSelect()) clearOverride()
     }
+    const promptCaretSyncs = new Map<HTMLInputElement, () => void>()
+    const handlePromptCaretEvent = (event: Event) => {
+      if (!isVisionPromptInput(event.target)) return
+      promptCaretSyncs.get(event.target)?.()
+      promptCaretSyncs.set(event.target, scheduleVisionPromptCaretSync(event.target))
+    }
     document.addEventListener('input', handleInput)
     document.addEventListener('change', handleChange)
+    document.addEventListener('input', handlePromptCaretEvent)
+    document.addEventListener('compositionend', handlePromptCaretEvent)
+    document.addEventListener('paste', handlePromptCaretEvent)
     window.addEventListener('resize', applyAdapters)
     window.addEventListener('screenpilot-ai-availability', applyAdapters)
     return () => {
@@ -533,6 +583,11 @@ export default function ReferenceVisionAdapter() {
       adapterFrame = null
       document.removeEventListener('input', handleInput)
       document.removeEventListener('change', handleChange)
+      document.removeEventListener('input', handlePromptCaretEvent)
+      document.removeEventListener('compositionend', handlePromptCaretEvent)
+      document.removeEventListener('paste', handlePromptCaretEvent)
+      promptCaretSyncs.forEach((cancel) => cancel())
+      promptCaretSyncs.clear()
       window.removeEventListener('resize', applyAdapters)
       window.removeEventListener('screenpilot-ai-availability', applyAdapters)
       document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {

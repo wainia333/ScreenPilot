@@ -131,10 +131,10 @@ export function ScreenshotSection({
               value={current.thinkingEffort}
               label="截图翻译思考强度"
               options={[
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' },
-                { value: 'xhigh', label: '极高' },
+                { value: 'low', label: 'low' },
+                { value: 'medium', label: 'medium' },
+                { value: 'high', label: 'high' },
+                { value: 'xhigh', label: 'xhigh' },
               ]}
               onChange={(thinkingEffort) => update({ thinkingEffort })}
             />

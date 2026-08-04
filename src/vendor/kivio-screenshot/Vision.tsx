@@ -1667,11 +1667,26 @@ export default function Vision() {
 
   useEffect(() => {
     const onResize = () => {
-      setViewport({ w: window.innerWidth, h: window.innerHeight })
+      const nextViewport = { w: window.innerWidth, h: window.innerHeight }
+      setViewport(nextViewport)
+
+      // Native edge resize changes the WebView client rect without changing
+      // the floating bar's remembered local geometry. Keep the bar/card width
+      // in the same coordinate space as the current client viewport so the
+      // transparent native surface never outruns the rendered panel. The
+      // resize effect below will report this measured width back to Rust; the
+      // native window remains the source of truth while a user drag is active.
+      if (floatingRebased && modeRef.current === 'chat' && stageRef.current !== 'select') {
+        setBarRect(prev => {
+          const width = Math.max(1, Math.round(nextViewport.w))
+          if (prev.x === 0 && prev.y === 0 && prev.width === width) return prev
+          return { ...prev, x: 0, y: 0, width }
+        })
+      }
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [floatingRebased])
 
   useEffect(() => {
     if (stageRef.current === 'select') {
@@ -2167,6 +2182,12 @@ export default function Vision() {
       })
 
       try {
+        // The fullscreen selection path may have installed a native hit
+        // region while the bar was still rebasing. Clear it before shrinking
+        // the HWND so a late region update cannot leave transparent pixels
+        // intercepting desktop clicks in the new floating client rect.
+        await api.visionSetHitRegion(null)
+        if (flySeq !== nativeFlySeqRef.current) return
         const applied = await setVisionFloatingWithRetry({
           x: fromOrigin.x,
           y: fromOrigin.y,
@@ -3905,6 +3926,8 @@ export default function Vision() {
   return (
     <div
       className="fixed inset-0 select-none"
+      data-screenpilot-floating-layout={isFloatingLayout ? 'true' : undefined}
+      data-screenpilot-floating-width={isFloatingLayout ? String(Math.max(1, Math.round(barRect.width))) : undefined}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
