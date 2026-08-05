@@ -696,7 +696,9 @@ pub fn update_tray(app: &AppHandle) -> Result<(), String> {
 pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     if window.label() == "vision" && matches!(event, tauri::WindowEvent::Moved(_)) {
         #[cfg(target_os = "windows")]
-        reinforce_vision_topmost(window);
+        if !crate::application::commands::safe_drag_active() {
+            reinforce_vision_topmost(window);
+        }
     }
 
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {

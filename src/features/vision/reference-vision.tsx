@@ -3,12 +3,14 @@ import { listen } from '@tauri-apps/api/event'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReferenceVision from '../../vendor/kivio-screenshot/Vision'
+import { api as referenceVisionApi } from '../../vendor/kivio-screenshot/api/tauri'
 import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
 import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 import { safeExternalUrl } from './citation-links'
 import { visionDialogHeight } from './dialog-sizing'
 import { isVisionPromptInput, scheduleVisionPromptCaretSync } from './prompt-input-scroll'
+import { installSafeFloatingDrag } from './safe-floating-drag'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
@@ -199,6 +201,11 @@ export default function ReferenceVisionAdapter() {
   const aiAvailabilityLoadedRef = useRef(false)
 
   useEffect(() => installOcrDebounceTimingAdapter(), [])
+
+  useEffect(
+    () => installSafeFloatingDrag(referenceVisionApi, invoke),
+    [],
+  )
 
   useEffect(() => {
     const onLinkClick = (event: MouseEvent) => {

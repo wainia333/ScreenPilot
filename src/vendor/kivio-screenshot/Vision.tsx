@@ -1282,6 +1282,7 @@ export default function Vision() {
   const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
   const [nativeHitRegionActive, setNativeHitRegionActive] = useState(false)
   const [panelDragActive, setPanelDragActive] = useState(false)
+  const [windowMoveRevision, setWindowMoveRevision] = useState(0)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const barPanelRef = useRef<HTMLDivElement>(null)
@@ -1664,6 +1665,52 @@ export default function Vision() {
       unlisten?.()
     }
   }, [focusVisionInput])
+
+  useEffect(() => {
+    if (!floatingRebased) return
+    let cancelled = false
+    let syncTimer: number | null = null
+    let unlisten: (() => void) | undefined
+    let unlistenScale: (() => void) | undefined
+    const win = getCurrentWindow()
+
+    const syncOrigin = async () => {
+      syncTimer = null
+      try {
+        const [position, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()])
+        if (cancelled) return
+        const factor = scale || 1
+        const nextOrigin = { x: position.x / factor, y: position.y / factor }
+        setWinOrigin(prev => (
+          prev.x === nextOrigin.x && prev.y === nextOrigin.y ? prev : nextOrigin
+        ))
+        setWindowMoveRevision(prev => prev + 1)
+      } catch (error) {
+        if (!cancelled) console.error('[vision-floating] window origin sync failed:', error)
+      }
+    }
+
+    const scheduleSync = () => {
+      if (syncTimer !== null) window.clearTimeout(syncTimer)
+      syncTimer = window.setTimeout(() => { void syncOrigin() }, 64)
+    }
+
+    win.onMoved(scheduleSync).then((dispose) => {
+      if (cancelled) dispose()
+      else unlisten = dispose
+    }).catch(error => console.error('[vision-floating] move listener failed:', error))
+    win.onScaleChanged(scheduleSync).then((dispose) => {
+      if (cancelled) dispose()
+      else unlistenScale = dispose
+    }).catch(error => console.error('[vision-floating] scale listener failed:', error))
+
+    return () => {
+      cancelled = true
+      if (syncTimer !== null) window.clearTimeout(syncTimer)
+      unlisten?.()
+      unlistenScale?.()
+    }
+  }, [floatingRebased])
 
   useEffect(() => {
     const onResize = () => {
@@ -3216,9 +3263,25 @@ export default function Vision() {
     const height = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
     const localX = wasFloating ? 0 : Math.max(16, Math.min(viewport.w - width - 16, barRect.x))
     const localY = wasFloating ? 0 : Math.max(16, Math.min(viewport.h - height - 16, barRect.y))
+    let currentOrigin = winOrigin
+    if (wasFloating) {
+      try {
+        const [position, scale] = await Promise.all([
+          getCurrentWindow().innerPosition(),
+          getCurrentWindow().scaleFactor(),
+        ])
+        const factor = scale || 1
+        currentOrigin = { x: position.x / factor, y: position.y / factor }
+        setWinOrigin(currentOrigin)
+        setWindowMoveRevision(prev => prev + 1)
+      } catch (error) {
+        console.error('[vision-history] current window origin failed:', error)
+      }
+    }
+    if (restoreSeq !== nativeFlySeqRef.current) return
     const origin = {
-      x: Math.round(winOrigin.x + localX),
-      y: Math.round(winOrigin.y + localY),
+      x: Math.round(currentOrigin.x + localX),
+      y: Math.round(currentOrigin.y + localY),
     }
 
     flushSync(() => {
@@ -3733,6 +3796,7 @@ export default function Vision() {
     panelDragActive,
     passThroughOverlay,
     setVisionCursorPassthrough,
+    windowMoveRevision,
   ])
 
   useEffect(() => {

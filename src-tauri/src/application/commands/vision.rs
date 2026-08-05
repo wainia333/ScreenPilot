@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -88,6 +90,105 @@ const VISION_DIALOG_VIEWPORT_RATIO: f64 = 0.45;
 const VISION_DIALOG_FRAME_COMPENSATION: f64 = 2.0;
 static VISION_FLOATING_RESIZABLE: AtomicBool = AtomicBool::new(false);
 static VISION_FLOATING_HAS_SCREENSHOT: AtomicBool = AtomicBool::new(true);
+#[cfg(target_os = "windows")]
+static VISION_SAFE_DRAG_STATE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "windows")]
+fn next_safe_drag_generation(current: u64) -> u64 {
+    match (current & !1).wrapping_add(2) {
+        0 => 2,
+        generation => generation,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn begin_safe_drag_token_from(state: &AtomicU64, current: u64) -> Option<u64> {
+    let token = next_safe_drag_generation(current) | 1;
+    state
+        .compare_exchange(current, token, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+        .then_some(token)
+}
+
+#[cfg(target_os = "windows")]
+fn begin_safe_drag_token(state: &AtomicU64) -> Option<u64> {
+    let current = state.load(Ordering::Acquire);
+    begin_safe_drag_token_from(state, current)
+}
+
+#[cfg(target_os = "windows")]
+fn cancel_safe_drag_state(state: &AtomicU64) {
+    loop {
+        let current = state.load(Ordering::Acquire);
+        let next_generation = next_safe_drag_generation(current);
+        if state
+            .compare_exchange(
+                current,
+                next_generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reset_token_if_current(state: &AtomicU64, token: u64) -> bool {
+    state
+        .compare_exchange(token, token & !1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn reset_safe_drag_if_current(token: u64) -> bool {
+    reset_token_if_current(&VISION_SAFE_DRAG_STATE, token)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cancel_safe_drag() {}
+
+#[cfg(target_os = "windows")]
+fn cancel_safe_drag() {
+    cancel_safe_drag_state(&VISION_SAFE_DRAG_STATE);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn safe_drag_active() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn safe_drag_active() -> bool {
+    VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) & 1 != 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SafeDragMouseButton {
+    Left,
+    Right,
+}
+
+fn safe_drag_primary_button(swapped: bool) -> SafeDragMouseButton {
+    if swapped {
+        SafeDragMouseButton::Right
+    } else {
+        SafeDragMouseButton::Left
+    }
+}
+
+fn safe_drag_position(
+    start_window: (i32, i32),
+    start_cursor: (i32, i32),
+    cursor: (i32, i32),
+) -> (i32, i32) {
+    (
+        start_window.0 + cursor.0 - start_cursor.0,
+        start_window.1 + cursor.1 - start_cursor.1,
+    )
+}
 
 fn vision_dialog_height_for_mode(viewport_height: f64, has_screenshot: bool) -> f64 {
     let current_height = (viewport_height * VISION_DIALOG_VIEWPORT_RATIO)
@@ -599,6 +700,7 @@ pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
 }
 
 pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
+    cancel_safe_drag();
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     let mut failures = Vec::new();
@@ -869,6 +971,14 @@ fn should_defer_floating_resize(
     native_sizing || (already_resizable && resizable && !positioned)
 }
 
+fn should_clear_floating_region(
+    already_resizable: bool,
+    resizable: bool,
+    profile_changed: bool,
+) -> bool {
+    resizable && (!already_resizable || profile_changed)
+}
+
 fn floating_height_for_initial(height: f64, initial_height: Option<f64>) -> f64 {
     initial_height.unwrap_or(height)
 }
@@ -921,6 +1031,9 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
         close_native_freeze(&app);
         return Ok(false);
     };
+    if safe_drag_active() {
+        return Ok(false);
+    }
     let screenshot_translation = window
         .url()
         .map_err(|error| error.to_string())?
@@ -941,22 +1054,13 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
     if native_sizing {
         return Ok(false);
     }
-    // A fullscreen pass-through region can outlive the DOM transition into a
-    // resizable floating HWND. Clear it before accepting the floating
-    // geometry (including the ordinary ResizeObserver no-op path), otherwise
-    // a stale region may leave transparent pixels intercepting desktop clicks.
-    if resizable {
-        apply_vision_window_region(&window, None)?;
-    }
-    // An already-resizable, unpositioned update with the same profile is the
-    // normal ResizeObserver feedback path. The native window already owns the
-    // current edge size, so treat this policy no-op as handled rather than a
-    // retryable native-sizing rejection. JS may safely record the requested
-    // geometry and wait for the next real layout change.
     if should_defer_floating_resize(false, already_resizable, resizable, positioned)
         && !profile_changed
     {
         return Ok(true);
+    }
+    if should_clear_floating_region(already_resizable, resizable, profile_changed) {
+        apply_vision_window_region(&window, None)?;
     }
     close_native_freeze(&app);
     let mode_changed = profile_changed;
@@ -979,6 +1083,111 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
     apply_floating_rect(&window, &rect)?;
     VISION_FLOATING_HAS_SCREENSHOT.store(has_screenshot, Ordering::Release);
     Ok(true)
+}
+
+#[tauri::command]
+pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("vision") else {
+        return Err("Vision window is unavailable".to_string());
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{HWND, POINT, RECT};
+        use windows::Win32::Graphics::Dwm::DwmFlush;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, GetSystemMetrics, GetWindowRect, IsWindow, SetWindowPos, HWND_TOPMOST,
+            SM_SWAPBUTTON, SWP_NOSIZE,
+        };
+
+        let Some(token) = begin_safe_drag_token(&VISION_SAFE_DRAG_STATE) else {
+            return Ok(());
+        };
+        let hwnd = match window.hwnd() {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                reset_safe_drag_if_current(token);
+                return Err(error.to_string());
+            }
+        };
+        let mut start_cursor = POINT::default();
+        let mut start_rect = RECT::default();
+        let initialized = unsafe {
+            GetCursorPos(&mut start_cursor).is_ok() && GetWindowRect(hwnd, &mut start_rect).is_ok()
+        };
+        if !initialized {
+            reset_safe_drag_if_current(token);
+            return Err("Vision window geometry is unavailable".to_string());
+        }
+        let swapped_buttons = unsafe { GetSystemMetrics(SM_SWAPBUTTON) != 0 };
+        let primary_button = match safe_drag_primary_button(swapped_buttons) {
+            SafeDragMouseButton::Left => VK_LBUTTON.0 as i32,
+            SafeDragMouseButton::Right => VK_RBUTTON.0 as i32,
+        };
+        let hwnd_value = hwnd.0 as usize;
+        let spawn = std::thread::Builder::new()
+            .name("screenpilot-vision-safe-drag".to_string())
+            .spawn(move || {
+                let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
+                let flags = floating_window_pos_flags() | SWP_NOSIZE;
+                let mut last_x = start_rect.left;
+                let mut last_y = start_rect.top;
+                loop {
+                    if VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) != token {
+                        break;
+                    }
+                    if unsafe { !IsWindow(Some(hwnd)).as_bool() } {
+                        break;
+                    }
+                    let button_down =
+                        unsafe { (GetAsyncKeyState(primary_button) as u16 & 0x8000) != 0 };
+                    if !button_down {
+                        break;
+                    }
+                    let mut cursor = POINT::default();
+                    if unsafe { GetCursorPos(&mut cursor).is_err() } {
+                        break;
+                    }
+                    let (x, y) = safe_drag_position(
+                        (start_rect.left, start_rect.top),
+                        (start_cursor.x, start_cursor.y),
+                        (cursor.x, cursor.y),
+                    );
+                    if x != last_x || y != last_y {
+                        if VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) != token {
+                            break;
+                        }
+                        let moved =
+                            unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, 0, 0, flags) };
+                        if moved.is_err() {
+                            break;
+                        }
+                        last_x = x;
+                        last_y = y;
+                        let flushed = unsafe { DwmFlush().is_ok() };
+                        if !flushed {
+                            std::thread::sleep(Duration::from_millis(8));
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                }
+                reset_safe_drag_if_current(token);
+            });
+        if let Err(error) = spawn {
+            reset_safe_drag_if_current(token);
+            return Err(format!("Safe drag thread failed: {error}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.start_dragging().map_err(|error| error.to_string())
+    }
 }
 
 fn vision_floating_resizable(screenshot_translation: bool, height: f64) -> bool {
@@ -2610,6 +2819,14 @@ mod tests {
     }
 
     #[test]
+    fn clears_floating_region_only_when_entering_or_switching_profile() {
+        assert!(should_clear_floating_region(false, true, false));
+        assert!(should_clear_floating_region(true, true, true));
+        assert!(!should_clear_floating_region(true, true, false));
+        assert!(!should_clear_floating_region(false, false, true));
+    }
+
+    #[test]
     fn applies_mode_initial_height_for_new_or_positioned_dialogs() {
         assert!(should_apply_initial_height(true, false, false, false));
         assert!(should_apply_initial_height(true, true, true, false));
@@ -2641,6 +2858,97 @@ mod tests {
             vision_chat_frame_height(vision_dialog_height_for_mode(720.0, false)),
             390.0
         );
+    }
+
+    #[test]
+    fn selects_the_primary_button_with_swap_setting() {
+        assert_eq!(safe_drag_primary_button(false), SafeDragMouseButton::Left);
+        assert_eq!(safe_drag_primary_button(true), SafeDragMouseButton::Right);
+    }
+
+    #[test]
+    fn computes_physical_drag_position_from_cursor_delta() {
+        assert_eq!(
+            safe_drag_position((100, 200), (400, 500), (425, 470)),
+            (125, 170)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn stale_safe_drag_cleanup_cannot_clear_a_replacement_token() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let state = AtomicU64::new(41);
+        state.store(43, Ordering::Release);
+        assert!(!reset_token_if_current(&state, 41));
+        assert_eq!(state.load(Ordering::Acquire), 43);
+        assert!(reset_token_if_current(&state, 43));
+        assert_eq!(state.load(Ordering::Acquire), 42);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn safe_drag_begin_and_cleanup_linearize_in_one_state_word() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let state = AtomicU64::new(0);
+        let first = begin_safe_drag_token(&state).expect("first safe drag begin failed");
+        let second = begin_safe_drag_token(&state).expect("second safe drag begin failed");
+        assert_eq!(first, 3);
+        assert_eq!(second, 5);
+        assert_eq!(state.load(Ordering::Acquire), second);
+        assert!(!reset_token_if_current(&state, first));
+        assert_eq!(state.load(Ordering::Acquire), second);
+        assert!(reset_token_if_current(&state, second));
+        assert_eq!(state.load(Ordering::Acquire), 4);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn concurrent_safe_drag_begins_leave_the_latest_token_active() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let state = Arc::new(AtomicU64::new(0));
+        let snapshot = state.load(Ordering::Acquire);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    begin_safe_drag_token_from(&state, snapshot)
+                })
+            })
+            .collect::<Vec<_>>();
+        let tokens = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("safe drag begin thread panicked"))
+            .collect::<Vec<_>>();
+        let latest = state.load(Ordering::Acquire);
+        let successful = tokens.iter().flatten().copied().collect::<Vec<_>>();
+        assert_eq!(successful.len(), 1);
+        assert_eq!(latest, successful[0]);
+        assert_eq!(latest & 1, 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn safe_drag_cancel_advances_generation_and_blocks_stale_begin() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let state = AtomicU64::new(4);
+        let snapshot = state.load(Ordering::Acquire);
+        cancel_safe_drag_state(&state);
+        assert_eq!(state.load(Ordering::Acquire), 6);
+        assert!(begin_safe_drag_token_from(&state, snapshot).is_none());
+        assert_eq!(state.load(Ordering::Acquire), 6);
+        let token = begin_safe_drag_token(&state).expect("begin after cancel failed");
+        assert_eq!(token, 9);
+        cancel_safe_drag_state(&state);
+        assert_eq!(state.load(Ordering::Acquire), 10);
     }
 
     #[cfg(target_os = "windows")]

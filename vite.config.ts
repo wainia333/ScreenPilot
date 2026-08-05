@@ -57,6 +57,7 @@ export default defineConfig({
         'src/features/vision/geometry.ts',
         'src/features/vision/history.ts',
         'src/features/vision/machine.ts',
+        'src/features/vision/safe-floating-drag.ts',
         'src/shared/markdown/stable-markdown.ts',
       ],
     },

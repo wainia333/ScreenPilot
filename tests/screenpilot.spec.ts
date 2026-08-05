@@ -1641,6 +1641,74 @@ test('Vision keeps the end of long prompts visible before and after capture', as
   await expectLongPromptEndVisible(`${'这是一段用于验证截图后 Vision 输入框末尾文字仍然完整可见的长文本。'.repeat(18)}截图后末尾`)
 })
 
+test('Vision floating drag uses the safe native command repeatedly and recovers from failure', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  const floatingRoot = page.locator('[data-screenpilot-floating-layout="true"]')
+  await expect(floatingRoot).toBeVisible()
+  const thumb = floatingRoot.locator('img[alt="snap"]')
+  await expect(thumb).toBeVisible()
+
+  const dragThumb = async (button: 'left' | 'middle' | 'right' = 'left') => {
+    const box = await thumb.boundingBox()
+    if (box === null) throw new Error('Vision floating drag handle is missing')
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+    await page.mouse.move(x, y)
+    await page.mouse.down({ button })
+    await page.mouse.move(x + 36, y + 12, { steps: 3 })
+    await page.mouse.up({ button })
+  }
+  const safeDragCalls = () => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { safeDragCalls: number } }
+  ).__SCREENPILOT_TEST__.safeDragCalls)
+  const safeDragRejectsRemaining = () => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { safeDragRejectsRemaining: number } }
+  ).__SCREENPILOT_TEST__.safeDragRejectsRemaining)
+
+  await dragThumb()
+  await expect.poll(safeDragCalls).toBe(1)
+  await dragThumb()
+  await expect.poll(safeDragCalls).toBe(2)
+  await dragThumb()
+  await expect.poll(safeDragCalls).toBe(3)
+
+  await page.getByPlaceholder('问点什么...').click()
+  await page.getByTitle('历史').click()
+  await page.getByTitle('历史').click()
+  await dragThumb('middle')
+  await dragThumb('right')
+  await expect.poll(safeDragCalls).toBe(3)
+
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_TEST__: { safeDragRejectsRemaining: number }
+      __SCREENPILOT_SAFE_DRAG_UNHANDLED__?: number
+    }
+    testWindow.__SCREENPILOT_TEST__.safeDragRejectsRemaining = 1
+    testWindow.__SCREENPILOT_SAFE_DRAG_UNHANDLED__ = 0
+    window.addEventListener('unhandledrejection', () => {
+      testWindow.__SCREENPILOT_SAFE_DRAG_UNHANDLED__ = (testWindow.__SCREENPILOT_SAFE_DRAG_UNHANDLED__ ?? 0) + 1
+    }, { once: true })
+  })
+  await dragThumb()
+  await expect.poll(safeDragCalls).toBe(4)
+  await expect.poll(safeDragRejectsRemaining).toBe(0)
+  await dragThumb()
+  await expect.poll(safeDragCalls).toBe(5)
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_SAFE_DRAG_UNHANDLED__?: number }
+  ).__SCREENPILOT_SAFE_DRAG_UNHANDLED__ ?? 0)).toBe(0)
+  await expect(page.getByPlaceholder('问点什么...')).toBeVisible()
+})
+
 test('vision captures, annotates and answers without stale stream pollution', async ({ page }) => {
   await installVisionTauriMock(page)
   await page.setViewportSize({ width: 1280, height: 720 })

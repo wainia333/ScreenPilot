@@ -37,6 +37,8 @@ export async function installVisionTauriMock(
       floatingHasScreenshot: true,
       floatingMinimumHeight: 0,
       floatingDeferredResponsesRemaining: Math.max(0, deferSetResponses || 0),
+      safeDragCalls: 0,
+      safeDragRejectsRemaining: 0,
     }
     const settings = {
       hotkey: 'F2',
@@ -349,6 +351,14 @@ export async function installVisionTauriMock(
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)
         visionTestState.floatingAppliedRects.push(floatingRect)
+        return null
+      }
+      if (command === 'vision_start_safe_drag') {
+        visionTestState.safeDragCalls += 1
+        if (visionTestState.safeDragRejectsRemaining > 0) {
+          visionTestState.safeDragRejectsRemaining -= 1
+          throw new Error('Synthetic safe drag failure')
+        }
         return null
       }
       if (command.startsWith('vision_')) return null
