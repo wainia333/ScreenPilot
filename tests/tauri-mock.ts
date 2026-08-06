@@ -22,6 +22,8 @@ export async function installVisionTauriMock(
     let nativeResizeFeedbackFlip = false
     let nativeResizeFeedbackCount = 0
     let nativeResizeFeedbackBaseWidth: number | null = null
+    const floatingPadding = 8
+    const floatingInset = floatingPadding * 2
     const visionTestState = {
       showCount: 0,
       translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string }[],
@@ -280,11 +282,11 @@ export async function installVisionTauriMock(
           Math.round(Math.max(220, Math.min(480, referenceViewportHeight * 0.45))) * 2 / 3,
         )
         const dialogHeight = Math.round(screenshotDialogHeight * (hasScreenshot ? 1 : 3 / 2))
-        const chatInitialHeight = 56 + 8 + dialogHeight + 2
+        const chatInitialHeight = 56 + 8 + dialogHeight + 2 + floatingInset
         const floatingRect = {
           width: Number(rect?.width),
           height: screenshotTranslation
-            ? Math.min(requestedHeight, positionedTranslation ? 224 : 400)
+            ? Math.min(requestedHeight, positionedTranslation ? 224 + floatingInset : 400 + floatingInset)
             : requestedHeight,
         }
         if (!screenshotTranslation && requestedHeight > 96) {
@@ -346,7 +348,9 @@ export async function installVisionTauriMock(
           : true
         const floatingRect = {
           width: Number(rect?.width),
-          height: location.hash.includes('mode=translate') ? Math.min(requestedHeight, 224) : requestedHeight,
+          height: location.hash.includes('mode=translate')
+            ? Math.min(requestedHeight, 224 + floatingInset)
+            : requestedHeight,
         }
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)

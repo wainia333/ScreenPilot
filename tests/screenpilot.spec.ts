@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { VISION_FLOATING_PADDING } from '../src/features/vision/dialog-sizing'
 import { installVisionTauriMock } from './tauri-mock'
 
 async function expectAccessible(page: Page, excludedSelectors: readonly string[] = []) {
@@ -1946,7 +1947,7 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
     window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
     }
-  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(282)
+  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(298)
   const answerInitial = await answer.boundingBox()
   if (answerInitial === null) throw new Error('Large-model answer geometry is missing')
   const answerNative = await page.evaluate(() => (
@@ -1955,17 +1956,17 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
     }
   ).__SCREENPILOT_TEST__.floatingRect)
   if (answerNative === null) throw new Error('Large-model native geometry is missing')
-  expect(Math.abs(answerNative.height - (answerInitial.height + 66))).toBeLessThanOrEqual(1)
+  expect(Math.abs(answerNative.height - (answerInitial.height + 82))).toBeLessThanOrEqual(1)
 
   await page.setViewportSize({
     width: Math.round(answerNative.width),
     height: Math.round(answerNative.height),
   })
   await expect(answer).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
-  await expectSettledViewportBottom(answer, Math.round(answerNative.height))
+  await expectSettledViewportBottom(answer, Math.round(answerNative.height - VISION_FLOATING_PADDING))
   const answerFloatingInitial = await answer.boundingBox()
   if (answerFloatingInitial === null) throw new Error('Floating answer geometry is missing')
-  expect(Math.abs(answerFloatingInitial.y + answerFloatingInitial.height - answerNative.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(answerFloatingInitial.y + answerFloatingInitial.height - (answerNative.height - VISION_FLOATING_PADDING))).toBeLessThanOrEqual(1)
 
   await page.setViewportSize({
     width: Math.round(answerNative.width),
@@ -1973,10 +1974,10 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
   })
   await expect.poll(async () => (await answer.boundingBox())?.height ?? 0)
     .toBeGreaterThan(answerFloatingInitial.height + 100)
-  await expectSettledViewportBottom(answer, Math.round(answerNative.height + 120))
+  await expectSettledViewportBottom(answer, Math.round(answerNative.height + 120 - VISION_FLOATING_PADDING))
   const answerExpanded = await answer.boundingBox()
   if (answerExpanded === null) throw new Error('Expanded answer geometry is missing')
-  expect(Math.abs(answerExpanded.y + answerExpanded.height - (answerNative.height + 120))).toBeLessThanOrEqual(1)
+  expect(Math.abs(answerExpanded.y + answerExpanded.height - (answerNative.height + 120 - VISION_FLOATING_PADDING))).toBeLessThanOrEqual(1)
 
   const promptPage = await page.context().newPage()
   promptPage.on('console', (message) => {
@@ -2008,18 +2009,18 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
   ).__SCREENPILOT_TEST__.floatingRect)
   if (promptNative === null) throw new Error('Prompt preview native geometry is missing')
   expect(Math.abs(promptNative.height - answerNative.height)).toBeLessThanOrEqual(1)
-  expect(Math.abs(promptNative.height - (promptInitial.height + 66))).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptNative.height - (promptInitial.height + 82))).toBeLessThanOrEqual(1)
 
   await promptPage.setViewportSize({
     width: Math.round(promptNative.width),
     height: Math.round(promptNative.height),
   })
   await expect(preview).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
-  await expectSettledViewportBottom(preview, Math.round(promptNative.height))
+  await expectSettledViewportBottom(preview, Math.round(promptNative.height - VISION_FLOATING_PADDING))
   const promptFloatingInitial = await preview.boundingBox()
   if (promptFloatingInitial === null) throw new Error('Floating prompt geometry is missing')
   expect(Math.abs(promptFloatingInitial.height - answerFloatingInitial.height)).toBeLessThanOrEqual(1)
-  expect(Math.abs(promptFloatingInitial.y + promptFloatingInitial.height - promptNative.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptFloatingInitial.y + promptFloatingInitial.height - (promptNative.height - VISION_FLOATING_PADDING))).toBeLessThanOrEqual(1)
 
   await promptPage.setViewportSize({
     width: Math.round(promptNative.width),
@@ -2027,11 +2028,11 @@ test('Vision prompt preview reuses the large-model native edge resize frame', as
   })
   await expect.poll(async () => (await preview.boundingBox())?.height ?? 0)
     .toBeGreaterThan(promptFloatingInitial.height + 100)
-  await expectSettledViewportBottom(preview, Math.round(promptNative.height + 120))
+  await expectSettledViewportBottom(preview, Math.round(promptNative.height + 120 - VISION_FLOATING_PADDING))
   const promptExpanded = await preview.boundingBox()
   if (promptExpanded === null) throw new Error('Expanded prompt geometry is missing')
   expect(Math.abs(promptExpanded.height - answerExpanded.height)).toBeLessThanOrEqual(1)
-  expect(Math.abs(promptExpanded.y + promptExpanded.height - (promptNative.height + 120))).toBeLessThanOrEqual(1)
+  expect(Math.abs(promptExpanded.y + promptExpanded.height - (promptNative.height + 120 - VISION_FLOATING_PADDING))).toBeLessThanOrEqual(1)
   const promptResizeFeedback = await promptPage.evaluate(() => (
     window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
@@ -2105,7 +2106,7 @@ test('Vision text-only answer and prompt optimization use the expanded native fr
     window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
     }
-  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(390)
+  ).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(406)
   const answerNative = await page.evaluate(() => (
     window as typeof window & {
       __SCREENPILOT_TEST__: {
@@ -2116,8 +2117,8 @@ test('Vision text-only answer and prompt optimization use the expanded native fr
     }
   ).__SCREENPILOT_TEST__)
   if (answerNative.floatingRect === null) throw new Error('Text-only native geometry is missing')
-  expect(answerNative.floatingRect.height).toBe(390)
-  expect(answerNative.floatingMinimumHeight).toBe(390)
+  expect(answerNative.floatingRect.height).toBe(406)
+  expect(answerNative.floatingMinimumHeight).toBe(406)
   expect(answerNative.floatingHasScreenshot).toBe(false)
 
   await page.setViewportSize({ width: Math.round(answerNative.floatingRect.width), height: 190 })
@@ -2142,8 +2143,8 @@ test('Vision text-only answer and prompt optimization use the expanded native fr
     }
   ).__SCREENPILOT_TEST__)
   if (promptNative.floatingRect === null) throw new Error('Text-only prompt native geometry is missing')
-  expect(promptNative.floatingRect.height).toBe(390)
-  expect(promptNative.floatingMinimumHeight).toBe(390)
+  expect(promptNative.floatingRect.height).toBe(406)
+  expect(promptNative.floatingMinimumHeight).toBe(406)
   expect(promptNative.floatingHasScreenshot).toBe(false)
   await promptPage.setViewportSize({ width: Math.round(promptNative.floatingRect.width), height: 190 })
   await expect.poll(async () => Math.round((await preview.boundingBox())?.height ?? 0)).toBe(324)
@@ -2231,9 +2232,13 @@ test('Vision floating surface keeps its client geometry after horizontal and ver
           floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
           viewportWidth: Math.round(window.innerWidth),
           viewportHeight: Math.round(window.innerHeight),
+          frameLeft: Math.round(frameRect.left),
+          frameTop: Math.round(frameRect.top),
+          panelLeft: Math.round(panelRect.left),
           frameRight: Math.round(frameRect.right),
           panelRight: Math.round(panelRect.right),
           panelBottom: Math.round(panelRect.bottom),
+          pseudoContent: getComputedStyle(panel, '::after').content,
           hitRegionCleared: (window as typeof window & {
             __SCREENPILOT_TEST__: { floatingHitRegion: unknown }
           }).__SCREENPILOT_TEST__.floatingHitRegion === null,
@@ -2242,9 +2247,13 @@ test('Vision floating surface keeps its client geometry after horizontal and ver
         floating: true,
         viewportWidth: horizontalFirst ? resizedWidth : Math.round(native.width),
         viewportHeight: horizontalFirst ? Math.round(native.height) : resizedHeight,
-        frameRight: horizontalFirst ? resizedWidth : Math.round(native.width),
-        panelRight: horizontalFirst ? resizedWidth : Math.round(native.width),
-        panelBottom: horizontalFirst ? Math.round(native.height) : resizedHeight,
+        frameLeft: VISION_FLOATING_PADDING,
+        frameTop: VISION_FLOATING_PADDING,
+        panelLeft: VISION_FLOATING_PADDING,
+        frameRight: (horizontalFirst ? resizedWidth : Math.round(native.width)) - VISION_FLOATING_PADDING,
+        panelRight: (horizontalFirst ? resizedWidth : Math.round(native.width)) - VISION_FLOATING_PADDING,
+        panelBottom: (horizontalFirst ? Math.round(native.height) : resizedHeight) - VISION_FLOATING_PADDING,
+        pseudoContent: 'none',
         hitRegionCleared: true,
       })
     }
@@ -2268,9 +2277,13 @@ test('Vision floating surface keeps its client geometry after horizontal and ver
         floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
         viewportWidth: Math.round(window.innerWidth),
         viewportHeight: Math.round(window.innerHeight),
+        frameLeft: Math.round(frameRect.left),
+        frameTop: Math.round(frameRect.top),
+        panelLeft: Math.round(panelRect.left),
         frameRight: Math.round(frameRect.right),
         panelRight: Math.round(panelRect.right),
         panelBottom: Math.round(panelRect.bottom),
+        pseudoContent: getComputedStyle(panel, '::after').content,
         hitRegionCleared: (window as typeof window & {
           __SCREENPILOT_TEST__: { floatingHitRegion: unknown }
         }).__SCREENPILOT_TEST__.floatingHitRegion === null,
@@ -2279,9 +2292,13 @@ test('Vision floating surface keeps its client geometry after horizontal and ver
       floating: true,
       viewportWidth: resizedWidth,
       viewportHeight: resizedHeight,
-      frameRight: resizedWidth,
-      panelRight: resizedWidth,
-      panelBottom: resizedHeight,
+      frameLeft: VISION_FLOATING_PADDING,
+      frameTop: VISION_FLOATING_PADDING,
+      panelLeft: VISION_FLOATING_PADDING,
+      frameRight: resizedWidth - VISION_FLOATING_PADDING,
+      panelRight: resizedWidth - VISION_FLOATING_PADDING,
+      panelBottom: resizedHeight - VISION_FLOATING_PADDING,
+      pseudoContent: 'none',
       hitRegionCleared: true,
     })
 
@@ -2300,17 +2317,25 @@ test('Vision floating surface keeps its client geometry after horizontal and ver
         floating: panel.dataset.screenpilotFloatingDialogCard === 'true',
         viewportWidth: Math.round(window.innerWidth),
         viewportHeight: Math.round(window.innerHeight),
+        frameLeft: Math.round(frameRect.left),
+        frameTop: Math.round(frameRect.top),
+        panelLeft: Math.round(panelRect.left),
         frameRight: Math.round(frameRect.right),
         panelRight: Math.round(panelRect.right),
         panelBottom: Math.round(panelRect.bottom),
+        pseudoContent: getComputedStyle(panel, '::after').content,
       }
     }, cardSelector)).toEqual({
       floating: true,
       viewportWidth: shrinkWidth,
       viewportHeight: shrinkHeight,
-      frameRight: shrinkWidth,
-      panelRight: shrinkWidth,
-      panelBottom: shrinkHeight,
+      frameLeft: VISION_FLOATING_PADDING,
+      frameTop: VISION_FLOATING_PADDING,
+      panelLeft: VISION_FLOATING_PADDING,
+      frameRight: shrinkWidth - VISION_FLOATING_PADDING,
+      panelRight: shrinkWidth - VISION_FLOATING_PADDING,
+      panelBottom: shrinkHeight - VISION_FLOATING_PADDING,
+      pseudoContent: 'none',
     })
   }
 
@@ -2379,7 +2404,7 @@ test('Vision floating layout retries a deferred native resize before recording s
     }
   ).__SCREENPILOT_TEST__)
   if (native.floatingRect === null) throw new Error('Retried native geometry is missing')
-  expect(native.floatingRect.height).toBe(390)
+  expect(native.floatingRect.height).toBe(406)
   expect(native.floatingRects.length).toBeLessThan(12)
 
   const profileParity = await page.evaluate(async () => {
@@ -2393,14 +2418,14 @@ test('Vision floating layout retries a deferred native resize before recording s
       }
     }
     await testWindow.__TAURI_INTERNALS__.invoke('vision_set_floating', {
-      rect: { width: 480, height: 390, hasScreenshot: false },
+      rect: { width: 496, height: 406, hasScreenshot: false },
     })
     const textOnly = {
       height: testWindow.__SCREENPILOT_TEST__.floatingRect?.height ?? 0,
       hasScreenshot: testWindow.__SCREENPILOT_TEST__.floatingHasScreenshot,
     }
     await testWindow.__TAURI_INTERNALS__.invoke('vision_set_floating', {
-      rect: { width: 480, height: 282 },
+      rect: { width: 496, height: 298 },
     })
     const compact = {
       height: testWindow.__SCREENPILOT_TEST__.floatingRect?.height ?? 0,
@@ -2410,8 +2435,8 @@ test('Vision floating layout retries a deferred native resize before recording s
       rect: {
         from: { x: 0, y: 0 },
         to: { x: 4, y: 4 },
-        width: 480,
-        height: 56,
+        width: 496,
+        height: 72,
       },
     })
     return {
@@ -2420,8 +2445,8 @@ test('Vision floating layout retries a deferred native resize before recording s
       omittedFlyHasScreenshot: testWindow.__SCREENPILOT_TEST__.floatingHasScreenshot,
     }
   })
-  expect(profileParity.textOnly).toEqual({ height: 390, hasScreenshot: false })
-  expect(profileParity.compact).toEqual({ height: 282, hasScreenshot: true })
+  expect(profileParity.textOnly).toEqual({ height: 406, hasScreenshot: false })
+  expect(profileParity.compact).toEqual({ height: 298, hasScreenshot: true })
   expect(profileParity.omittedFlyHasScreenshot).toBe(true)
 })
 
@@ -2468,8 +2493,8 @@ test('Vision mode transitions replace the previous screenshot height profile', a
     }
   ).__SCREENPILOT_TEST__)
   if (restoredNative.floatingRect === null) throw new Error('Restored text-only native geometry is missing')
-  expect(restoredNative.floatingRect.height).toBe(390)
-  expect(restoredNative.floatingMinimumHeight).toBe(390)
+  expect(restoredNative.floatingRect.height).toBe(406)
+  expect(restoredNative.floatingMinimumHeight).toBe(406)
   expect(restoredNative.floatingHasScreenshot).toBe(false)
 
   await page.reload()
@@ -2796,7 +2821,7 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
   await expect(page).toHaveScreenshot('screenshot-translation.png')
 })
 
-test('chat card fills a floating window after native edge resize', async ({ page }) => {
+test('chat card preserves its shadow inset after native edge resize', async ({ page }) => {
     await installVisionTauriMock(page, undefined, false)
     await page.setViewportSize({ width: 1280, height: 720 })
     await page.goto('/?window=vision#vision?mode=chat')
@@ -2840,7 +2865,8 @@ test('chat card fills a floating window after native edge resize', async ({ page
 
     const resizedHeight = initialHeight + 160
     await page.setViewportSize({ width, height: resizedHeight })
-    await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom))).toBe(resizedHeight)
+    await expect.poll(async () => card.evaluate((element) => Math.round(element.getBoundingClientRect().bottom)))
+      .toBe(resizedHeight - VISION_FLOATING_PADDING)
     const resizedBox = await card.boundingBox()
     if (resizedBox === null) throw new Error('chat resized geometry is missing')
     expect(resizedBox.height).toBeGreaterThan(initialBox.height + 100)
@@ -2873,9 +2899,9 @@ test('OCR floating window follows measured text height without viewport resize f
   expect(initialFloatingSequence.length).toBeGreaterThanOrEqual(2)
   const provisionalRect = initialFloatingSequence.at(0)
   if (provisionalRect === undefined) throw new Error('OCR provisional floating geometry is missing')
-  expect(provisionalRect.height).toBeLessThanOrEqual(224)
+  expect(provisionalRect.height).toBeLessThanOrEqual(240)
   expect(provisionalRect.height).toBeGreaterThanOrEqual(96)
-  expect(initialFloatingSequence.every((rect) => rect.height <= 400)).toBe(true)
+  expect(initialFloatingSequence.every((rect) => rect.height <= 416)).toBe(true)
   await page.setViewportSize({
     width: Math.round(initialRect.width),
     height: Math.round(initialRect.height),
@@ -2888,6 +2914,24 @@ test('OCR floating window follows measured text height without viewport resize f
   expect(contentDrivenBox).not.toBeNull()
   if (contentDrivenBox === null) throw new Error('OCR card geometry is missing')
   expect(contentDrivenBox.height).toBeLessThan(400)
+  await expect.poll(() => card.evaluate((element) => {
+    const animating = element.getAnimations().some((animation) => animation.playState !== 'finished')
+    if (animating) return null
+    const rect = element.getBoundingClientRect()
+    return {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      right: Math.round(window.innerWidth - rect.right),
+      bottom: Math.round(window.innerHeight - rect.bottom),
+      pseudoContent: getComputedStyle(element, '::after').content,
+    }
+  })).toEqual({
+    left: VISION_FLOATING_PADDING,
+    top: VISION_FLOATING_PADDING,
+    right: VISION_FLOATING_PADDING,
+    bottom: VISION_FLOATING_PADDING,
+    pseudoContent: 'none',
+  })
   const shortSourceGeometry = await page.locator('.ocr-editable, .ocr-markdown').first().evaluate((element) => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
@@ -2966,16 +3010,16 @@ test('long OCR source scrolls independently without pushing translation below th
   await expect(page.getByText('OCR line 1 with enough text to wrap inside the source pane.')).toBeVisible()
   await expect.poll(async () => page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
-  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBeGreaterThan(224)
+  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBeGreaterThan(240)
   const measuredRect = await page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
   }).__SCREENPILOT_TEST__.floatingRect)
   if (measuredRect === null) throw new Error('OCR measured floating geometry is missing')
-  expect(measuredRect.height).toBeLessThanOrEqual(400)
+  expect(measuredRect.height).toBeLessThanOrEqual(416)
   await page.setViewportSize({ width: Math.round(measuredRect.width), height: Math.round(measuredRect.height) })
   await expect.poll(async () => page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
-  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(400)
+  }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBe(416)
   const cappedRect = await page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
   }).__SCREENPILOT_TEST__.floatingRect)
@@ -2985,14 +3029,14 @@ test('long OCR source scrolls independently without pushing translation below th
   const measuredHeight = await page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
   }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)
-  expect(measuredHeight).toBeLessThanOrEqual(400)
+  expect(measuredHeight).toBeLessThanOrEqual(416)
   const floatingSequence = await page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRects: { height: number }[] }
   }).__SCREENPILOT_TEST__.floatingRects.slice())
   expect(floatingSequence.length).toBeGreaterThanOrEqual(2)
-  expect(floatingSequence[0]?.height).toBeLessThanOrEqual(224)
-  expect(floatingSequence.every((rect) => rect.height <= 400)).toBe(true)
-  expect(Math.max(...floatingSequence.map((rect) => rect.height))).toBe(400)
+  expect(floatingSequence[0]?.height).toBeLessThanOrEqual(240)
+  expect(floatingSequence.every((rect) => rect.height <= 416)).toBe(true)
+  expect(Math.max(...floatingSequence.map((rect) => rect.height))).toBe(416)
   const source = page.locator('[data-screenpilot-ocr-source="true"]')
   await expect(source).toBeVisible()
   const geometry = await source.evaluate((element) => ({

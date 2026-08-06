@@ -82,6 +82,8 @@ const VISION_FLOATING_GAP: f64 = 8.0;
 const VISION_DIALOG_MIN_HEIGHT: f64 = 220.0;
 const VISION_DIALOG_MAX_HEIGHT: f64 = 480.0;
 const VISION_DIALOG_VIEWPORT_RATIO: f64 = 0.45;
+const VISION_FLOATING_PADDING: f64 = 8.0;
+const VISION_TRANSLATION_POSITIONED_MAX_HEIGHT: f64 = 224.0;
 // The frosted dialog starts two logical pixels below READY_BAR_HEIGHT + GAP
 // because the bar's painted frame contributes its edge. The vendor prompt
 // observer does not include those pixels when it reports the requested native
@@ -218,7 +220,11 @@ fn vision_dialog_minimum_height(initial_height: f64) -> f64 {
 }
 
 fn vision_chat_frame_height(dialog_height: f64) -> f64 {
-    VISION_READY_BAR_HEIGHT + VISION_FLOATING_GAP + dialog_height + VISION_DIALOG_FRAME_COMPENSATION
+    VISION_READY_BAR_HEIGHT
+        + VISION_FLOATING_GAP
+        + dialog_height
+        + VISION_DIALOG_FRAME_COMPENSATION
+        + VISION_FLOATING_PADDING * 2.0
 }
 
 fn vision_monitor_logical_height(window: &WebviewWindow) -> f64 {
@@ -838,7 +844,11 @@ fn floating_height_for_stage(height: f64, screenshot_translation: bool, position
         return height;
     }
 
-    height.min(if positioned { 224.0 } else { TRANSLATOR_HEIGHT })
+    height.min(if positioned {
+        VISION_TRANSLATION_POSITIONED_MAX_HEIGHT + VISION_FLOATING_PADDING * 2.0
+    } else {
+        TRANSLATOR_HEIGHT + VISION_FLOATING_PADDING * 2.0
+    })
 }
 
 fn floating_size_matches(
@@ -2774,8 +2784,9 @@ mod tests {
             VISION_READY_BAR_HEIGHT
                 + VISION_FLOATING_GAP
                 + vision_dialog_height_for_mode(720.0, true)
-                + VISION_DIALOG_FRAME_COMPENSATION,
-            282.0
+                + VISION_DIALOG_FRAME_COMPENSATION
+                + VISION_FLOATING_PADDING * 2.0,
+            298.0
         );
     }
 
@@ -2829,7 +2840,7 @@ mod tests {
 
     #[test]
     fn screenshot_translation_starts_compact_and_caps_measured_height() {
-        assert_eq!(floating_height_for_stage(420.0, true, true), 224.0);
+        assert_eq!(floating_height_for_stage(420.0, true, true), 240.0);
         assert_eq!(floating_height_for_stage(188.0, true, true), 188.0);
         assert_eq!(floating_height_for_stage(188.0, true, false), 188.0);
         assert_eq!(
@@ -2838,7 +2849,7 @@ mod tests {
         );
         assert_eq!(
             floating_height_for_stage(TRANSLATOR_HEIGHT + 120.0, true, false),
-            TRANSLATOR_HEIGHT
+            TRANSLATOR_HEIGHT + VISION_FLOATING_PADDING * 2.0
         );
         assert_eq!(floating_height_for_stage(420.0, false, true), 420.0);
         assert_eq!(floating_height_for_stage(620.0, false, false), 620.0);
@@ -2908,18 +2919,18 @@ mod tests {
 
     #[test]
     fn uses_the_first_resizable_rect_initial_height() {
-        assert_eq!(floating_height_for_initial(388.0, Some(282.0)), 282.0);
-        assert_eq!(floating_height_for_initial(420.0, Some(282.0)), 282.0);
+        assert_eq!(floating_height_for_initial(388.0, Some(298.0)), 298.0);
+        assert_eq!(floating_height_for_initial(420.0, Some(298.0)), 298.0);
         assert_eq!(floating_height_for_initial(278.0, None), 278.0);
     }
 
     #[test]
     fn uses_the_reduced_dialog_height_for_initial_and_followup_native_sizes() {
         assert_eq!(vision_dialog_minimum_height(216.0), 216.0);
-        assert_eq!(vision_chat_frame_height(216.0), 282.0);
+        assert_eq!(vision_chat_frame_height(216.0), 298.0);
         assert_eq!(
             vision_chat_frame_height(vision_dialog_height_for_mode(720.0, false)),
-            390.0
+            406.0
         );
     }
 

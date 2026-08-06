@@ -6,6 +6,10 @@ const TEXT_ONLY_DIALOG_RATIO = 3 / 2
 const READY_BAR_HEIGHT = 56
 const FLOATING_GAP = 8
 const FRAME_COMPENSATION = 2
+// The native transparent Vision surface needs a real client-side margin so
+// the original card ring/shadow can paint outside the card without being
+// clipped by the HWND bounds.
+export const VISION_FLOATING_PADDING = 8
 
 export function visionAnswerHeight(viewportHeight: number): number {
   return Math.round(Math.max(
@@ -20,6 +24,9 @@ export function visionDialogHeight(viewportHeight: number, hasScreenshot: boolea
 }
 
 export function visionDialogFrameHeight(viewportHeight: number, hasScreenshot: boolean): number {
-  return READY_BAR_HEIGHT + FLOATING_GAP + visionDialogHeight(viewportHeight, hasScreenshot) + FRAME_COMPENSATION
+  return READY_BAR_HEIGHT
+    + FLOATING_GAP
+    + visionDialogHeight(viewportHeight, hasScreenshot)
+    + FRAME_COMPENSATION
+    + VISION_FLOATING_PADDING * 2
 }
-

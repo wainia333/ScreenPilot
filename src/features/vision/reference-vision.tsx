@@ -8,7 +8,7 @@ import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
 import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 import { safeExternalUrl } from './citation-links'
-import { visionDialogHeight } from './dialog-sizing'
+import { VISION_FLOATING_PADDING, visionDialogHeight } from './dialog-sizing'
 import { isVisionPromptInput, scheduleVisionPromptCaretSync } from './prompt-input-scroll'
 import { installSafeFloatingDrag } from './safe-floating-drag'
 
@@ -340,7 +340,7 @@ export default function ReferenceVisionAdapter() {
           const top = promptPreviewCard.getBoundingClientRect().top
           syncFloatingDialogLayout(
             promptPreviewCard,
-            window.innerHeight - top,
+            window.innerHeight - top - VISION_FLOATING_PADDING,
             promptPanel,
             dialogMinimumHeight,
           )
@@ -383,7 +383,7 @@ export default function ReferenceVisionAdapter() {
           const top = answerCard.getBoundingClientRect().top
           syncFloatingDialogLayout(
             answerCard,
-            window.innerHeight - top,
+            window.innerHeight - top - VISION_FLOATING_PADDING,
             promptPanel,
             dialogMinimumHeight,
           )
@@ -459,7 +459,7 @@ export default function ReferenceVisionAdapter() {
         && isFloatingResultSurface(translateCard)
       const floatingTranslateMatchesViewport = floatingTranslateSurface
         && translateRect !== null
-        && Math.abs(window.innerHeight - translateRect.height) <= 12
+        && Math.abs(window.innerHeight - VISION_FLOATING_PADDING * 2 - translateRect.height) <= 12
       if (translateCard instanceof HTMLElement && floatingTranslateMatchesViewport) {
         settledTranslateCards.add(translateCard)
       }
@@ -478,8 +478,11 @@ export default function ReferenceVisionAdapter() {
             requestedTranslateHeights.set(translateCard, desiredHeight)
             void invoke('vision_set_floating', {
               rect: {
-                width: Math.ceil(translateLayoutWidth > 0 ? translateLayoutWidth : translateRect.width),
-                height: desiredHeight,
+                width: Math.ceil(
+                  (translateLayoutWidth > 0 ? translateLayoutWidth : translateRect.width)
+                    + VISION_FLOATING_PADDING * 2,
+                ),
+                height: desiredHeight + VISION_FLOATING_PADDING * 2,
               },
             }).catch((error: unknown) => console.error('Failed to expand screenshot translation window', error))
           }
@@ -511,7 +514,7 @@ export default function ReferenceVisionAdapter() {
       )
       if (source instanceof HTMLElement && source.querySelector('.ocr-editable, .ocr-markdown') !== null) {
         const reachedHeightLimit = floatingTranslateSettled
-          && window.innerHeight >= OCR_FLOATING_MAX_HEIGHT - 1
+          && window.innerHeight >= OCR_FLOATING_MAX_HEIGHT + VISION_FLOATING_PADDING * 2 - 1
         if (reachedHeightLimit) {
           const sourceHeight = Math.max(92, Math.floor(body.getBoundingClientRect().height * 0.42))
           source.dataset.screenpilotOcrSource = 'true'

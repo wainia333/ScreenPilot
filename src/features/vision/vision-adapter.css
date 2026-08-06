@@ -187,7 +187,10 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
 }
 
 [data-screenpilot-floating-translate-card="true"] {
-  height: 100vh !important;
+  /* The native OCR window has an 8px transparent inset on each edge. Keep
+     the painted card in the content box so its original outer shadow has
+     real pixels to occupy instead of being clipped by the HWND. */
+  height: calc(100vh - 16px) !important;
   max-height: none !important;
 }
 

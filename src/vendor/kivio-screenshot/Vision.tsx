@@ -10,6 +10,7 @@ import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
+import { VISION_FLOATING_PADDING } from '../../features/vision/dialog-sizing'
 import { appendVisionError, mergeVisionResponse, VisionRequestLifecycle } from '../../features/vision/request-lifecycle'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
@@ -774,7 +775,7 @@ function domRectToRect(rect: DOMRect): Rect | null {
 const TRANSITION_MS = 380
 const NATIVE_FLOATING_FLY_MS = 260
 const SELECT_BAR_COLLAPSE_MS = 120
-const FLOATING_PADDING = 0
+const FLOATING_PADDING = VISION_FLOATING_PADDING
 const FLOATING_GAP = 8
 const HIT_REGION_MARGIN = 2
 const CHAT_AUTO_FOLLOW_THRESHOLD_PX = 48
@@ -1734,9 +1735,13 @@ export default function Vision() {
       // native window remains the source of truth while a user drag is active.
       if (floatingRebased && modeRef.current === 'chat' && stageRef.current !== 'select') {
         setBarRect(prev => {
-          const width = Math.max(1, Math.round(nextViewport.w))
-          if (prev.x === 0 && prev.y === 0 && prev.width === width) return prev
-          return { ...prev, x: 0, y: 0, width }
+          const width = Math.max(1, Math.round(nextViewport.w - FLOATING_PADDING * 2))
+          if (
+            prev.x === FLOATING_PADDING
+            && prev.y === FLOATING_PADDING
+            && prev.width === width
+          ) return prev
+          return { ...prev, x: FLOATING_PADDING, y: FLOATING_PADDING, width }
         })
       }
     }
@@ -2213,13 +2218,18 @@ export default function Vision() {
     if (!keepFullscreen) {
       fullscreenMetricsRef.current = metrics
       const flySeq = ++nativeFlySeqRef.current
-      const width = Math.round(READY_W)
-      const height = Math.round(target.height)
+      const contentWidth = Math.round(READY_W)
+      const contentHeight = Math.round(target.height)
+      const width = contentWidth + FLOATING_PADDING * 2
+      const height = contentHeight + FLOATING_PADDING * 2
       const fromOrigin = {
-        x: Math.round(winOrigin.x + barRect.x),
-        y: Math.round(winOrigin.y + barRect.y),
+        x: Math.round(winOrigin.x + barRect.x - FLOATING_PADDING),
+        y: Math.round(winOrigin.y + barRect.y - FLOATING_PADDING),
       }
-      const targetOrigin = { x: Math.round(target.windowX), y: Math.round(target.windowY) }
+      const targetOrigin = {
+        x: Math.round(target.windowX - FLOATING_PADDING),
+        y: Math.round(target.windowY - FLOATING_PADDING),
+      }
 
       flushSync(() => {
         setAppLabel(label)
@@ -2233,7 +2243,7 @@ export default function Vision() {
         setJellyActive(false)
         setSelectBarCollapsed(false)
         setBarFlyOffset({ x: 0, y: 0 })
-        setBarRect({ x: 0, y: 0, width })
+        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
         setStage(targetStage)
       })
 
@@ -2256,7 +2266,7 @@ export default function Vision() {
           setFloatingRebased(true)
           setWinOrigin(fromOrigin)
           setViewport({ w: width, h: height })
-          setBarRect({ x: 0, y: 0, width })
+          setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
           setBarRebaseHidden(false)
           floatingSizeRef.current = { width, height, hasScreenshot: true }
         })
@@ -2274,7 +2284,7 @@ export default function Vision() {
         flushSync(() => {
           setWinOrigin(targetOrigin)
           setViewport({ w: width, h: height })
-          setBarRect({ x: 0, y: 0, width })
+          setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
           setBarRebaseHidden(false)
           setBarNoTransition(false)
           setJellyActive(false)
@@ -2293,7 +2303,7 @@ export default function Vision() {
           setBarRect({
             x: Math.round(targetX),
             y: Math.round(targetY),
-            width,
+            width: contentWidth,
           })
         })
       }
@@ -2859,16 +2869,18 @@ export default function Vision() {
   ) => {
     const requestIsCurrent = () => requestId === undefined || visionRequestLifecycleRef.current.isCurrent(requestId)
     if (!requestIsCurrent()) return false
-    const width = Math.round(barRect.width)   // 长度不变
-    const height = READY_BAR_H
-    const slot = computeTopSlot(viewport.w, viewport.h, width)
+    const contentWidth = Math.round(barRect.width)   // 长度不变
+    const contentHeight = READY_BAR_H
+    const width = contentWidth + FLOATING_PADDING * 2
+    const height = contentHeight + FLOATING_PADDING * 2
+    const slot = computeTopSlot(viewport.w, viewport.h, contentWidth)
     const fromOrigin = {
-      x: Math.round(winOrigin.x + barRect.x),
-      y: Math.round(winOrigin.y + barRect.y),
+      x: Math.round(winOrigin.x + barRect.x - FLOATING_PADDING),
+      y: Math.round(winOrigin.y + barRect.y - FLOATING_PADDING),
     }
     const targetOrigin = {
-      x: Math.round(winOrigin.x + slot.x),
-      y: Math.round(winOrigin.y + slot.y),
+      x: Math.round(winOrigin.x + slot.x - FLOATING_PADDING),
+      y: Math.round(winOrigin.y + slot.y - FLOATING_PADDING),
     }
     const flySeq = ++nativeFlySeqRef.current
 
@@ -2891,7 +2903,7 @@ export default function Vision() {
       setJellyActive(false)
       setSelectBarCollapsed(false)
       setBarFlyOffset({ x: 0, y: 0 })
-      setBarRect({ x: 0, y: 0, width })
+      setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
     })
 
     try {
@@ -2910,7 +2922,7 @@ export default function Vision() {
         setFloatingRebased(true)
         setWinOrigin(fromOrigin)
         setViewport({ w: width, h: height })
-        setBarRect({ x: 0, y: 0, width })
+        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
         setBarRebaseHidden(false)
         floatingSizeRef.current = { width, height, hasScreenshot }
       })
@@ -2928,7 +2940,7 @@ export default function Vision() {
       flushSync(() => {
         setWinOrigin(targetOrigin)
         setViewport({ w: width, h: height })
-        setBarRect({ x: 0, y: 0, width })
+        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
         setBarRebaseHidden(false)
         setBarNoTransition(false)
         setJellyActive(false)
@@ -2945,7 +2957,7 @@ export default function Vision() {
         setFloatingRebased(false)
         setBarRebaseHidden(false)
         setBarNoTransition(false)
-        setBarRect({ x: Math.round(slot.x), y: Math.round(slot.y), width })
+        setBarRect({ x: Math.round(slot.x), y: Math.round(slot.y), width: contentWidth })
       })
       return false
     }
@@ -3268,10 +3280,16 @@ export default function Vision() {
     fullscreenMetricsRef.current = metrics
 
     const wasFloating = floatingRebased
-    const width = Math.round(barRect.width || metrics.READY_W)
-    const height = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
-    const localX = wasFloating ? 0 : Math.max(16, Math.min(viewport.w - width - 16, barRect.x))
-    const localY = wasFloating ? 0 : Math.max(16, Math.min(viewport.h - height - 16, barRect.y))
+    const contentWidth = Math.round(barRect.width || metrics.READY_W)
+    const contentHeight = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
+    const width = contentWidth + FLOATING_PADDING * 2
+    const height = contentHeight + FLOATING_PADDING * 2
+    const localX = wasFloating
+      ? barRect.x
+      : Math.max(16, Math.min(viewport.w - contentWidth - 16, barRect.x))
+    const localY = wasFloating
+      ? barRect.y
+      : Math.max(16, Math.min(viewport.h - contentHeight - 16, barRect.y))
     let currentOrigin = winOrigin
     if (wasFloating) {
       try {
@@ -3289,8 +3307,8 @@ export default function Vision() {
     }
     if (restoreSeq !== nativeFlySeqRef.current) return
     const origin = {
-      x: Math.round(currentOrigin.x + localX),
-      y: Math.round(currentOrigin.y + localY),
+      x: Math.round(currentOrigin.x + localX - FLOATING_PADDING),
+      y: Math.round(currentOrigin.y + localY - FLOATING_PADDING),
     }
 
     flushSync(() => {
@@ -3312,7 +3330,7 @@ export default function Vision() {
       setBarInFlight(false)
       setJellyActive(false)
       setSelectBarCollapsed(false)
-      setBarRect({ x: 0, y: 0, width })
+      setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
       floatingSizeRef.current = null
       setStage('answering')
     })
@@ -3333,7 +3351,7 @@ export default function Vision() {
         setFloatingRebased(true)
         setWinOrigin(origin)
         setViewport({ w: width, h: height })
-        setBarRect({ x: 0, y: 0, width })
+        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
         setBarRebaseHidden(false)
         setBarNoTransition(false)
         floatingSizeRef.current = { width, height, hasScreenshot: !restoreTextOnly }
@@ -3346,7 +3364,7 @@ export default function Vision() {
         setFloatingRebased(false)
         setBarRebaseHidden(false)
         setBarNoTransition(false)
-        setBarRect({ x: Math.round(localX), y: Math.round(localY), width })
+        setBarRect({ x: Math.round(localX), y: Math.round(localY), width: contentWidth })
       })
       focusVisionInput([50, 140, 260])
     }
@@ -4000,7 +4018,9 @@ export default function Vision() {
     <div
       className="fixed inset-0 select-none"
       data-screenpilot-floating-layout={isFloatingLayout ? 'true' : undefined}
-      data-screenpilot-floating-width={isFloatingLayout ? String(Math.max(1, Math.round(barRect.width))) : undefined}
+      data-screenpilot-floating-width={isFloatingLayout
+        ? String(Math.max(1, Math.round(barRect.width + FLOATING_PADDING * 2)))
+        : undefined}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
