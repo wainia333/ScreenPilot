@@ -168,10 +168,6 @@ pub(crate) fn safe_drag_active() -> bool {
     VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) & 1 != 0
 }
 
-pub(crate) fn vision_floating_active() -> bool {
-    VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SafeDragMouseButton {
     Left,
@@ -1108,19 +1104,7 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
     apply_floating_window_chrome(&window);
     apply_floating_rect(&window, &rect)?;
     VISION_FLOATING_HAS_SCREENSHOT.store(has_screenshot, Ordering::Release);
-    crate::application::lifecycle::start_vision_compositor_focus_watcher(&app);
     Ok(true)
-}
-
-#[tauri::command]
-pub fn vision_refresh_compositor(app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if vision_floating_active() {
-        if let Some(window) = app.get_webview_window("vision") {
-            crate::application::lifecycle::refresh_vision_compositor(&window);
-        }
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1135,7 +1119,6 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
         window
             .set_ignore_cursor_events(false)
             .map_err(|error| error.to_string())?;
-        crate::application::lifecycle::refresh_vision_compositor(&window);
         use windows::Win32::Foundation::{HWND, POINT, RECT};
         use windows::Win32::Graphics::Dwm::DwmFlush;
         use windows::Win32::UI::Input::KeyboardAndMouse::{

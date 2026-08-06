@@ -1,8 +1,6 @@
 use crate::application::state::AppState;
 use crate::domain::settings::AppSettings;
 use std::collections::HashMap;
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,12 +39,6 @@ impl HotkeyAction {
 }
 
 static HOTKEY_LAST_TRIGGERED: OnceLock<Mutex<HashMap<&'static str, Instant>>> = OnceLock::new();
-
-#[cfg(target_os = "windows")]
-static VISION_FOCUS_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-static VISION_FOCUS_WATCHER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn accept_hotkey_trigger(action: HotkeyAction) -> bool {
     const SUPPRESS_DUPLICATE_WITHIN: Duration = Duration::from_millis(300);
@@ -709,14 +701,6 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
         }
     }
 
-    if window.label() == "vision"
-        && matches!(event, tauri::WindowEvent::Focused(true))
-        && crate::application::commands::vision_floating_active()
-    {
-        #[cfg(target_os = "windows")]
-        refresh_vision_compositor_on_focus(window.app_handle());
-    }
-
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
         if window.label() == "vision" {
@@ -739,120 +723,6 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             let _ = window.hide();
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn schedule_vision_compositor_refresh(app: &AppHandle) {
-    if VISION_FOCUS_REFRESH_PENDING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let Some(target) = app.get_webview_window("vision") else {
-        VISION_FOCUS_REFRESH_PENDING.store(false, Ordering::Release);
-        return;
-    };
-    thread::spawn(move || {
-        // The Vision webview intentionally refocuses its input several times
-        // while Windows activates the transparent floating window. Refresh
-        // after that sequence, otherwise the following SetFocus can discard
-        // the newly submitted composition frame again.
-        thread::sleep(Duration::from_millis(560));
-        let window_for_refresh = target.clone();
-        let main_thread_result = target.run_on_main_thread(move || {
-            if crate::application::commands::vision_floating_active() {
-                refresh_vision_compositor(&window_for_refresh);
-            }
-            VISION_FOCUS_REFRESH_PENDING.store(false, Ordering::Release);
-        });
-        if main_thread_result.is_err() {
-            VISION_FOCUS_REFRESH_PENDING.store(false, Ordering::Release);
-        }
-    });
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn start_vision_compositor_focus_watcher(app: &AppHandle) {
-    if VISION_FOCUS_WATCHER_RUNNING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-
-    let app = app.clone();
-    let hwnd_value = app
-        .get_webview_window("vision")
-        .and_then(|window| window.hwnd().ok())
-        .map(|hwnd| hwnd.0 as usize);
-    thread::spawn(move || {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
-        let mut was_foreground = false;
-        loop {
-            if !crate::application::commands::vision_floating_active() {
-                break;
-            }
-
-            let is_foreground = hwnd_value
-                .map(|value| unsafe {
-                    GetForegroundWindow() == HWND(value as *mut std::ffi::c_void)
-                })
-                .unwrap_or(false);
-            if is_foreground && !was_foreground {
-                // A transparent WebView2 window can receive focus without
-                // emitting a reliable Tauri Focused event. Observe the native
-                // foreground transition as a fallback and use the same delayed
-                // refresh as the normal event path.
-                schedule_vision_compositor_refresh(&app);
-            }
-            was_foreground = is_foreground;
-            thread::sleep(Duration::from_millis(40));
-        }
-        VISION_FOCUS_WATCHER_RUNNING.store(false, Ordering::Release);
-    });
-}
-
-#[cfg(target_os = "windows")]
-fn refresh_vision_compositor_on_focus(app: &AppHandle) {
-    schedule_vision_compositor_refresh(app);
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn refresh_vision_compositor(window: &tauri::WebviewWindow) {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
-    };
-
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    let mut rect = RECT::default();
-    let read_rect = unsafe { GetWindowRect(hwnd, &mut rect).is_ok() };
-    if !read_rect {
-        return;
-    }
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    if width <= 0 || height <= 0 {
-        return;
-    }
-
-    // WebView2 can keep a transparent composition surface after a layered
-    // Vision window is activated. A one-pixel native height transaction forces
-    // the surface to submit a fresh frame; restoring immediately preserves
-    // the exact user-visible geometry.
-    let flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            rect.left,
-            rect.top,
-            width,
-            height.saturating_add(1),
-            flags,
-        );
-        let _ = SetWindowPos(hwnd, None, rect.left, rect.top, width, height, flags);
-    }
-    flush_windows_compositor();
 }
 
 #[cfg(target_os = "windows")]

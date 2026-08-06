@@ -8,7 +8,11 @@ import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
 import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 import { safeExternalUrl } from './citation-links'
-import { VISION_FLOATING_PADDING, visionDialogHeight } from './dialog-sizing'
+import {
+  shouldGrowOcrFloatingWindow,
+  VISION_FLOATING_PADDING,
+  visionDialogHeight,
+} from './dialog-sizing'
 import { isVisionPromptInput, scheduleVisionPromptCaretSync } from './prompt-input-scroll'
 import { installSafeFloatingDrag } from './safe-floating-drag'
 
@@ -70,6 +74,7 @@ const sourceLanguageHost = document.createElement('span')
 const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
 const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
+const translateFloatingContentWidths = new WeakMap<HTMLElement, number>()
 const OCR_FLOATING_MAX_HEIGHT = 400
 languageHost.dataset.screenpilotTargetLanguage = 'true'
 sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
@@ -467,27 +472,63 @@ export default function ReferenceVisionAdapter() {
         && translateCard instanceof HTMLElement
         && settledTranslateCards.has(translateCard)
       if (floatingTranslateSurface && translateCard instanceof HTMLElement) {
+        // `transition-property: none` is the vendor surface's explicit rebase
+        // phase. During that interval Rust is about to run the native HWND
+        // flight with its compact geometry, so an adapter resize would be
+        // overwritten a frame later and appear as a vertical kick. Wait for
+        // the post-flight style commit before taking sole ownership of height.
+        const nativeFlightActive = translateCard.style.transitionProperty === 'none'
+          || translateCard.classList.contains('vision-ocr-jelly-pop')
+        const initialContentWidth = Math.ceil(
+          translateLayoutWidth > 0 ? translateLayoutWidth : (translateRect?.width ?? 0),
+        )
+        if (!translateFloatingContentWidths.has(translateCard) && initialContentWidth > 0) {
+          translateFloatingContentWidths.set(translateCard, initialContentWidth)
+        }
         const header = translateCard.firstElementChild
         const headerHeight = header instanceof HTMLElement ? header.getBoundingClientRect().height : 0
         const desiredHeight = Math.min(
           OCR_FLOATING_MAX_HEIGHT,
           Math.ceil(headerHeight + body.scrollHeight),
         )
-        if (translateRect !== null && desiredHeight > translateRect.height + 1) {
-          if (requestedTranslateHeights.get(translateCard) !== desiredHeight) {
-            requestedTranslateHeights.set(translateCard, desiredHeight)
-            void invoke('vision_set_floating', {
-              rect: {
-                width: Math.ceil(
-                  (translateLayoutWidth > 0 ? translateLayoutWidth : translateRect.width)
-                    + VISION_FLOATING_PADDING * 2,
-                ),
-                height: desiredHeight + VISION_FLOATING_PADDING * 2,
-              },
-            }).catch((error: unknown) => console.error('Failed to expand screenshot translation window', error))
-          }
-        } else {
-          requestedTranslateHeights.delete(translateCard)
+        // The card is allowed to lay out past the cropped WebView viewport
+        // while the compact native flight is settling. Comparing against its
+        // own DOM rect would therefore report 400px even when the HWND exposes
+        // only 224px and leave the pending card permanently invisible. Size
+        // against the actual client viewport available inside the 8px insets.
+        const availableContentHeight = Math.max(
+          0,
+          window.innerHeight - VISION_FLOATING_PADDING * 2,
+        )
+        const lastRequestedHeight = requestedTranslateHeights.get(translateCard)
+        if (shouldGrowOcrFloatingWindow(
+          nativeFlightActive,
+          desiredHeight,
+          availableContentHeight,
+          lastRequestedHeight,
+        )) {
+          // OCR only grows to fit new content. Remember the largest request for
+          // this mounted card instead of clearing it when WebView2 reports the
+          // applied size; otherwise a one-pixel resize echo can submit the same
+          // HWND geometry over and over again.
+          requestedTranslateHeights.set(translateCard, desiredHeight)
+          const contentWidth = translateFloatingContentWidths.get(translateCard)
+            ?? initialContentWidth
+          void invoke<boolean>('vision_set_floating', {
+            rect: {
+              width: contentWidth + VISION_FLOATING_PADDING * 2,
+              height: desiredHeight + VISION_FLOATING_PADDING * 2,
+            },
+          }).then((applied) => {
+            if (!applied && requestedTranslateHeights.get(translateCard) === desiredHeight) {
+              requestedTranslateHeights.delete(translateCard)
+            }
+          }).catch((error: unknown) => {
+            if (requestedTranslateHeights.get(translateCard) === desiredHeight) {
+              requestedTranslateHeights.delete(translateCard)
+            }
+            console.error('Failed to expand screenshot translation window', error)
+          })
         }
       }
       if (translateCard instanceof HTMLElement) {

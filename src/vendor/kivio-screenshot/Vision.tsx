@@ -10,7 +10,12 @@ import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
-import { VISION_FLOATING_PADDING } from '../../features/vision/dialog-sizing'
+import {
+  shouldPromoteVisionBarLayer,
+  shouldReactOwnVisionFloatingResize,
+  shouldRunVisionLandingJelly,
+  VISION_FLOATING_PADDING,
+} from '../../features/vision/dialog-sizing'
 import { appendVisionError, mergeVisionResponse, VisionRequestLifecycle } from '../../features/vision/request-lifecycle'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
@@ -774,6 +779,7 @@ function domRectToRect(rect: DOMRect): Rect | null {
 
 const TRANSITION_MS = 380
 const NATIVE_FLOATING_FLY_MS = 260
+const JELLY_DURATION_MS = 420
 const SELECT_BAR_COLLAPSE_MS = 120
 const FLOATING_PADDING = VISION_FLOATING_PADDING
 const FLOATING_GAP = 8
@@ -1229,7 +1235,6 @@ export default function Vision() {
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
   const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
-  const [translateCardHeight, setTranslateCardHeight] = useState<number | null>(null)
   const [translateOcrMethod, setTranslateOcrMethod] = useState<ScreenshotOcrMethod>('ai')
   const [translateMethod, setTranslateMethod] = useState<ScreenshotTranslationMethod>('ai')
   const [ocrMethodSwitching, setOcrMethodSwitching] = useState(false)
@@ -1306,6 +1311,7 @@ export default function Vision() {
   const speechSeqRef = useRef(0)
   const nativeFlySeqRef = useRef(0)
   const barFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const jellyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const focusReqIdRef = useRef(0)
   const prevStreamingRef = useRef(false)
   const visionStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1474,24 +1480,29 @@ export default function Vision() {
       }
       if (!canFocus()) return
       inputRef.current?.focus({ preventScroll: true })
-      try {
-        await api.visionRefreshCompositor()
-      } catch {
-        // The compositor refresh is a Windows-only best effort.
-      }
       requestAnimationFrame(() => {
-        if (!canFocus()) return
-        inputRef.current?.focus({ preventScroll: true })
-        void api.visionRefreshCompositor().catch(() => {
-          // The compositor refresh is a Windows-only best effort.
-        })
+        if (canFocus()) inputRef.current?.focus({ preventScroll: true })
       })
     }
 
     delays.forEach(delay => window.setTimeout(() => { void run() }, delay))
   }, [])
 
-  const markBarFlight = useCallback((duration = TRANSITION_MS) => {
+  const startLandingJelly = useCallback(() => {
+    if (jellyTimerRef.current) clearTimeout(jellyTimerRef.current)
+    flushSync(() => setJellyActive(true))
+    // `animationend` does not fire when reduced motion disables the CSS
+    // animation. Always demote the compositor layer after the motion window.
+    jellyTimerRef.current = window.setTimeout(() => {
+      jellyTimerRef.current = null
+      setJellyActive(false)
+    }, JELLY_DURATION_MS + 80)
+  }, [])
+
+  const markBarFlight = useCallback((
+    duration = TRANSITION_MS,
+    onSettled?: () => void,
+  ) => {
     if (barFlightTimerRef.current) {
       clearTimeout(barFlightTimerRef.current)
       barFlightTimerRef.current = null
@@ -1500,11 +1511,17 @@ export default function Vision() {
     barFlightTimerRef.current = window.setTimeout(() => {
       barFlightTimerRef.current = null
       setBarInFlight(false)
-    }, duration + 80)
+      onSettled?.()
+    }, duration + 20)
   }, [])
 
   const handleJellyAnimationEnd = useCallback((e: AnimationEvent<HTMLElement>) => {
-    if (e.animationName === 'vision-jelly-pop') setJellyActive(false)
+    if (e.animationName !== 'vision-jelly-pop' && e.animationName !== 'vision-ocr-jelly-pop') return
+    if (jellyTimerRef.current) {
+      clearTimeout(jellyTimerRef.current)
+      jellyTimerRef.current = null
+    }
+    setJellyActive(false)
   }, [])
 
   const enterSelect = useCallback(async () => {
@@ -1525,6 +1542,10 @@ export default function Vision() {
     if (barFlightTimerRef.current) {
       clearTimeout(barFlightTimerRef.current)
       barFlightTimerRef.current = null
+    }
+    if (jellyTimerRef.current) {
+      clearTimeout(jellyTimerRef.current)
+      jellyTimerRef.current = null
     }
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
@@ -2215,9 +2236,10 @@ export default function Vision() {
     const READY_W = target.width
     const targetStage = target.stage
 
+    const flySeq = ++nativeFlySeqRef.current
+
     if (!keepFullscreen) {
       fullscreenMetricsRef.current = metrics
-      const flySeq = ++nativeFlySeqRef.current
       const contentWidth = Math.round(READY_W)
       const contentHeight = Math.round(target.height)
       const width = contentWidth + FLOATING_PADDING * 2
@@ -2290,9 +2312,12 @@ export default function Vision() {
           setJellyActive(false)
           floatingSizeRef.current = { width, height, hasScreenshot: true }
         })
-        requestAnimationFrame(() => {
-          if (flySeq === nativeFlySeqRef.current) setJellyActive(true)
-        })
+        if (
+          flySeq === nativeFlySeqRef.current
+          && shouldRunVisionLandingJelly()
+        ) {
+          startLandingJelly()
+        }
       } catch (err) {
         console.error('[vision-floating] native floating failed:', err)
         flushSync(() => {
@@ -2319,6 +2344,7 @@ export default function Vision() {
         setAppLabel(label)
         setBarNoTransition(true)
         setBarInFlight(true)
+        setJellyActive(false)
         setSelectBarCollapsed(false)
         setBarFlyOffset({
           x: Math.round(fromBarRect.x - nextBarRect.x),
@@ -2331,7 +2357,14 @@ export default function Vision() {
         requestAnimationFrame(() => {
           setBarNoTransition(false)
           setBarFlyOffset({ x: 0, y: 0 })
-          markBarFlight()
+          markBarFlight(TRANSITION_MS, () => {
+            if (
+              flySeq === nativeFlySeqRef.current
+              && shouldRunVisionLandingJelly()
+            ) {
+              startLandingJelly()
+            }
+          })
         })
       })
     }
@@ -2946,9 +2979,13 @@ export default function Vision() {
         setJellyActive(false)
         floatingSizeRef.current = { width, height, hasScreenshot }
       })
-      requestAnimationFrame(() => {
-        if (flySeq === nativeFlySeqRef.current && requestIsCurrent()) setJellyActive(true)
-      })
+      if (
+        flySeq === nativeFlySeqRef.current
+        && requestIsCurrent()
+        && shouldRunVisionLandingJelly()
+      ) {
+        startLandingJelly()
+      }
       return true
     } catch (err) {
       if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
@@ -2961,7 +2998,7 @@ export default function Vision() {
       })
       return false
     }
-  }, [barRect, metrics, viewport, winOrigin])
+  }, [barRect, metrics, startLandingJelly, viewport, winOrigin])
 
   const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[], requestId: string) => {
     // 先只把输入条飞上去（此时还是单条高度），落地后再置 answering，
@@ -3436,6 +3473,14 @@ export default function Vision() {
   // 浮动布局生效条件：原生窗口已经真的缩成小浮窗。
   // 截图后和无截图纯文本对话都走同一套原生浮窗拖动，避免全屏透明层参与鼠标事件。
   const isFloatingLayout = floatingRebased && stage !== 'select'
+  const barMotionActive = shouldPromoteVisionBarLayer(
+    barInFlight,
+    jellyActive,
+    barIntro,
+    hideSelectBar,
+    barFlyOffset.x,
+    barFlyOffset.y,
+  )
   const stableAnswerHeight = isFloatingLayout
     ? fullscreenMetricsRef.current?.ANSWER_H || metrics.ANSWER_H
     : metrics.ANSWER_H
@@ -3465,58 +3510,8 @@ export default function Vision() {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [discardOptimizedPrompt, showPromptPreview])
 
-
-  const measureTranslateCardHeight = useCallback(() => {
-    if (!showTranslateCard) {
-      setTranslateCardHeight(prev => (prev === null ? prev : null))
-      return
-    }
-
-    const rect = translateCardRef.current?.getBoundingClientRect()
-    const next = rect && rect.height >= 1 ? Math.ceil(rect.height) : null
-    setTranslateCardHeight(prev => {
-      if (prev === next) return prev
-      if (prev !== null && next !== null && Math.abs(prev - next) < 1) return prev
-      return next
-    })
-  }, [showTranslateCard])
-
-  useLayoutEffect(() => {
-    measureTranslateCardHeight()
-  }, [
-    measureTranslateCardHeight,
-    showTranslateOriginal,
-    stableAnswerHeight,
-    translateError,
-    translateOriginalError,
-    translateMethod,
-    translateOriginal,
-    translateOcrMethod,
-    translateRetranslating,
-    translateText,
-    ocrMethodSwitching,
-    translationMethodSwitching,
-  ])
-
-  useEffect(() => {
-    if (!showTranslateCard) {
-      setTranslateCardHeight(prev => (prev === null ? prev : null))
-      return
-    }
-
-    const el = translateCardRef.current
-    if (!el || typeof ResizeObserver === 'undefined') {
-      measureTranslateCardHeight()
-      return
-    }
-
-    const observer = new ResizeObserver(() => measureTranslateCardHeight())
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [measureTranslateCardHeight, showTranslateCard])
-
   // 提示词预览卡高度自适应：卡片内容长度不定，必须实测后并进悬浮窗尺寸，
-  // 否则窗口高度不够，卡片会被原生窗口边界裁掉。做法与上面的翻译卡一致。
+  // 否则窗口高度不够，卡片会被原生窗口边界裁掉。
   const measurePromptPreviewCardHeight = useCallback(() => {
     if (!showPromptPreview) {
       setPromptPreviewCardHeight(prev => (prev === null ? prev : null))
@@ -3896,6 +3891,9 @@ export default function Vision() {
     if (stage === 'select') return
     if (!floatingRebased) return
     if (barNoTransition) return
+    // OCR 的窗口高度由 ScreenPilot 适配层根据内容一次性扩展。这里若再观察
+    // 卡片高度并回写同一个 HWND，会让视口高度与卡片高度互相反馈而持续振荡。
+    if (!shouldReactOwnVisionFloatingResize(mode)) return
 
     let cancelled = false
 
@@ -3904,13 +3902,6 @@ export default function Vision() {
 
     if (stage === 'answering') {
       h += FLOATING_GAP + answerLayout.height
-    }
-
-    if ((stage === 'translating' || stage === 'translated') && mode === 'translate') {
-      h = Math.max(
-        h,
-        (translateCardHeight ?? (READY_BAR_H + FLOATING_GAP + stableAnswerHeight)) + FLOATING_PADDING * 2,
-      )
     }
 
     if (mode === 'chat' && historyOpen) {
@@ -3953,8 +3944,6 @@ export default function Vision() {
     mode,
     promptPreviewCardHeight,
     showPromptPreview,
-    stableAnswerHeight,
-    translateCardHeight,
     hasScreenshot,
   ])
 
@@ -4190,12 +4179,11 @@ export default function Vision() {
       {showBar && (
         <div
           ref={barPanelRef}
-          className={`absolute ease-out ${jellyActive && isFloatingLayout ? 'vision-jelly-pop' : ''}`}
+          className="absolute ease-out"
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-          onAnimationEnd={handleJellyAnimationEnd}
           style={{
             left: barRect.x,
             top: barRect.y,
@@ -4203,17 +4191,20 @@ export default function Vision() {
             transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
             transitionDuration: barNoTransition ? '0ms' : `${hideSelectBar ? SELECT_BAR_COLLAPSE_MS : TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro && !hideSelectBar ? 1 : 0.92}) scale(var(--vision-jelly-x, 1), var(--vision-jelly-y, 1))`,
-            willChange: 'transform, opacity',
+            transform: barMotionActive
+              ? `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro && !hideSelectBar ? 1 : 0.92})`
+              : undefined,
+            willChange: barMotionActive ? 'transform, opacity' : undefined,
             opacity: barIntro && !hideSelectBar ? 1 : 0,
             visibility: barRebaseHidden ? 'hidden' : undefined,
             pointerEvents: hideSelectBar || barRebaseHidden ? 'none' : undefined,
           }}
         >
           <div
-            className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 ring-1 ring-[color:var(--kv-panel-edge)] ${stage === 'select' ? 'cursor-default' : 'cursor-move'}`}
+            className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 ring-1 ring-[color:var(--kv-panel-edge)] ${stage === 'select' ? 'cursor-default' : 'cursor-move'} ${jellyActive && isFloatingLayout ? 'vision-jelly-pop' : ''}`}
             data-screenpilot-vision-image={hasScreenshot ? 'true' : 'false'}
             onMouseDown={beginFloatingPanelDrag}
+            onAnimationEnd={handleJellyAnimationEnd}
             data-tauri-drag-region="false"
           >
             <div className="shrink-0 flex items-center gap-2">
@@ -4578,12 +4569,11 @@ export default function Vision() {
       {showTranslateCard && (
         <div
           ref={translateCardRef}
-          className={`absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text ${jellyActive && isFloatingLayout ? 'vision-jelly-pop' : ''}`}
+          className={`absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text ${jellyActive && isFloatingLayout ? 'vision-ocr-jelly-pop' : ''}`}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-          onAnimationEnd={handleJellyAnimationEnd}
           style={{
             left: barRect.x,
             top: barRect.y,
@@ -4594,11 +4584,14 @@ export default function Vision() {
             transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
             transitionDuration: barNoTransition ? '0ms' : `${TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro ? 1 : 0.92}) scale(var(--vision-jelly-x, 1), var(--vision-jelly-y, 1))`,
-            willChange: 'transform, opacity',
+            transform: barMotionActive
+              ? `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro ? 1 : 0.92})`
+              : undefined,
+            willChange: barMotionActive ? 'transform, opacity' : undefined,
             opacity: barIntro ? 1 : 0,
             visibility: barRebaseHidden ? 'hidden' : undefined,
           }}
+          onAnimationEnd={handleJellyAnimationEnd}
           data-tauri-drag-region="false"
         >
           <div

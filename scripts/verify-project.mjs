@@ -18,8 +18,8 @@ const exactFiles = new Map([
   ['src-tauri/src/windows.rs', ['src-tauri/src/windows.rs', 'F25A5100D024E40C4579B780BAEEA3FEA7EA47E17C9220601D83C19BB31EC1B6']],
 ])
 const authorizedPatchedFiles = new Map([
-  ['src/vendor/kivio-screenshot/Vision.tsx', '987121B5BF08B2429B195FB0EBBB6A0FDF8569D439A9230E6B0C4B46FDC66EC2'],
-  ['src/vendor/kivio-screenshot/api/tauri.ts', 'E703BAB4D3DF6748611537430CABE774731B5FA26D135354DECFD75A894F9DB7'],
+  ['src/vendor/kivio-screenshot/Vision.tsx', '1749A29357DE8FD5E75F3570FA9B099B884E81F8BFDB10EB62C42EA0F5C88D41'],
+  ['src/vendor/kivio-screenshot/api/tauri.ts', '3D47CE11CF1EC20057551AFFE97ABA94B388B3880596EC859ACF7058DB5916AF'],
 ])
 const ignoredDirectories = new Set([
   '.git',
@@ -92,6 +92,44 @@ if (!appSource.includes("import('../features/vision/reference-vision')")) {
 const rustSource = readFileSync(join(root, 'src-tauri/src/application/commands/vision.rs'), 'utf8')
 for (const call of ['crate::native_freeze::show', 'crate::native_freeze::capture_active_region_to_png', 'crate::vision::list_windows']) {
   if (!rustSource.includes(call)) failures.push(`生产后端未接入原样截图核心：${call}`)
+}
+const lifecycleSource = readFileSync(join(root, 'src-tauri/src/application/lifecycle.rs'), 'utf8')
+const visionSource = readFileSync(join(root, 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
+const visionAdapterSource = readFileSync(join(root, 'src/features/vision/reference-vision.tsx'), 'utf8')
+const promptBarStart = visionSource.indexOf('{showBar &&')
+const promptBarEnd = visionSource.indexOf('{showTranslateCard &&', promptBarStart)
+const promptBarBody = promptBarStart >= 0 && promptBarEnd > promptBarStart
+  ? visionSource.slice(promptBarStart, promptBarEnd)
+  : ''
+if (
+  lifecycleSource.includes('VISION_FOCUS_REFRESH')
+  || lifecycleSource.includes('refresh_vision_compositor')
+  || rustSource.includes('vision_refresh_compositor')
+  || visionSource.includes('visionRefreshCompositor')
+) {
+  failures.push('Vision 焦点路径仍在强制刷新透明 WebView2 合成表面')
+}
+if (
+  !visionSource.includes('shouldPromoteVisionBarLayer')
+  || !promptBarBody.includes("willChange: barMotionActive ? 'transform, opacity' : undefined")
+  || promptBarBody.includes("willChange: 'transform, opacity'")
+) {
+  failures.push('Vision 静止输入条仍被永久提升为独立合成层')
+}
+const translateCardStart = visionSource.indexOf('{showTranslateCard &&')
+const translateCardBody = translateCardStart >= 0 ? visionSource.slice(translateCardStart) : ''
+if (
+  visionSource.includes('translateCardHeight')
+  || visionSource.includes('measureTranslateCardHeight')
+  || !visionSource.includes('shouldReactOwnVisionFloatingResize(mode)')
+) {
+  failures.push('OCR 浮窗仍存在重复的 React/vendor 高度控制源')
+}
+if (
+  !translateCardBody.includes('vision-ocr-jelly-pop')
+  || !visionAdapterSource.includes("translateCard.classList.contains('vision-ocr-jelly-pop')")
+) {
+  failures.push('OCR 结果卡没有使用与尺寸反馈隔离的落地回弹动画')
 }
 
 if (failures.length > 0) {

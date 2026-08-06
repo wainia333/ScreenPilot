@@ -302,7 +302,6 @@ export const api = {
     invoke<boolean>('vision_set_hit_region', { rect }),
   visionSetIgnoreCursorEvents: (ignore: boolean) =>
     invoke<void>('vision_set_ignore_cursor_events', { ignore }),
-  visionRefreshCompositor: () => invoke<void>('vision_refresh_compositor'),
   takeVisionSelection: () => invoke<string>('take_vision_selection'),
 
   checkUpdate: () => invoke<UpdateInfo>('check_github_latest_release'),

@@ -1642,6 +1642,60 @@ test('Vision keeps the end of long prompts visible before and after capture', as
   await expectLongPromptEndVisible(`${'这是一段用于验证截图后 Vision 输入框末尾文字仍然完整可见的长文本。'.repeat(18)}截图后末尾`)
 })
 
+test('Vision landing spring is temporary and leaves the settled WebView surface unpromoted', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, false)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_JELLY_SAMPLES__?: { animationName: string; visibleBar: boolean }[]
+      __SCREENPILOT_JELLY_OBSERVER__?: MutationObserver
+    }
+    testWindow.__SCREENPILOT_JELLY_SAMPLES__ = []
+    testWindow.__SCREENPILOT_JELLY_OBSERVER__ = new MutationObserver(() => {
+      const element = document.querySelector<HTMLElement>('.vision-jelly-pop')
+      if (element === null) return
+      testWindow.__SCREENPILOT_JELLY_SAMPLES__?.push({
+        animationName: getComputedStyle(element).animationName,
+        visibleBar: element.dataset.screenpilotVisionImage === 'true',
+      })
+    })
+    testWindow.__SCREENPILOT_JELLY_OBSERVER__.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+      subtree: true,
+    })
+  })
+
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_JELLY_SAMPLES__?: { animationName: string; visibleBar: boolean }[]
+    }
+  ).__SCREENPILOT_JELLY_SAMPLES__ ?? [])).toContainEqual({
+    animationName: 'vision-jelly-pop',
+    visibleBar: true,
+  })
+
+  const visibleBar = page.locator('[data-screenpilot-vision-image="true"]')
+  const outerPanel = visibleBar.locator('xpath=..')
+  await expect(visibleBar).not.toHaveClass(/vision-jelly-pop/u, { timeout: 2_000 })
+  await expect.poll(() => outerPanel.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return { transform: computed.transform, willChange: computed.willChange }
+  })).toEqual({ transform: 'none', willChange: 'auto' })
+  await expect.poll(() => visibleBar.evaluate((element) => {
+    const computed = getComputedStyle(element)
+    return { transform: computed.transform, willChange: computed.willChange }
+  })).toEqual({ transform: 'none', willChange: 'auto' })
+})
+
 test('Vision floating drag uses the safe native command repeatedly and recovers from failure', async ({ page }) => {
   await installVisionTauriMock(page, undefined, false)
   await page.setViewportSize({ width: 1280, height: 720 })
@@ -2877,11 +2931,62 @@ test('OCR floating window follows measured text height without viewport resize f
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto('/?window=vision#vision?mode=translate')
   await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_OCR_JELLY_SAMPLES__?: string[]
+      __SCREENPILOT_OCR_JELLY_OBSERVER__?: MutationObserver
+      __SCREENPILOT_OCR_JELLY_GEOMETRY__?: { start?: number; end?: number }
+      __SCREENPILOT_OCR_JELLY_VISIBLE__?: boolean
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }
+    testWindow.__SCREENPILOT_OCR_JELLY_SAMPLES__ = []
+    testWindow.__SCREENPILOT_OCR_JELLY_GEOMETRY__ = {}
+    testWindow.__SCREENPILOT_OCR_JELLY_OBSERVER__ = new MutationObserver(() => {
+      const element = document.querySelector<HTMLElement>('.vision-ocr-jelly-pop')
+      const geometry = testWindow.__SCREENPILOT_OCR_JELLY_GEOMETRY__
+      if (element !== null) {
+        testWindow.__SCREENPILOT_OCR_JELLY_SAMPLES__?.push(getComputedStyle(element).animationName)
+        const rect = element.getBoundingClientRect()
+        const floatingInset = 8
+        testWindow.__SCREENPILOT_OCR_JELLY_VISIBLE__ = getComputedStyle(element).opacity === '1'
+          && rect.top >= floatingInset - 1
+          && rect.bottom <= window.innerHeight - floatingInset + 1
+        if (geometry !== undefined && geometry.start === undefined) {
+          geometry.start = testWindow.__SCREENPILOT_TEST__.floatingRects.length
+        }
+      } else if (geometry?.start !== undefined && geometry.end === undefined) {
+        geometry.end = testWindow.__SCREENPILOT_TEST__.floatingRects.length
+      }
+    })
+    testWindow.__SCREENPILOT_OCR_JELLY_OBSERVER__.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+      subtree: true,
+    })
+  })
   await page.mouse.move(120, 160)
   await page.mouse.down()
   await page.mouse.move(620, 460, { steps: 8 })
   await page.mouse.up()
   await expect(page.getByText('Short OCR text.')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_OCR_JELLY_SAMPLES__?: string[] }
+  ).__SCREENPILOT_OCR_JELLY_SAMPLES__ ?? [])).toContain('vision-ocr-jelly-pop')
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_OCR_JELLY_VISIBLE__?: boolean }
+  ).__SCREENPILOT_OCR_JELLY_VISIBLE__ ?? false)).toBe(true)
+  await expect(page.locator('.vision-ocr-jelly-pop')).toHaveCount(0, { timeout: 2_000 })
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_OCR_JELLY_GEOMETRY__?: { start?: number; end?: number }
+    }
+  ).__SCREENPILOT_OCR_JELLY_GEOMETRY__?.end ?? -1)).toBeGreaterThanOrEqual(0)
+  const jellyGeometry = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_OCR_JELLY_GEOMETRY__?: { start?: number; end?: number }
+    }
+  ).__SCREENPILOT_OCR_JELLY_GEOMETRY__)
+  expect(jellyGeometry?.start).toBe(jellyGeometry?.end)
 
   await expect.poll(async () => page.evaluate(() => {
     const state = (window as typeof window & {
@@ -2938,9 +3043,17 @@ test('OCR floating window follows measured text height without viewport resize f
   }))
   expect(shortSourceGeometry.scrollHeight).toBeLessThanOrEqual(shortSourceGeometry.clientHeight + 1)
 
+  const settledRequestCount = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+  }).__SCREENPILOT_TEST__.floatingRects.length)
+  await page.waitForTimeout(650)
+  expect(await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+  }).__SCREENPILOT_TEST__.floatingRects.length)).toBe(settledRequestCount)
+
 })
 
-test('OCR floating geometry ignores one-pixel native width feedback', async ({ page }) => {
+test('OCR floating geometry ignores visual transforms and one-pixel native width feedback', async ({ page }) => {
   await installVisionTauriMock(page, 'Short OCR text.', false, undefined, 0, 0, 1)
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto('/?window=vision#vision?mode=translate')
@@ -2954,12 +3067,28 @@ test('OCR floating geometry ignores one-pixel native width feedback', async ({ p
     const state = (window as typeof window & { __SCREENPILOT_TEST__: { floatingRect: unknown } }).__SCREENPILOT_TEST__
     return state.floatingRect !== null
   })).toBe(true)
+  const initialNativeRect = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect)
+  if (initialNativeRect === null) throw new Error('OCR initial native geometry is missing')
+  await page.setViewportSize({
+    width: Math.round(initialNativeRect.width),
+    height: Math.round(initialNativeRect.height),
+  })
+  await expect(page.locator('html')).toHaveAttribute('data-screenpilot-floating-translate-window', 'true')
   await expect.poll(async () => page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
     }).__SCREENPILOT_TEST__
     return state.floatingRects.length
-  })).toBeGreaterThan(5)
+  })).toBeGreaterThanOrEqual(2)
+  await page.waitForTimeout(300)
+  expect(await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })).toBe(2)
   const requestCountBeforeTransform = await page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
@@ -2970,12 +3099,46 @@ test('OCR floating geometry ignores one-pixel native width feedback', async ({ p
     const card = element as HTMLElement
     card.style.transform = 'scale(0.8)'
   })
-  await expect.poll(async () => page.evaluate(() => {
+  await page.waitForTimeout(300)
+  expect(await page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
     }).__SCREENPILOT_TEST__
     return state.floatingRects.length
-  })).toBeGreaterThan(requestCountBeforeTransform)
+  })).toBe(requestCountBeforeTransform)
+  await page.locator('[data-screenpilot-window-frame="true"]').evaluate((element) => {
+    const card = element as HTMLElement
+    card.style.transform = ''
+  })
+  await page.evaluate(async () => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } }
+      __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<unknown> }
+    }
+    const rect = testWindow.__SCREENPILOT_TEST__.floatingRect
+    for (let index = 0; index < 2; index += 1) {
+      await testWindow.__TAURI_INTERNALS__.invoke('vision_set_floating', {
+        rect: { width: rect.width, height: rect.height, hasScreenshot: true },
+      })
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    }
+  })
+  await page.waitForTimeout(300)
+  const requestCountAfterFeedback = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })
+  expect(requestCountAfterFeedback).toBeGreaterThanOrEqual(requestCountBeforeTransform + 2)
+  expect(requestCountAfterFeedback).toBeLessThanOrEqual(requestCountBeforeTransform + 4)
+  await page.waitForTimeout(300)
+  expect(await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { floatingRects: { width: number; height: number }[] }
+    }).__SCREENPILOT_TEST__
+    return state.floatingRects.length
+  })).toBe(requestCountAfterFeedback)
   const samples = await page.evaluate(async () => {
     const card = document.querySelector<HTMLElement>('[data-screenpilot-window-frame="true"]')
     if (card === null) return null
@@ -3008,6 +3171,23 @@ test('long OCR source scrolls independently without pushing translation below th
   await page.mouse.move(620, 460, { steps: 8 })
   await page.mouse.up()
   await expect(page.getByText('OCR line 1 with enough text to wrap inside the source pane.')).toBeVisible()
+  const provisionalRect = await page.evaluate(() => (window as typeof window & {
+    __SCREENPILOT_TEST__: { floatingRect: { width: number; height: number } | null }
+  }).__SCREENPILOT_TEST__.floatingRect)
+  if (provisionalRect === null) throw new Error('OCR provisional floating geometry is missing')
+  await page.locator('[data-screenpilot-window-frame="true"]').evaluate((element) => {
+    // Reproduce WebView2's real post-flight state: the DOM card can already
+    // lay out to its 400px cap while the native client viewport is only 224px.
+    // Native sizing must compare against the viewport, not this card rect.
+    ;(element as HTMLElement).style.minHeight = '400px'
+  })
+  // A real native resize updates WebView2's viewport before the adapter gets
+  // its turn. Playwright's command mock records the HWND size, so mirror that
+  // one browser event explicitly and let the sole OCR height owner measure.
+  await page.setViewportSize({
+    width: Math.round(provisionalRect.width),
+    height: Math.round(provisionalRect.height),
+  })
   await expect.poll(async () => page.evaluate(() => (window as typeof window & {
     __SCREENPILOT_TEST__: { floatingRect: { height: number } | null }
   }).__SCREENPILOT_TEST__.floatingRect?.height ?? 0)).toBeGreaterThan(240)

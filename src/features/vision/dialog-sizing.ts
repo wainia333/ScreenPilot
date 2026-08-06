@@ -11,6 +11,52 @@ const FRAME_COMPENSATION = 2
 // clipped by the HWND bounds.
 export const VISION_FLOATING_PADDING = 8
 
+export type VisionSurfaceMode = 'chat' | 'translate'
+
+/**
+ * The spring landing belongs to the Vision prompt bar. Applying the same
+ * alternating X/Y scale to the OCR result card looks like geometry jitter.
+ */
+export function shouldRunVisionLandingJelly(): boolean {
+  return true
+}
+
+/**
+ * OCR content height is owned by the ScreenPilot translation adapter. Letting
+ * the vendor card observer resize the same HWND creates a viewport/card-height
+ * feedback loop, so React only owns follow-up sizing for the chat surface.
+ */
+export function shouldReactOwnVisionFloatingResize(mode: VisionSurfaceMode): boolean {
+  return mode === 'chat'
+}
+
+export function shouldGrowOcrFloatingWindow(
+  nativeFlightActive: boolean,
+  desiredHeight: number,
+  availableHeight: number,
+  lastRequestedHeight?: number,
+): boolean {
+  return !nativeFlightActive
+    && desiredHeight > availableHeight + 1
+    && (lastRequestedHeight === undefined || desiredHeight > lastRequestedHeight + 1)
+}
+
+export function shouldPromoteVisionBarLayer(
+  inFlight: boolean,
+  jellyActive: boolean,
+  introVisible: boolean,
+  selectBarHidden: boolean,
+  offsetX: number,
+  offsetY: number,
+): boolean {
+  return inFlight
+    || jellyActive
+    || !introVisible
+    || selectBarHidden
+    || offsetX !== 0
+    || offsetY !== 0
+}
+
 export function visionAnswerHeight(viewportHeight: number): number {
   return Math.round(Math.max(
     ANSWER_MIN_HEIGHT,
