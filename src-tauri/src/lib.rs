@@ -69,6 +69,7 @@ pub fn run() {
             vision_delete_history_image,
             vision_close,
             vision_set_floating,
+            vision_refresh_compositor,
             vision_start_safe_drag,
             vision_fly_floating,
             vision_set_hit_region,

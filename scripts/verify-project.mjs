@@ -18,8 +18,8 @@ const exactFiles = new Map([
   ['src-tauri/src/windows.rs', ['src-tauri/src/windows.rs', 'F25A5100D024E40C4579B780BAEEA3FEA7EA47E17C9220601D83C19BB31EC1B6']],
 ])
 const authorizedPatchedFiles = new Map([
-  ['src/vendor/kivio-screenshot/Vision.tsx', '87B3C6B05510E331EE36148A69DFD800B141B5CB6DBFB78D6D8024783A0B27BF'],
-  ['src/vendor/kivio-screenshot/api/tauri.ts', '3D47CE11CF1EC20057551AFFE97ABA94B388B3880596EC859ACF7058DB5916AF'],
+  ['src/vendor/kivio-screenshot/Vision.tsx', '2854A008461388DBB546FA5680D073C36CE23C1EDAF7B048E2A50E9D5D5686CE'],
+  ['src/vendor/kivio-screenshot/api/tauri.ts', 'E703BAB4D3DF6748611537430CABE774731B5FA26D135354DECFD75A894F9DB7'],
 ])
 const ignoredDirectories = new Set([
   '.git',

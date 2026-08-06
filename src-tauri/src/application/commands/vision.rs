@@ -90,6 +90,7 @@ const VISION_DIALOG_VIEWPORT_RATIO: f64 = 0.45;
 const VISION_DIALOG_FRAME_COMPENSATION: f64 = 2.0;
 static VISION_FLOATING_RESIZABLE: AtomicBool = AtomicBool::new(false);
 static VISION_FLOATING_HAS_SCREENSHOT: AtomicBool = AtomicBool::new(true);
+static VISION_FLOATING_REGION_LOCKED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 static VISION_SAFE_DRAG_STATE: AtomicU64 = AtomicU64::new(0);
 
@@ -163,6 +164,10 @@ pub(crate) fn safe_drag_active() -> bool {
 #[cfg(target_os = "windows")]
 pub(crate) fn safe_drag_active() -> bool {
     VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) & 1 != 0
+}
+
+pub(crate) fn vision_floating_active() -> bool {
+    VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +405,7 @@ fn request_native_freeze_close() {}
 pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
+    VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
     let state = app.state::<AppState>();
     let existing_vision_visible = app
         .get_webview_window("vision")
@@ -703,6 +709,7 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     cancel_safe_drag();
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
+    VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
     let mut failures = Vec::new();
     close_native_freeze(app);
     if let Some(window) = app.get_webview_window("vision") {
@@ -979,6 +986,14 @@ fn should_clear_floating_region(
     resizable && (!already_resizable || profile_changed)
 }
 
+fn should_reject_floating_hit_region(locked: bool, rect: Option<HitRegionRect>) -> bool {
+    locked && rect.is_some()
+}
+
+fn resolve_vision_cursor_passthrough(ignore: bool, floating_locked: bool) -> bool {
+    ignore && !floating_locked
+}
+
 fn floating_height_for_initial(height: f64, initial_height: Option<f64>) -> f64 {
     initial_height.unwrap_or(height)
 }
@@ -1046,6 +1061,7 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
         ..rect
     };
     let resizable = vision_floating_resizable(screenshot_translation, rect.height);
+    VISION_FLOATING_REGION_LOCKED.store(true, Ordering::Release);
     let already_resizable = VISION_FLOATING_RESIZABLE.load(Ordering::Acquire)
         || window.is_resizable().map_err(|error| error.to_string())?;
     let previous_has_screenshot = VISION_FLOATING_HAS_SCREENSHOT.load(Ordering::Acquire);
@@ -1082,7 +1098,19 @@ pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, S
     apply_floating_window_chrome(&window);
     apply_floating_rect(&window, &rect)?;
     VISION_FLOATING_HAS_SCREENSHOT.store(has_screenshot, Ordering::Release);
+    crate::application::lifecycle::start_vision_compositor_focus_watcher(&app);
     Ok(true)
+}
+
+#[tauri::command]
+pub fn vision_refresh_compositor(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if vision_floating_active() {
+        if let Some(window) = app.get_webview_window("vision") {
+            crate::application::lifecycle::refresh_vision_compositor(&window);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1093,6 +1121,11 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        apply_vision_window_region(&window, None)?;
+        window
+            .set_ignore_cursor_events(false)
+            .map_err(|error| error.to_string())?;
+        crate::application::lifecycle::refresh_vision_compositor(&window);
         use windows::Win32::Foundation::{HWND, POINT, RECT};
         use windows::Win32::Graphics::Dwm::DwmFlush;
         use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -1281,6 +1314,13 @@ fn apply_vision_window_region(
 #[tauri::command]
 pub fn vision_set_hit_region(app: AppHandle, rect: Option<HitRegionRect>) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("vision") {
+        if should_reject_floating_hit_region(
+            VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire),
+            rect,
+        ) {
+            apply_vision_window_region(&window, None)?;
+            return Ok(false);
+        }
         apply_vision_window_region(&window, rect)?;
         return Ok(true);
     }
@@ -1291,7 +1331,10 @@ pub fn vision_set_hit_region(app: AppHandle, rect: Option<HitRegionRect>) -> Res
 pub fn vision_set_ignore_cursor_events(app: AppHandle, ignore: bool) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("vision") {
         window
-            .set_ignore_cursor_events(ignore)
+            .set_ignore_cursor_events(resolve_vision_cursor_passthrough(
+                ignore,
+                VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire),
+            ))
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -2824,6 +2867,26 @@ mod tests {
         assert!(should_clear_floating_region(true, true, true));
         assert!(!should_clear_floating_region(true, true, false));
         assert!(!should_clear_floating_region(false, false, true));
+    }
+
+    #[test]
+    fn rejects_late_hit_regions_after_entering_a_resizable_floating_window() {
+        let rect = Some(HitRegionRect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+        assert!(should_reject_floating_hit_region(true, rect));
+        assert!(!should_reject_floating_hit_region(false, rect));
+        assert!(!should_reject_floating_hit_region(true, None));
+    }
+
+    #[test]
+    fn keeps_a_floating_window_hittable_when_a_stale_passthrough_request_arrives() {
+        assert!(!resolve_vision_cursor_passthrough(true, true));
+        assert!(resolve_vision_cursor_passthrough(true, false));
+        assert!(!resolve_vision_cursor_passthrough(false, true));
     }
 
     #[test]

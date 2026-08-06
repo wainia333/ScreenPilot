@@ -1473,8 +1473,17 @@ export default function Vision() {
       }
       if (!canFocus()) return
       inputRef.current?.focus({ preventScroll: true })
+      try {
+        await api.visionRefreshCompositor()
+      } catch {
+        // The compositor refresh is a Windows-only best effort.
+      }
       requestAnimationFrame(() => {
-        if (canFocus()) inputRef.current?.focus({ preventScroll: true })
+        if (!canFocus()) return
+        inputRef.current?.focus({ preventScroll: true })
+        void api.visionRefreshCompositor().catch(() => {
+          // The compositor refresh is a Windows-only best effort.
+        })
       })
     }
 
