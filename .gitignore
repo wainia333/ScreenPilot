@@ -10,3 +10,4 @@ src-tauri/gen/
 .env
 .env.*
 !.env.example
+/综合审查.md
