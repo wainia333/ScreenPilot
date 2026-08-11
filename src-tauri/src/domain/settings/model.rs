@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 pub const SETTINGS_SCHEMA_VERSION: u8 = 1;
+pub const SETTINGS_SECRETS_SCHEMA_VERSION: u8 = 1;
 
 const TRANSLATION_PROMPT: &str = "Translate the following text to {lang}. Output only the translation.\n\nRules:\n- Preserve existing LaTeX formulas exactly (keep $...$ and $$...$$).\n- If formula-like plain text appears, normalize it to proper LaTeX when needed.\n- Keep the original line breaks and list structure when possible.\n- Do not add explanations.\n\n{text}";
 const OCR_PROMPT: &str = "Read all text in this screenshot and output only the recognized content as copy-ready Markdown.\n\nRules:\n- Do not translate, summarize, explain, or add content that is not visible.\n- Reconstruct natural paragraphs: merge visual line wraps inside the same paragraph.\n- Separate real paragraphs with one blank line.\n- Preserve document structure as Markdown when visible: headings, ordered lists, unordered lists, nested lists, block quotes, tables, code blocks, inline code, links, emphasis, bold, italic, strikethrough, and UI labels.\n- Preserve intentional line breaks for lists, tables, code, mathematical formulas, captions, and UI labels.\n- Output mathematical formulas in LaTeX: use $...$ for inline formulas and $$...$$ for standalone/display formulas.\n- Normalize fractions, superscripts, subscripts, roots, integrals, sums, matrices, Greek letters, and other mathematical symbols to proper LaTeX when they appear in formulas.\n- Preserve non-formula punctuation and symbols exactly.\n- Do not invent Markdown styling when the visual evidence is unclear.\n- Do not wrap the whole result in Markdown code fences; use code fences only for visible code blocks.\n- If no text is visible, output an empty string.";
@@ -120,17 +121,6 @@ pub struct ShortcutSettings {
     pub prompt_optimizer: String,
 }
 
-impl ShortcutSettings {
-    pub fn values(&self) -> [&str; 4] {
-        [
-            &self.translator,
-            &self.vision,
-            &self.screenshot_translation,
-            &self.prompt_optimizer,
-        ]
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralSettings {
@@ -225,7 +215,61 @@ pub struct SettingsExport {
     pub includes_secrets: bool,
     pub settings: AppSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub secrets: Option<std::collections::HashMap<String, Vec<String>>>,
+    pub secrets: Option<SettingsSecrets>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSecrets {
+    pub schema_version: u8,
+    pub providers: HashMap<String, Vec<String>>,
+    pub adapters: HashMap<String, Vec<String>>,
+}
+
+impl SettingsSecrets {
+    pub fn new(
+        providers: HashMap<String, Vec<String>>,
+        adapters: HashMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            schema_version: SETTINGS_SECRETS_SCHEMA_VERSION,
+            providers,
+            adapters,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SettingsSecrets {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct VersionedSecrets {
+            schema_version: u8,
+            #[serde(default)]
+            providers: HashMap<String, Vec<String>>,
+            #[serde(default)]
+            adapters: HashMap<String, Vec<String>>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SecretsWire {
+            Versioned(VersionedSecrets),
+            Legacy(HashMap<String, Vec<String>>),
+        }
+
+        match SecretsWire::deserialize(deserializer)? {
+            SecretsWire::Versioned(value) => Ok(Self {
+                schema_version: value.schema_version,
+                providers: value.providers,
+                adapters: value.adapters,
+            }),
+            SecretsWire::Legacy(providers) => Ok(Self::new(providers, HashMap::new())),
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -369,6 +413,10 @@ impl AppSettings {
         {
             self.screenshot_translation.translation_method = TranslationMethod::Microsoft;
         }
+        #[cfg(target_os = "windows")]
+        if self.screenshot_translation.ocr_method == OcrMethod::System {
+            self.screenshot_translation.ocr_method = OcrMethod::Chaoxing;
+        }
     }
 
     pub fn migrate_prompt_defaults(&mut self) {
@@ -402,6 +450,9 @@ impl AppSettings {
         if !(1..=5).contains(&self.retry.attempts) {
             return Err("Retry attempts must be between 1 and 5".into());
         }
+        if self.general.image_archive_enabled && self.general.image_archive_path.trim().is_empty() {
+            return Err("Screenshot archive path cannot be empty when archiving is enabled".into());
+        }
         if !matches!(
             self.translation.source_language.as_str(),
             "auto" | "zh-CN" | "en" | "ja" | "ko"
@@ -426,7 +477,16 @@ impl AppSettings {
         ) {
             return Err("Screenshot translation target language is unsupported".into());
         }
-        let shortcuts = self.shortcuts.values();
+        let mut shortcuts = vec![self.shortcuts.translator.as_str()];
+        if self.vision.enabled {
+            shortcuts.push(self.shortcuts.vision.as_str());
+        }
+        if self.screenshot_translation.enabled {
+            shortcuts.push(self.shortcuts.screenshot_translation.as_str());
+        }
+        if self.prompt_optimizer.enabled {
+            shortcuts.push(self.shortcuts.prompt_optimizer.as_str());
+        }
         if shortcuts.iter().any(|value| value.trim().is_empty()) {
             return Err("Shortcuts cannot be empty".into());
         }
@@ -487,6 +547,7 @@ fn valid_optional_model_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn defaults_round_trip_as_frontend_shape() {
@@ -595,6 +656,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_enabled_screenshot_archiving_without_a_directory() {
+        let mut settings = AppSettings::default();
+        settings.general.image_archive_enabled = true;
+        settings.general.image_archive_path = "  ".into();
+        assert_eq!(
+            settings.validate(),
+            Err("Screenshot archive path cannot be empty when archiving is enabled".into())
+        );
+    }
+
+    #[test]
     fn migrates_only_untouched_prompt_defaults() {
         let mut settings = AppSettings::default();
         settings.translation.prompt = LEGACY_TRANSLATION_PROMPT.into();
@@ -698,5 +770,60 @@ mod tests {
         assert!(settings.translation.ai_model.is_none());
         assert!(settings.screenshot_translation.ocr_model.is_none());
         assert!(settings.screenshot_translation.translation_model.is_none());
+    }
+
+    #[test]
+    fn ignores_shortcut_conflicts_for_disabled_features() {
+        let mut settings = AppSettings::default();
+        settings.vision.enabled = false;
+        settings.shortcuts.vision = settings.shortcuts.translator.clone();
+        settings.validate().expect("disabled shortcut is inactive");
+
+        settings.vision.enabled = true;
+        assert_eq!(settings.validate(), Err("Shortcuts must be unique".into()));
+    }
+
+    #[test]
+    fn settings_secrets_serialize_with_an_independent_schema_version() {
+        let secrets = SettingsSecrets::new(
+            HashMap::from([("provider-a".into(), vec!["provider-secret".into()])]),
+            HashMap::from([("adapter-caiyun-translation".into(), vec!["token".into()])]),
+        );
+
+        assert_eq!(
+            serde_json::to_value(secrets).expect("serialize secrets"),
+            json!({
+                "schemaVersion": SETTINGS_SECRETS_SCHEMA_VERSION,
+                "providers": {"provider-a": ["provider-secret"]},
+                "adapters": {"adapter-caiyun-translation": ["token"]}
+            })
+        );
+    }
+
+    #[test]
+    fn settings_secrets_accept_legacy_flat_provider_maps() {
+        let secrets = serde_json::from_value::<SettingsSecrets>(json!({
+            "provider-a": ["legacy-secret"]
+        }))
+        .expect("deserialize legacy secrets");
+
+        assert_eq!(secrets.schema_version, SETTINGS_SECRETS_SCHEMA_VERSION);
+        assert_eq!(
+            secrets.providers,
+            HashMap::from([("provider-a".into(), vec!["legacy-secret".into()])])
+        );
+        assert!(secrets.adapters.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalizes_unavailable_windows_system_ocr() {
+        let mut settings = AppSettings::default();
+        settings.screenshot_translation.ocr_method = OcrMethod::System;
+        settings.normalize_ai_options();
+        assert_eq!(
+            settings.screenshot_translation.ocr_method,
+            OcrMethod::Chaoxing
+        );
     }
 }

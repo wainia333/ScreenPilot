@@ -52,7 +52,7 @@ export type VisionCursorPosition = {
 export type ModelProvider = {
   id: string
   name: string
-  apiKeys: string[]
+  keyCount: number
   baseUrl: string
   availableModels: string[]
   enabledModels: string[]
@@ -88,22 +88,22 @@ export type Settings = {
     translateProviderId?: string
     translateModel?: string
     baiduOcr?: {
-      apiKey: string
-      secretKey: string
+      apiKeyConfigured: boolean
+      secretKeyConfigured: boolean
       languageType?: string
       accurate?: boolean
     }
     baiduTranslate?: {
-      appId: string
-      appKey: string
+      appIdConfigured: boolean
+      appKeyConfigured: boolean
       sourceLang?: string
     }
     tencentTranslate?: {
-      secretId: string
-      secretKey: string
+      secretIdConfigured: boolean
+      secretKeyConfigured: boolean
     }
     caiyunTranslate?: {
-      token: string
+      tokenConfigured: boolean
     }
     directTranslate?: boolean
     thinkingEnabled?: boolean
@@ -241,11 +241,13 @@ export const api = {
     on<VisionStreamPayload>('vision-stream', (payload) => listener(payload)),
   onVisionTranslateStream: (listener: (payload: VisionTranslateStreamPayload) => void) =>
     on<VisionTranslateStreamPayload>('vision-translate-stream', (payload) => listener(payload)),
+  onVisionClosing: (listener: () => void) =>
+    on('screenpilot:vision-closing', () => listener()),
   visionRequest: () => invoke<void>('vision_request'),
   visionCursorPosition: () => invoke<VisionCursorPosition | null>('vision_cursor_position'),
   visionListWindows: () => invoke<VisionWindowInfo[]>('vision_list_windows'),
   visionCaptureWindow: (windowId: number) =>
-    invoke<{ success: boolean; imageId?: string; error?: string }>('vision_capture_window', { windowId }),
+    invoke<{ success: boolean; imageId?: string; error?: string; archiveWarning?: string }>('vision_capture_window', { windowId }),
   visionCaptureRegion: (params: {
     absoluteX: number
     absoluteY: number
@@ -254,7 +256,7 @@ export const api = {
     width: number
     height: number
     scaleFactor: number
-  }) => invoke<{ success: boolean; imageId?: string; error?: string }>('vision_capture_region', params),
+  }) => invoke<{ success: boolean; imageId?: string; error?: string; archiveWarning?: string }>('vision_capture_region', params),
   visionRegisterAnnotatedImage: (base64Png: string) =>
     invoke<{ success: boolean; imageId?: string; error?: string }>(
       'vision_register_annotated_image', { base64Png }
@@ -280,6 +282,8 @@ export const api = {
     invoke<void>('vision_commit_image_to_history', { imageId }),
   visionDeleteHistoryImage: (imageId: string) =>
     invoke<void>('vision_delete_history_image', { imageId }),
+  visionDeleteTemporaryImage: (imageId: string) =>
+    invoke<void>('vision_delete_temporary_image', { imageId }),
   visionSetFloating: (rect: {
     x?: number
     y?: number

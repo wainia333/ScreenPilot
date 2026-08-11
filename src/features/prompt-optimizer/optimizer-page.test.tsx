@@ -38,10 +38,35 @@ class RecordingDesktop extends FakeDesktopPort {
   }
 }
 
+class DeferredOptimizerDesktop extends RecordingDesktop {
+  readonly pending: {
+    request: PromptOptimizationRequest
+    resolve: (result: PromptOptimizationResult) => void
+  }[] = []
+
+  override optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult> {
+    this.optimizations.push(request)
+    return new Promise((resolve) => {
+      this.pending.push({ request, resolve })
+    })
+  }
+}
+
 describe('OptimizerPage', () => {
   afterEach(() => {
     cleanup()
     localStorage.clear()
+  })
+
+  it('loads the saved English interface language for the standalone optimizer', async () => {
+    const desktop = new RecordingDesktop()
+    await desktop.saveSettings({ ...(await desktop.loadSettings()), language: 'en' })
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+
+    expect(await screen.findByRole('heading', { name: 'Prompt Optimizer' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Original prompt' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Close optimizer' })).toBeInTheDocument()
+    expect(document.documentElement).toHaveAttribute('lang', 'en')
   })
 
   it('uses the OCR result card shell and closes without entering drag mode', async () => {
@@ -57,7 +82,13 @@ describe('OptimizerPage', () => {
     expect(card.querySelector('.ocr-result-body')).not.toBeNull()
     expect(card.querySelector('.ocr-result-divider')).not.toBeNull()
     expect(card.querySelector('.translator-divider')).toBeNull()
-    expect(screen.getByRole('separator', { name: '调整原始提示词和优化结果高度' })).toHaveAttribute('aria-valuenow', '38')
+    const separator = screen.getByRole('separator', { name: '调整原始提示词和优化结果高度' })
+    expect(separator).toHaveAttribute('aria-valuenow', '38')
+    fireEvent.keyDown(separator, { key: 'ArrowDown' })
+    expect(separator).toHaveAttribute('aria-valuenow', '42')
+    fireEvent.keyDown(separator, { key: 'End' })
+    expect(separator).toHaveAttribute('aria-valuenow', '76')
+    expect(localStorage.getItem('screenpilot:optimizer-golden-split-v2')).toBe('0.76')
     const close = screen.getByRole('button', { name: '关闭优化器' })
     fireEvent.click(close)
     expect(desktop.hides).toBe(1)
@@ -129,6 +160,43 @@ describe('OptimizerPage', () => {
     expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('optimized:Summarize the supplied material.')
   })
 
+  it('discards an in-flight result after the source prompt changes', async () => {
+    const desktop = new DeferredOptimizerDesktop()
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const input = screen.getByRole('textbox', { name: '原始提示词' })
+    fireEvent.change(input, { target: { value: 'first prompt' } })
+    fireEvent.click(screen.getByRole('button', { name: '优化' }))
+    expect(desktop.pending).toHaveLength(1)
+    expect(screen.getByRole('button', { name: '优化中…' })).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: 'latest prompt' } })
+    expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: '复制优化结果' })).toBeDisabled()
+    await act(async () => {
+      desktop.pending[0]?.resolve({
+        generation: desktop.pending[0].request.generation,
+        text: 'stale optimized result',
+      })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('')
+    expect(localStorage.getItem('screenpilot:optimizer-history')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '优化' }))
+    expect(desktop.pending).toHaveLength(2)
+    await act(async () => {
+      desktop.pending[1]?.resolve({
+        generation: desktop.pending[1].request.generation,
+        text: 'latest optimized result',
+      })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('latest optimized result')
+    expect(localStorage.getItem('screenpilot:optimizer-history')).toContain('latest prompt')
+    expect(localStorage.getItem('screenpilot:optimizer-history')).not.toContain('first prompt')
+  })
+
   it('shows and synchronizes the optimization history badge', async () => {
     localStorage.setItem('screenpilot:optimizer-history', JSON.stringify([{
       id: 'saved-optimization',
@@ -145,14 +213,14 @@ describe('OptimizerPage', () => {
     expect(historyButton.querySelector('.history-count-badge')).toHaveTextContent('1')
     expect(screen.getByText('历史记录：1 条')).toBeInTheDocument()
     fireEvent.click(historyButton)
-    const menu = screen.getByRole('complementary', { name: '优化历史' })
+    const menu = screen.getByRole('dialog', { name: '优化历史' })
     expect(menu.querySelector('.history-menu-input')).toHaveTextContent('saved prompt')
     expect(menu.querySelector('.history-menu-output')).toBeNull()
     expect(menu).not.toHaveTextContent('saved result')
     fireEvent.click(screen.getByRole('button', { name: '删除历史' }))
     expect(historyButton.querySelector('.history-count-badge')).toBeNull()
     expect(historyButton).not.toHaveClass('history-button-count-1')
-    expect(within(screen.getByRole('complementary', { name: '优化历史' })).getByText('暂无历史记录')).toBeInTheDocument()
+    expect(within(screen.getByRole('dialog', { name: '优化历史' })).getByText('暂无历史记录')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '原始提示词' }), {
       target: { value: 'new prompt' },
     })

@@ -1,12 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReferenceVision from '../../vendor/kivio-screenshot/Vision'
 import { api as referenceVisionApi } from '../../vendor/kivio-screenshot/api/tauri'
 import '../../vendor/kivio-screenshot/index.css'
 import './vision-adapter.css'
-import { installOcrDebounceTimingAdapter } from './ocr-debounce-adapter'
 import { safeExternalUrl } from './citation-links'
 import {
   shouldGrowOcrFloatingWindow,
@@ -15,11 +15,16 @@ import {
 } from './dialog-sizing'
 import { isVisionPromptInput, scheduleVisionPromptCaretSync } from './prompt-input-scroll'
 import { installSafeFloatingDrag } from './safe-floating-drag'
+import { copyFor, translationLanguageOptions } from '../../shared/ui-copy'
+import type { InterfaceLanguage } from '../settings/types'
+import { syncDocumentTheme, type DocumentTheme } from '../../shared/theme'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
 
 type ReferenceSettings = {
+  settingsLanguage?: InterfaceLanguage
+  theme?: DocumentTheme
   translationAiEnabled?: boolean
   translatorProviderId?: string
   translatorModel?: string
@@ -54,20 +59,7 @@ type OverrideResult = {
   text: string
 }
 
-const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
-  { value: 'auto', label: '自动' },
-  { value: 'zh-CN', label: '简体中文' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-]
-const sourceLanguageOptions: { value: SourceLanguage; label: string }[] = [
-  { value: 'auto', label: '自动' },
-  { value: 'zh-CN', label: '简体中文' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-]
+const supportedLanguages = new Set<TargetLanguage>(['auto', 'zh-CN', 'en', 'ja', 'ko'])
 
 const languageHost = document.createElement('span')
 const sourceLanguageHost = document.createElement('span')
@@ -81,11 +73,12 @@ sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
 
 function isTargetLanguage(value: unknown): value is TargetLanguage {
-  return targetLanguageOptions.some((option) => option.value === value)
+  return typeof value === 'string' && supportedLanguages.has(value as TargetLanguage)
 }
 
 function findTranslationMethodSelect(): HTMLSelectElement | null {
-  return Array.from(document.querySelectorAll<HTMLSelectElement>('select')).find((select) => (
+  return document.querySelector<HTMLSelectElement>('[data-screenpilot-translation-method="true"]')
+    ?? Array.from(document.querySelectorAll<HTMLSelectElement>('select')).find((select) => (
     select.querySelector('option[value="microsoft"]') !== null
     && select.querySelector('option[value="google"]') !== null
   )) ?? null
@@ -190,6 +183,7 @@ function syncFloatingDialogLayout(
 }
 
 export default function ReferenceVisionAdapter() {
+  const [interfaceLanguage, setInterfaceLanguage] = useState<InterfaceLanguage>('zh')
   const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('auto')
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>('auto')
   const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '' })
@@ -204,8 +198,9 @@ export default function ReferenceVisionAdapter() {
   const overrideLockedRef = useRef(false)
   const aiAvailabilityRef = useRef({ ocr: true, translation: true })
   const aiAvailabilityLoadedRef = useRef(false)
-
-  useEffect(() => installOcrDebounceTimingAdapter(), [])
+  const t = copyFor(interfaceLanguage)
+  const targetLanguageOptions = translationLanguageOptions(interfaceLanguage)
+  const sourceLanguageOptions = targetLanguageOptions
 
   useEffect(
     () => installSafeFloatingDrag(referenceVisionApi, invoke),
@@ -240,14 +235,25 @@ export default function ReferenceVisionAdapter() {
 
   useEffect(() => {
     let active = true
-    void invoke<ReferenceSettings>('get_settings').then((settings) => {
+    let request = 0
+    const loadSettings = () => {
+      const currentRequest = request + 1
+      request = currentRequest
+      void invoke<ReferenceSettings>('get_settings').then((settings) => {
+        if (!active || currentRequest !== request) return
+      syncDocumentTheme(settings.theme === 'light' || settings.theme === 'dark' ? settings.theme : 'system')
+      const loadedLanguage = settings.settingsLanguage === 'en' ? 'en' : 'zh'
+      setInterfaceLanguage(loadedLanguage)
+      document.documentElement.lang = loadedLanguage === 'zh' ? 'zh-CN' : 'en'
+      document.title = 'ScreenPilot — Vision'
+      if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
       const configuredSource = settings.screenshotTranslation.sourceLanguage
-      if (active && isTargetLanguage(configuredSource)) {
+      if (isTargetLanguage(configuredSource)) {
         sourceLanguageRef.current = configuredSource
         setSourceLanguage(configuredSource)
       }
       const configured = settings.screenshotTranslation.targetLanguage
-      if (active && isTargetLanguage(configured)) {
+      if (isTargetLanguage(configured)) {
         targetLanguageRef.current = configured
         setTargetLanguage(configured)
       }
@@ -267,13 +273,19 @@ export default function ReferenceVisionAdapter() {
       aiAvailabilityLoadedRef.current = true
       window.dispatchEvent(new Event('screenpilot-ai-availability'))
     }).catch((error: unknown) => {
+      if (!active || currentRequest !== request) return
       aiAvailabilityRef.current = { ocr: false, translation: false }
       aiAvailabilityLoadedRef.current = true
       window.dispatchEvent(new Event('screenpilot-ai-availability'))
       console.error('Failed to load screenshot target language', error)
     })
+    }
+    loadSettings()
+    window.addEventListener('vision:reset', loadSettings)
     return () => {
       active = false
+      request += 1
+      window.removeEventListener('vision:reset', loadSettings)
     }
   }, [])
 
@@ -301,12 +313,14 @@ export default function ReferenceVisionAdapter() {
   useEffect(() => {
     let adapterFrame: number | null = null
     const applyAdaptersNow = () => {
-      const send = document.querySelector<HTMLButtonElement>('button:has(svg.lucide-arrow-up)')
-      if (send !== null) send.setAttribute('aria-label', '发送')
+      const send = document.querySelector<HTMLButtonElement>('[data-screenpilot-vision-send="true"]')
+        ?? document.querySelector<HTMLButtonElement>('button:has(svg.lucide-arrow-up)')
+      if (send !== null) send.setAttribute('aria-label', t.send)
 
-      const prompt = document.querySelector<HTMLInputElement>('input[placeholder="问点什么..."], input[placeholder="Ask anything..."]')
-      const promptBar = prompt?.parentElement
-      const promptPanel = promptBar?.parentElement
+      const prompt = document.querySelector<HTMLInputElement>('[data-screenpilot-vision-prompt="true"]')
+        ?? document.querySelector<HTMLInputElement>('input[placeholder="问点什么..."], input[placeholder="Ask anything..."]')
+      const promptBar = prompt?.closest<HTMLElement>('[data-screenpilot-prompt-bar="true"]') ?? prompt?.parentElement
+      const promptPanel = promptBar?.closest<HTMLElement>('[data-screenpilot-prompt-panel="true"]') ?? promptBar?.parentElement
       if (promptBar instanceof HTMLElement) {
         setAttributeIfChanged(promptBar, 'data-screenpilot-prompt-bar', 'true')
         setAttributeIfChanged(promptBar, 'data-screenpilot-window-frame', 'true')
@@ -324,7 +338,9 @@ export default function ReferenceVisionAdapter() {
         // card so the adapter can remove the global focus ring without
         // changing any other Vision control or the vendor source copy.
         const promptPreviewEditor = promptPanel.querySelector<HTMLTextAreaElement>('textarea')
-        const promptPreviewCard = promptPreviewEditor?.closest<HTMLElement>('.window-frosted') ?? null
+        const promptPreviewCard = promptPanel.querySelector<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]')
+          ?? promptPreviewEditor?.closest<HTMLElement>('.window-frosted')
+          ?? null
         document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
           if (card !== promptPreviewCard) {
             card.removeAttribute('data-screenpilot-vision-prompt-preview')
@@ -350,7 +366,8 @@ export default function ReferenceVisionAdapter() {
             dialogMinimumHeight,
           )
         }
-        const answerCard = Array.from(promptPanel.children).find((child) => (
+        const answerCard = promptPanel.querySelector<HTMLElement>('[data-screenpilot-answer-panel="true"]')
+          ?? Array.from(promptPanel.children).find((child) => (
           child instanceof HTMLElement
           && child.classList.contains('window-frosted')
           && child.classList.contains('transition-all')
@@ -367,10 +384,12 @@ export default function ReferenceVisionAdapter() {
             '--screenpilot-dialog-initial-height',
             `${String(dialogInitialHeight)}px`,
           )
-          const answerScroll = answerCard.querySelector<HTMLElement>('.h-full.overflow-y-auto.custom-scrollbar')
+          const answerScroll = answerCard.querySelector<HTMLElement>('[data-screenpilot-answer-scroll="true"]')
+            ?? answerCard.querySelector<HTMLElement>('.h-full.overflow-y-auto.custom-scrollbar')
           if (answerScroll !== null) {
             setAttributeIfChanged(answerScroll, 'data-screenpilot-answer-scroll', 'true')
-            const answerActions = Array.from(answerScroll.children).find((child) => (
+            const answerActions = answerScroll.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
+              ?? Array.from(answerScroll.children).find((child) => (
               child instanceof HTMLElement
               && child.classList.contains('flex')
               && child.classList.contains('items-center')
@@ -443,9 +462,11 @@ export default function ReferenceVisionAdapter() {
       const sourceHeading = source instanceof HTMLElement
         ? source.firstElementChild instanceof HTMLElement ? source.firstElementChild : null
         : null
-      const sourceMethodSelect = sourceHeading?.querySelector<HTMLSelectElement>(
-        'select:not([data-screenpilot-source-language-select="true"])',
-      ) ?? null
+      const sourceMethodSelect = document.querySelector<HTMLSelectElement>('[data-screenpilot-ocr-method="true"]')
+        ?? sourceHeading?.querySelector<HTMLSelectElement>(
+          'select:not([data-screenpilot-source-language-select="true"])',
+        )
+        ?? null
       body.dataset.screenpilotTranslationBody = 'true'
       const translateCard = body.parentElement
       translateCard?.setAttribute('data-screenpilot-window-frame', 'true')
@@ -658,7 +679,7 @@ export default function ReferenceVisionAdapter() {
       sourceLanguageHost.remove()
       resultHost.remove()
     }
-  }, [clearOverride])
+  }, [clearOverride, t.send])
 
   useEffect(() => {
     const body = resultHost.parentElement
@@ -730,7 +751,7 @@ export default function ReferenceVisionAdapter() {
       if (translation.success) {
         setOverrideResult({ status: 'ready', text: translation.translated ?? '' })
       } else {
-        setOverrideResult({ status: 'error', text: translation.error ?? '翻译失败' })
+        setOverrideResult({ status: 'error', text: translation.error ?? t.translationFailed })
       }
     } catch (error) {
       if (sequence !== requestSequenceRef.current) return
@@ -739,7 +760,7 @@ export default function ReferenceVisionAdapter() {
         text: error instanceof Error ? error.message : String(error),
       })
     }
-  }, [persistSourceLanguage, translateVisibleSource])
+  }, [persistSourceLanguage, t.translationFailed, translateVisibleSource])
 
   const handleTargetLanguage = useCallback(async (value: TargetLanguage) => {
     overrideLockedRef.current = true
@@ -761,7 +782,7 @@ export default function ReferenceVisionAdapter() {
       if (result.success) {
         setOverrideResult({ status: 'ready', text: result.translated ?? '' })
       } else {
-        setOverrideResult({ status: 'error', text: result.error ?? '翻译失败' })
+        setOverrideResult({ status: 'error', text: result.error ?? t.translationFailed })
       }
     } catch (error) {
       if (sequence !== requestSequenceRef.current) return
@@ -770,17 +791,17 @@ export default function ReferenceVisionAdapter() {
         text: error instanceof Error ? error.message : String(error),
       })
     }
-  }, [persistTargetLanguage, translateVisibleSource])
+  }, [persistTargetLanguage, t.translationFailed, translateVisibleSource])
 
   return (
     <main data-screenpilot-vision-adapter="true">
       <ReferenceVision />
       {createPortal(
         <span className="screenpilot-source-language-control">
-          <label htmlFor="screenpilot-source-language">源语言</label>
+          <label htmlFor="screenpilot-source-language">{t.sourceLanguage}</label>
           <select
             id="screenpilot-source-language"
-            aria-label="源语言"
+            aria-label={t.sourceLanguage}
             data-screenpilot-source-language-select="true"
             value={sourceLanguage}
             onChange={(event) => void handleSourceLanguage(event.target.value as SourceLanguage)}
@@ -794,10 +815,10 @@ export default function ReferenceVisionAdapter() {
       )}
       {createPortal(
         <span className="screenpilot-target-language-control">
-          <label htmlFor="screenpilot-target-language">目标语言</label>
+          <label htmlFor="screenpilot-target-language">{t.targetLanguage}</label>
           <select
             id="screenpilot-target-language"
-            aria-label="目标语言"
+            aria-label={t.targetLanguage}
             value={targetLanguage}
             onChange={(event) => void handleTargetLanguage(event.target.value as TargetLanguage)}
           >
@@ -816,7 +837,7 @@ export default function ReferenceVisionAdapter() {
               ? 'screenpilot-target-result screenpilot-target-result-error'
               : 'screenpilot-target-result vision-readable-text'}
           >
-            {overrideResult.status === 'loading' ? '正在按目标语言翻译…' : overrideResult.text}
+            {overrideResult.status === 'loading' ? t.translatingToTarget : overrideResult.text}
           </div>
         ),
         resultHost,

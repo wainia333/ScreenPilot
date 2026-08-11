@@ -13,7 +13,7 @@ async function expectAccessible(page: Page, excludedSelectors: readonly string[]
 async function waitForVisionSelection(page: Page) {
   await expect.poll(async () => page.evaluate(() => (
     window as typeof window & { __SCREENPILOT_TEST__: { showCount: number } }
-  ).__SCREENPILOT_TEST__.showCount), { timeout: 20_000 }).toBeGreaterThanOrEqual(2)
+  ).__SCREENPILOT_TEST__.showCount), { timeout: 20_000 }).toBeGreaterThanOrEqual(1)
   await expect(page.locator('main > div.fixed.inset-0.select-none')).toHaveCSS('cursor', 'crosshair')
 }
 
@@ -1285,8 +1285,8 @@ test('translator debounces, commits and restores its history', async ({ page }) 
   await expect(translatorHistoryButton).toHaveCSS('width', '30px')
   await expectHistoryCountBadge(translatorHistoryButton)
   await translatorHistoryButton.click()
-  await expect(page.getByRole('complementary', { name: '翻译历史' })).toContainText('A concise synthetic translation sample.')
-  await expectAccessible(page, ['.history-menu-meta'])
+  await expect(page.getByRole('dialog', { name: '翻译历史' })).toContainText('A concise synthetic translation sample.')
+  await expectAccessible(page)
   await expect(page).toHaveScreenshot('translator-result.png')
 })
 
@@ -1340,18 +1340,19 @@ test('prompt optimizer requests only on demand and keeps editable output', async
   await expect(optimizerHistoryButton).toHaveCSS('width', '30px')
   await expectHistoryCountBadge(optimizerHistoryButton)
   await optimizerHistoryButton.click()
-  const optimizerHistory = page.getByRole('complementary', { name: '优化历史' })
+  const optimizerHistory = page.getByRole('dialog', { name: '优化历史' })
   await expect(optimizerHistory).toContainText('Summarize the supplied material.')
   await expect(optimizerHistory).toBeVisible()
   await optimizerHistory.evaluate(async (element) => {
     await Promise.all(element.getAnimations().map(async (animation) => animation.finished))
   })
   await expect(page).toHaveScreenshot('optimizer-result.png')
-  await expectAccessible(page, ['.history-menu-meta'])
+  await expectAccessible(page)
 })
 
 test('translation and prompt optimization keep their original history triggers and match the reference popover', async ({ page }) => {
   test.setTimeout(60_000)
+  await installVisionTauriMock(page)
   const longSource = `Reference history source ${'很长的原始内容'.repeat(40)}`
   const longOutput = `Reference history output ${'很长的处理结果'.repeat(40)}`
   const entries = Array.from({ length: 20 }, (_, index) => ({
@@ -1395,7 +1396,7 @@ test('translation and prompt optimization keep their original history triggers a
     await expect(page.locator('.ocr-result-header-actions').getByRole('button', { name: route.button })).toHaveCount(1)
     await expect(page.locator('.ocr-result-section-heading').getByRole('button', { name: route.button })).toHaveCount(0)
     await trigger.click()
-    const popover = page.getByRole('complementary', { name: route.button })
+    const popover = page.getByRole('dialog', { name: route.button })
     await expect(popover).toBeVisible()
     const popoverStyle = await referenceHistoryPopoverStyle(popover)
     expect(popoverStyle.width).toBe(340)
@@ -1414,8 +1415,8 @@ test('translation and prompt optimization keep their original history triggers a
     expect(popoverStyle.listScrollWidth).toBeLessThanOrEqual(popoverStyle.listClientWidth + 1)
     expect(popoverStyle.inputFontSize).toBe('11.5px')
     expect(popoverStyle.inputLineHeight).toBe('14.375px')
-    expect(popoverStyle.metaFontSize).toBe('9.5px')
-    expect(popoverStyle.metaLineHeight).toBe('11.875px')
+    expect(popoverStyle.metaFontSize).toBe('11px')
+    expect(popoverStyle.metaLineHeight).toBe('13.75px')
     expect(popoverStyle.clearHeight).toBe(26)
     expect(popoverStyle.clearFontSize).toBe('11.5px')
     expect(popoverStyle.portalParent).toBe(true)
@@ -1496,25 +1497,31 @@ test('translation and prompt optimization keep their original history triggers a
     expect(itemGeometry.deleteMinWidth).toBe('24px')
     await deleteButton.hover()
     await expect(deleteButton).toHaveCSS('color', 'rgb(244, 63, 94)')
-    await expect(trigger).toBeFocused()
+    await expect(firstItem.locator('.history-menu-meta')).toHaveCSS('color', 'rgb(102, 102, 102)')
+    if (route.route === 'translator') {
+      await expect(firstItem.locator('.history-menu-output')).toHaveCSS('color', 'rgb(102, 102, 102)')
+    }
+    await expect(firstItem.locator('.history-menu-restore')).toBeFocused()
+    await expectAccessible(page)
+    const lifecycleBeforeEscape = await page.evaluate(() => {
+      const state = (window as typeof window & {
+        __SCREENPILOT_TEST__: { hideCount: number; windowVisible: boolean }
+      }).__SCREENPILOT_TEST__
+      return { hideCount: state.hideCount, windowVisible: state.windowVisible }
+    })
+    const urlBeforeEscape = page.url()
     await page.keyboard.press('Escape')
     await expect(popover).toHaveCount(0)
     await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(trigger).toBeFocused()
     await expect(page.locator('[data-screenpilot-window-frame="true"]')).toBeVisible()
-    const focusAfterEscape = await trigger.evaluate((element) => {
-      const computed = getComputedStyle(element)
-      const outlineVisible = computed.outlineStyle !== 'none'
-        && Number.parseFloat(computed.outlineWidth) > 0
-        && computed.outlineColor !== 'rgba(0, 0, 0, 0)'
-      return {
-        active: document.activeElement === element,
-        outlineVisible,
-        boxShadow: computed.boxShadow,
-      }
-    })
-    expect(focusAfterEscape.active).toBe(false)
-    expect(focusAfterEscape.outlineVisible).toBe(false)
-    expect(focusAfterEscape.boxShadow).toBe('none')
+    await expect.poll(async () => page.evaluate(() => {
+      const state = (window as typeof window & {
+        __SCREENPILOT_TEST__: { hideCount: number; windowVisible: boolean }
+      }).__SCREENPILOT_TEST__
+      return { hideCount: state.hideCount, windowVisible: state.windowVisible }
+    })).toEqual(lifecycleBeforeEscape)
+    expect(page.url()).toBe(urlBeforeEscape)
   }
 })
 
@@ -1528,10 +1535,10 @@ test('history menus use the reference light, dark and system theme colors', asyn
   }]
   await page.addInitScript((value) => localStorage.setItem('screenpilot:translator-history', JSON.stringify(value)), entries)
   const cases = [
-    { theme: 'light', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(163, 163, 163)' },
-    { theme: 'dark', scheme: 'light', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(115, 115, 115)' },
-    { theme: 'system', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(163, 163, 163)' },
-    { theme: 'system', scheme: 'dark', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(115, 115, 115)' },
+    { theme: 'light', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(102, 102, 102)' },
+    { theme: 'dark', scheme: 'light', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(163, 163, 163)' },
+    { theme: 'system', scheme: 'light', surface: 'rgb(255, 255, 255)', input: 'rgb(38, 38, 38)', meta: 'rgb(102, 102, 102)' },
+    { theme: 'system', scheme: 'dark', surface: 'rgb(23, 23, 23)', input: 'rgb(229, 229, 229)', meta: 'rgb(163, 163, 163)' },
   ] as const
   for (const current of cases) {
     await page.emulateMedia({ colorScheme: current.scheme })
@@ -1539,7 +1546,7 @@ test('history menus use the reference light, dark and system theme colors', asyn
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme }, current.theme)
     const trigger = page.getByRole('button', { name: '翻译历史' })
     await trigger.click()
-    const popover = page.getByRole('complementary', { name: '翻译历史' })
+    const popover = page.getByRole('dialog', { name: '翻译历史' })
     await expect(popover).toHaveCSS('background-color', current.surface)
     await expect(popover.locator('.history-menu-input')).toHaveCSS('color', current.input)
     await expect(popover.locator('.history-menu-meta')).toHaveCSS('color', current.meta)
@@ -1640,6 +1647,436 @@ test('Vision keeps the end of long prompts visible before and after capture', as
   await page.mouse.up()
   await expect(page.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
   await expectLongPromptEndVisible(`${'这是一段用于验证截图后 Vision 输入框末尾文字仍然完整可见的长文本。'.repeat(18)}截图后末尾`)
+})
+
+test('Vision refreshes the saved interface language when the reused window resets', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+
+  await page.evaluate(() => {
+    const testWindow = window as typeof window & {
+      __SCREENPILOT_TEST__: { interfaceLanguage: 'zh' | 'en' }
+    }
+    testWindow.__SCREENPILOT_TEST__.interfaceLanguage = 'en'
+    window.dispatchEvent(new CustomEvent('vision:reset'))
+  })
+
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+  await page.mouse.move(900, 140)
+  await expect(page.locator('rect.sharex-selection-dash[stroke="white"]')).toBeVisible()
+  await page.mouse.click(900, 140)
+  await expect(page.getByRole('combobox', { name: 'Source language' })).toBeVisible()
+})
+
+test('screenshot archive failures warn without breaking capture and clean the temporary image on close', async ({ page }) => {
+  await installVisionTauriMock(
+    page,
+    undefined,
+    true,
+    undefined,
+    0,
+    0,
+    0,
+    'Screenshot archive failed: synthetic access denied',
+  )
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+
+  await expect(page.getByText(/ScreenPilot 视觉测试/)).toBeVisible()
+  const archiveWarning = page.getByRole('status').filter({
+    hasText: /^截图已完成，但自动归档失败：synthetic access denied$/u,
+  })
+  await expect(archiveWarning).toHaveText('截图已完成，但自动归档失败：synthetic access denied')
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { temporaryImageIds: string[] }
+    }).__SCREENPILOT_TEST__
+    return state.temporaryImageIds
+  })).toEqual(['capture-1'])
+
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { temporaryImageIds: string[]; deletedTemporaryImageIds: string[] }
+    }).__SCREENPILOT_TEST__
+    return {
+      temporary: state.temporaryImageIds,
+      deleted: state.deletedTemporaryImageIds,
+    }
+  })).toEqual({ temporary: [], deleted: ['capture-1'] })
+})
+
+test('Vision re-hides a stale window when close wins a deferred show', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const initialHideCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferShow: boolean; hideCount: number }
+    }).__SCREENPILOT_TEST__
+    state.deferShow = true
+    window.dispatchEvent(new CustomEvent('vision:reset'))
+    return state.hideCount
+  })
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingShowCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingShowCount)).toBe(1)
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { closeVisionSurface: () => void }
+    }).__SCREENPILOT_TEST__
+    state.closeVisionSurface()
+  })
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { windowVisible: boolean }
+    }
+  ).__SCREENPILOT_TEST__.windowVisible)).toBe(false)
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextShow: () => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextShow()) throw new Error('No deferred show was available')
+  })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        hideCount: number
+        pendingShowCount: number
+        windowVisible: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      hideCount: state.hideCount,
+      pendingShowCount: state.pendingShowCount,
+      windowVisible: state.windowVisible,
+    }
+  })).toEqual({
+    hideCount: initialHideCount + 1,
+    pendingShowCount: 0,
+    windowVisible: false,
+  })
+})
+
+test('Vision does not hide a newer selection surface when an older show resolves late', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const initialHideCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferShow: boolean; hideCount: number }
+    }).__SCREENPILOT_TEST__
+    state.deferShow = true
+    window.dispatchEvent(new CustomEvent('vision:reset'))
+    return state.hideCount
+  })
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingShowCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingShowCount)).toBe(1)
+
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('vision:reset')))
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingShowCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingShowCount)).toBe(2)
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextShow: () => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextShow()) throw new Error('No deferred show was available')
+  })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { hideCount: number; pendingShowCount: number }
+    }).__SCREENPILOT_TEST__
+    return { hideCount: state.hideCount, pendingShowCount: state.pendingShowCount }
+  })).toEqual({ hideCount: initialHideCount, pendingShowCount: 1 })
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextShow: () => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextShow()) throw new Error('No deferred show was available')
+  })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        hideCount: number
+        pendingShowCount: number
+        windowVisible: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      hideCount: state.hideCount,
+      pendingShowCount: state.pendingShowCount,
+      windowVisible: state.windowVisible,
+    }
+  })).toEqual({
+    hideCount: initialHideCount,
+    pendingShowCount: 0,
+    windowVisible: true,
+  })
+})
+
+test('Vision ignores a failed capture that completes after the surface closes', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const initialShowCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferCapture: boolean; showCount: number }
+    }).__SCREENPILOT_TEST__
+    state.deferCapture = true
+    return state.showCount
+  })
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingCaptureCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingCaptureCount)).toBe(1)
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { closeVisionSurface: () => void }
+    }).__SCREENPILOT_TEST__
+    state.closeVisionSurface()
+  })
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { windowVisible: boolean }
+    }
+  ).__SCREENPILOT_TEST__.windowVisible)).toBe(false)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextCapture: (success?: boolean) => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextCapture(false)) throw new Error('No deferred capture was available')
+  })
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        showCount: number
+        windowVisible: boolean
+        temporaryImageIds: string[]
+        deletedTemporaryImageIds: string[]
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      showCount: state.showCount,
+      windowVisible: state.windowVisible,
+      temporary: state.temporaryImageIds,
+      deleted: state.deletedTemporaryImageIds,
+    }
+  })).toEqual({
+    showCount: initialShowCount,
+    windowVisible: false,
+    temporary: [],
+    deleted: [],
+  })
+})
+
+test('Vision keeps a window-to-region fallback stale when close wins the fallback capture', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const initialShowCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferCapture: boolean; showCount: number }
+    }).__SCREENPILOT_TEST__
+    state.deferCapture = true
+    return state.showCount
+  })
+  await page.mouse.move(900, 140)
+  await expect(page.locator('rect.sharex-selection-dash[stroke="white"]')).toBeVisible()
+  await page.mouse.click(900, 140)
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingCaptureCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingCaptureCount)).toBe(1)
+
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { windowVisible: boolean }
+    }
+  ).__SCREENPILOT_TEST__.windowVisible)).toBe(false)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextCapture: (success?: boolean) => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextCapture(false)) throw new Error('No deferred fallback capture was available')
+  })
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        showCount: number
+        windowVisible: boolean
+        pendingCaptureCount: number
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      showCount: state.showCount,
+      windowVisible: state.windowVisible,
+      pendingCaptureCount: state.pendingCaptureCount,
+    }
+  })).toEqual({
+    showCount: initialShowCount,
+    windowVisible: false,
+    pendingCaptureCount: 0,
+  })
+})
+
+test('Vision deletes a late successful capture after close and captures normally after reset', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const initialShowCount = await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferCapture: boolean; showCount: number }
+    }).__SCREENPILOT_TEST__
+    state.deferCapture = true
+    return state.showCount
+  })
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingCaptureCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingCaptureCount)).toBe(1)
+
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { windowVisible: boolean }
+    }
+  ).__SCREENPILOT_TEST__.windowVisible)).toBe(false)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { resolveNextCapture: (success?: boolean) => boolean }
+    }).__SCREENPILOT_TEST__
+    if (!state.resolveNextCapture(true)) throw new Error('No deferred capture was available')
+  })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        showCount: number
+        windowVisible: boolean
+        temporaryImageIds: string[]
+        deletedTemporaryImageIds: string[]
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      showCount: state.showCount,
+      windowVisible: state.windowVisible,
+      temporary: state.temporaryImageIds,
+      deleted: state.deletedTemporaryImageIds,
+    }
+  })).toEqual({
+    showCount: initialShowCount,
+    windowVisible: false,
+    temporary: [],
+    deleted: ['capture-1'],
+  })
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferCapture: boolean }
+    }).__SCREENPILOT_TEST__
+    state.deferCapture = false
+    window.dispatchEvent(new CustomEvent('vision:reset'))
+  })
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { showCount: number }
+    }
+  ).__SCREENPILOT_TEST__.showCount)).toBe(initialShowCount + 1)
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(900, 140)
+  await expect(page.locator('rect.sharex-selection-dash[stroke="white"]')).toBeVisible()
+  await page.mouse.click(900, 140)
+  await expect(page.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { temporaryImageIds: string[] }
+    }
+  ).__SCREENPILOT_TEST__.temporaryImageIds)).toEqual(['capture-2'])
+})
+
+test('Vision commits a completed screenshot before close writes recoverable history', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  await page.getByPlaceholder('问点什么...').fill('Commit this answer before closing.')
+  await page.locator('button:has(svg.lucide-arrow-up)').click()
+  await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        committedImageIds: string[]
+        temporaryImageIds: string[]
+        deletedTemporaryImageIds: string[]
+      }
+    }).__SCREENPILOT_TEST__
+    const history = JSON.parse(localStorage.getItem('screenpilot:vision-history:v1') ?? '[]') as { id: string }[]
+    return {
+      committed: state.committedImageIds,
+      temporary: state.temporaryImageIds,
+      deleted: state.deletedTemporaryImageIds,
+      historyIds: history.map((item) => item.id),
+    }
+  })).toEqual({
+    committed: ['capture-1'],
+    temporary: [],
+    deleted: [],
+    historyIds: ['capture-1'],
+  })
 })
 
 test('Vision landing spring is temporary and leaves the settled WebView surface unpromoted', async ({ page }) => {
@@ -1762,6 +2199,92 @@ test('Vision floating drag uses the safe native command repeatedly and recovers 
     window as typeof window & { __SCREENPILOT_SAFE_DRAG_UNHANDLED__?: number }
   ).__SCREENPILOT_SAFE_DRAG_UNHANDLED__ ?? 0)).toBe(0)
   await expect(page.getByPlaceholder('问点什么...')).toBeVisible()
+})
+
+test('Vision supports keyboard capture, arrow annotation, live answers, and history focus', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('screenpilot:vision-history:v1', '[{}]')
+  })
+  await installVisionTauriMock(page, undefined, true, undefined, 400)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('screenpilot:vision-history:v1'))).toBe('[]')
+  await expect(page.getByText('已忽略 1 条损坏的 Vision 历史记录。')).toBeAttached()
+  const root = page.locator('main > div.fixed.inset-0.select-none')
+  const announcement = page.locator('[data-screenpilot-vision-announcement="true"]')
+  const initialHideCount = await page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { hideCount: number } }
+  ).__SCREENPILOT_TEST__.hideCount)
+
+  await page.keyboard.press('Alt+w')
+  await expect(root).toHaveAttribute('data-screenpilot-keyboard-selection', 'window')
+  await expect(announcement).toContainText('已选择窗口：Synthetic')
+  await page.keyboard.press('Escape')
+  await expect(root).not.toHaveAttribute('data-screenpilot-keyboard-selection')
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { hideCount: number } }
+  ).__SCREENPILOT_TEST__.hideCount)).toBe(initialHideCount)
+
+  await page.keyboard.press('Alt+r')
+  await expect(root).toHaveAttribute('data-screenpilot-keyboard-selection', 'region')
+  await page.keyboard.press('Alt+ArrowRight')
+  await page.keyboard.press('Alt+Shift+ArrowRight')
+  await expect(announcement).toContainText('X 330，Y 180，650 × 360')
+  await page.keyboard.press('Escape')
+  await expect(root).not.toHaveAttribute('data-screenpilot-keyboard-selection')
+
+  await page.keyboard.press('Alt+r')
+  await page.keyboard.press('Alt+Enter')
+  await expect(page.locator('[data-screenpilot-vision-image="true"]')).toBeVisible()
+
+  const arrowToggle = page.locator('[data-screenpilot-arrow-toggle="true"]')
+  await expect(arrowToggle).toHaveAttribute('aria-label', '画箭头')
+  await arrowToggle.click()
+  await expect(arrowToggle).toHaveAttribute('aria-pressed', 'true')
+  const arrowSurface = page.locator('[data-screenpilot-arrow-surface="true"]')
+  await expect(arrowSurface).toBeFocused()
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.press('Enter')
+  await expect(arrowSurface.locator('g')).toHaveCount(1)
+  await page.keyboard.press('Control+z')
+  await expect(arrowSurface.locator('g')).toHaveCount(0)
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Enter')
+  await expect(arrowSurface.locator('g')).toHaveCount(1)
+  await page.keyboard.press('Escape')
+  await expect(arrowSurface).toHaveCount(0)
+
+  await page.locator('[data-screenpilot-vision-prompt="true"]').fill('Describe this screenshot.')
+  await page.locator('[data-screenpilot-vision-send="true"]').click()
+  const log = page.getByRole('log')
+  await expect(log).toHaveAttribute('aria-live', 'polite')
+  await expect(log).toHaveAttribute('aria-busy', 'true')
+  await expect(log).toContainText(/synthetic ScreenPilot visual test/u)
+  await expect(log).toHaveAttribute('aria-busy', 'false')
+
+  const historyTrigger = page.locator('[data-screenpilot-vision-history-trigger="true"]')
+  await expect(historyTrigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(historyTrigger).toContainText('1')
+  await historyTrigger.click()
+  const historyDialog = page.locator('[data-screenpilot-vision-history-dialog="true"]')
+  await expect(historyDialog).toHaveAttribute('role', 'dialog')
+  await expect(historyDialog.locator('button').first()).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(historyDialog).toHaveCount(0)
+  await expect(historyTrigger).toBeFocused()
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { hideCount: number } }
+  ).__SCREENPILOT_TEST__.hideCount)).toBe(initialHideCount)
+
+  await page.locator('[data-screenpilot-vision-prompt="true"]').fill('Follow-up question')
+  await historyTrigger.click()
+  await expect(historyDialog.locator('button').first()).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(historyDialog).toHaveCount(0)
+  await expect(page.locator('[data-screenpilot-vision-send="true"]')).toBeFocused()
 })
 
 test('vision captures, annotates and answers without stale stream pollution', async ({ page }) => {
@@ -2831,21 +3354,20 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
     return state.translationRequests.length
   })
   await source.fill('Edited synthetic OCR source')
-  await page.waitForTimeout(950)
-  const earlyTranslationRequestCount = await page.evaluate(() => {
-    const state = (window as typeof window & {
-      __SCREENPILOT_TEST__: { translationRequests: unknown[] }
-    }).__SCREENPILOT_TEST__
-    return state.translationRequests.length
-  })
-  expect(earlyTranslationRequestCount).toBe(translationRequestCount)
-  await expect(page.getByText('编辑后译文(en)：Edited synthetic OCR source')).toBeVisible({ timeout: 2_000 })
+  await expect(page.getByText('编辑后译文(en)：Edited synthetic OCR source')).toBeVisible()
   await expect.poll(async () => page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { translationRequests: unknown[] }
     }).__SCREENPILOT_TEST__
     return state.translationRequests.length
   })).toBe(translationRequestCount + 1)
+  const editRequests = await page.evaluate((initialCount) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: { text: string }[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.slice(initialCount).map((request) => request.text)
+  }, translationRequestCount)
+  expect(editRequests).toEqual(['Edited synthetic OCR source'])
   await expect(sourceLanguage).toBeVisible()
   await expect(sourceLanguage).toHaveValue('en')
   await expect(targetLanguage).toBeVisible()

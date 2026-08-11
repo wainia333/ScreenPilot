@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::menu::MenuBuilder;
+use tauri::menu::{Menu, MenuBuilder};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -198,6 +198,11 @@ impl MainRoute {
 }
 
 pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
+    if route == MainRoute::PromptOptimizer
+        && !app.state::<AppState>().current()?.prompt_optimizer.enabled
+    {
+        return Err("Prompt optimizer is disabled in settings".into());
+    }
     prepare_feature_surface(app, FeatureSurface::Main)?;
     let window = app
         .get_webview_window("main")
@@ -369,8 +374,27 @@ pub fn preload_translator_window(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn show_vision(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _settings_write = state.lock_settings_write()?;
+    let settings = state.current()?;
+    crate::application::commands::ensure_reference_mode_enabled(&settings, mode)?;
     prepare_feature_surface(app, FeatureSurface::Vision)?;
     crate::application::commands::open_reference_vision(app, mode)
+}
+
+pub fn request_vision(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+    run_surface_action(app, || show_vision(app, mode))
+}
+
+fn run_surface_action(
+    app: &AppHandle,
+    action: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let generation = state.begin_surface_action();
+    state
+        .with_current_surface_action(generation, action)
+        .map(|_| ())
 }
 
 fn hide_visible_translator_for_toggle(app: &AppHandle) -> Result<bool, String> {
@@ -470,44 +494,51 @@ pub fn register_shortcuts(app: &AppHandle, settings: &AppSettings) -> Result<(),
     app.global_shortcut()
         .unregister_all()
         .map_err(|error| error.to_string())?;
-    merge_shortcut_results([
-        (
-            format!("文本翻译 {}", settings.shortcuts.translator),
-            register_shortcut(
-                app,
-                &settings.shortcuts.translator,
-                ShortcutState::Pressed,
-                HotkeyAction::Translator,
-            ),
-        ),
-        (
-            format!("Vision {}", settings.shortcuts.vision),
-            register_shortcut(
-                app,
-                &settings.shortcuts.vision,
-                ShortcutState::Pressed,
-                HotkeyAction::Vision,
-            ),
-        ),
-        (
-            format!("截图翻译 {}", settings.shortcuts.screenshot_translation),
-            register_shortcut(
-                app,
-                &settings.shortcuts.screenshot_translation,
-                ShortcutState::Pressed,
-                HotkeyAction::ScreenshotTranslation,
-            ),
-        ),
-        (
-            format!("提示词优化 {}", settings.shortcuts.prompt_optimizer),
-            register_shortcut(
-                app,
-                &settings.shortcuts.prompt_optimizer,
-                ShortcutState::Pressed,
-                HotkeyAction::PromptOptimizer,
-            ),
-        ),
-    ])
+    merge_shortcut_results(active_shortcuts(settings).into_iter().map(
+        |(label, shortcut, action)| {
+            (
+                format!("{label} {shortcut}"),
+                register_shortcut(app, shortcut, ShortcutState::Pressed, action),
+            )
+        },
+    ))
+}
+
+fn active_shortcuts(settings: &AppSettings) -> Vec<(&'static str, &str, HotkeyAction)> {
+    let mut shortcuts = vec![(
+        "文本翻译",
+        settings.shortcuts.translator.as_str(),
+        HotkeyAction::Translator,
+    )];
+    if settings.vision.enabled {
+        shortcuts.push((
+            "Vision",
+            settings.shortcuts.vision.as_str(),
+            HotkeyAction::Vision,
+        ));
+    }
+    if settings.screenshot_translation.enabled {
+        shortcuts.push((
+            "截图翻译",
+            settings.shortcuts.screenshot_translation.as_str(),
+            HotkeyAction::ScreenshotTranslation,
+        ));
+    }
+    if settings.prompt_optimizer.enabled {
+        shortcuts.push((
+            "提示词优化",
+            settings.shortcuts.prompt_optimizer.as_str(),
+            HotkeyAction::PromptOptimizer,
+        ));
+    }
+    shortcuts
+}
+
+fn shortcut_registration_changed(previous: &AppSettings, next: &AppSettings) -> bool {
+    previous.shortcuts != next.shortcuts
+        || previous.vision.enabled != next.vision.enabled
+        || previous.screenshot_translation.enabled != next.screenshot_translation.enabled
+        || previous.prompt_optimizer.enabled != next.prompt_optimizer.enabled
 }
 
 pub fn register_changed_shortcuts(
@@ -515,62 +546,16 @@ pub fn register_changed_shortcuts(
     previous: &AppSettings,
     next: &AppSettings,
 ) -> Result<(), String> {
-    let changes = [
-        (
-            "文本翻译",
-            &previous.shortcuts.translator,
-            &next.shortcuts.translator,
-            ShortcutState::Pressed,
-            HotkeyAction::Translator,
-        ),
-        (
-            "Vision",
-            &previous.shortcuts.vision,
-            &next.shortcuts.vision,
-            ShortcutState::Pressed,
-            HotkeyAction::Vision,
-        ),
-        (
-            "截图翻译",
-            &previous.shortcuts.screenshot_translation,
-            &next.shortcuts.screenshot_translation,
-            ShortcutState::Pressed,
-            HotkeyAction::ScreenshotTranslation,
-        ),
-        (
-            "提示词优化",
-            &previous.shortcuts.prompt_optimizer,
-            &next.shortcuts.prompt_optimizer,
-            ShortcutState::Pressed,
-            HotkeyAction::PromptOptimizer,
-        ),
-    ];
-    let changed = changes.iter().any(|(_, old, new, _, _)| old != new);
-    if !changed {
+    if !shortcut_registration_changed(previous, next) {
         return Ok(());
     }
 
-    app.global_shortcut()
-        .unregister_all()
-        .map_err(|error| format!("Unable to release current shortcuts: {error}"))?;
-
-    let result = merge_shortcut_results(changes.map(|(label, _, new, state, action)| {
-        (
-            format!("{label} {new}"),
-            register_shortcut(app, new, state, action),
-        )
-    }));
+    let result = register_shortcuts(app, next);
     if result.is_ok() {
         return Ok(());
     }
 
-    let _ = app.global_shortcut().unregister_all();
-    let restore = merge_shortcut_results(changes.map(|(label, old, _, state, action)| {
-        (
-            format!("{label} {old}"),
-            register_shortcut(app, old, state, action),
-        )
-    }));
+    let restore = register_shortcuts(app, previous);
     match (result, restore) {
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(restore_error)) => Err(format!(
@@ -580,8 +565,8 @@ pub fn register_changed_shortcuts(
     }
 }
 
-fn merge_shortcut_results<const N: usize>(
-    attempts: [(String, Result<(), String>); N],
+fn merge_shortcut_results(
+    attempts: impl IntoIterator<Item = (String, Result<(), String>)>,
 ) -> Result<(), String> {
     let failures = attempts
         .into_iter()
@@ -609,19 +594,37 @@ fn register_shortcut(
         .map_err(|error| error.to_string())
 }
 
-pub fn create_tray(app: &AppHandle) -> Result<(), String> {
-    let menu = MenuBuilder::new(app)
-        .text("translator", "文本翻译")
-        .text("vision", "Vision")
-        .text("screenshot", "截图翻译")
-        .text("optimizer", "提示词优化")
+fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str)> {
+    let mut items = vec![("translator", "文本翻译")];
+    if settings.vision.enabled {
+        items.push(("vision", "Vision"));
+    }
+    if settings.screenshot_translation.enabled {
+        items.push(("screenshot", "截图翻译"));
+    }
+    if settings.prompt_optimizer.enabled {
+        items.push(("optimizer", "提示词优化"));
+    }
+    items
+}
+
+fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri::Wry>, String> {
+    let mut builder = MenuBuilder::new(app);
+    for (id, label) in tray_feature_items(settings) {
+        builder = builder.text(id, label);
+    }
+    builder
         .separator()
         .text("settings", "设置")
         .separator()
         .text("restart_admin", "重启（管理员）")
         .text("quit", "退出")
         .build()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+pub fn create_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    let menu = build_tray_menu(app, settings)?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .tooltip("ScreenPilot")
@@ -635,32 +638,28 @@ pub fn create_tray(app: &AppHandle) -> Result<(), String> {
                 }
             ) {
                 let app = tray.app_handle();
-                app.state::<AppState>().begin_surface_action();
-                let _ = show_main(app, MainRoute::Settings);
+                let _ = run_surface_action(app, || show_main(app, MainRoute::Settings));
             }
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "translator" => {
-                let state = app.state::<AppState>();
-                state.begin_surface_action();
-                state.set_translator_selection(String::new());
-                let _ = show_translator(app);
+                let _ = run_surface_action(app, || {
+                    app.state::<AppState>()
+                        .set_translator_selection(String::new());
+                    show_translator(app)
+                });
             }
             "vision" => {
-                app.state::<AppState>().begin_surface_action();
-                let _ = show_vision(app, "chat");
+                let _ = request_vision(app, "chat");
             }
             "screenshot" => {
-                app.state::<AppState>().begin_surface_action();
-                let _ = show_vision(app, "translate");
+                let _ = request_vision(app, "translate");
             }
             "optimizer" => {
-                app.state::<AppState>().begin_surface_action();
-                let _ = show_main(app, MainRoute::PromptOptimizer);
+                let _ = run_surface_action(app, || show_main(app, MainRoute::PromptOptimizer));
             }
             "settings" => {
-                app.state::<AppState>().begin_surface_action();
-                let _ = show_main(app, MainRoute::Settings);
+                let _ = run_surface_action(app, || show_main(app, MainRoute::Settings));
             }
             "restart_admin" => match crate::platform::windows::startup::launch_elevated_restart() {
                 Ok(()) => app.exit(0),
@@ -686,10 +685,12 @@ pub fn focus_second_instance(app: &AppHandle) {
     let _ = activate_process(app, ProcessActivation::Repeated);
 }
 
-pub fn update_tray(app: &AppHandle) -> Result<(), String> {
-    app.tray_by_id("main")
-        .ok_or("Tray is unavailable")?
-        .set_tooltip(Some("ScreenPilot"))
+pub fn update_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    let menu = build_tray_menu(app, settings)?;
+    let tray = app.tray_by_id("main").ok_or("Tray is unavailable")?;
+    tray.set_menu(Some(menu))
+        .map_err(|error| error.to_string())?;
+    tray.set_tooltip(Some("ScreenPilot"))
         .map_err(|error| error.to_string())
 }
 
@@ -704,21 +705,17 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
         if window.label() == "vision" {
-            window
-                .app_handle()
-                .state::<AppState>()
-                .begin_surface_action();
-            if let Err(error) =
+            if let Err(error) = run_surface_action(window.app_handle(), || {
                 crate::application::commands::close_reference_vision_surface(window.app_handle())
-            {
+            }) {
                 eprintln!("Vision close cleanup failed: {error}");
             }
         } else {
             if window.label() == "translator" {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .begin_surface_action();
+                let _ = run_surface_action(window.app_handle(), || {
+                    window.hide().map_err(|error| error.to_string())
+                });
+                return;
             }
             let _ = window.hide();
         }
@@ -866,9 +863,11 @@ fn center_on_cursor_monitor(app: &AppHandle, window: &WebviewWindow) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_route, hidden_surfaces_for, merge_shortcut_results, popup_position,
-        FeatureSurface, HotkeyAction, ProcessActivation,
+        active_shortcuts, automatic_route, hidden_surfaces_for, merge_shortcut_results,
+        popup_position, shortcut_registration_changed, tray_feature_items, FeatureSurface,
+        HotkeyAction, ProcessActivation,
     };
+    use crate::domain::settings::AppSettings;
 
     #[test]
     fn keeps_initial_and_repeated_process_activation_in_the_tray() {
@@ -910,6 +909,38 @@ mod tests {
         let error = result.expect_err("conflicts must remain visible");
         assert!(error.contains("Vision F3: occupied"));
         assert!(error.contains("提示词优化 Control+Alt+P: occupied"));
+    }
+
+    #[test]
+    fn filters_shortcuts_and_tray_entries_by_feature_enablement() {
+        let mut settings = AppSettings::default();
+        settings.vision.enabled = false;
+        settings.screenshot_translation.enabled = false;
+        settings.prompt_optimizer.enabled = false;
+
+        assert_eq!(
+            active_shortcuts(&settings)
+                .into_iter()
+                .map(|(_, shortcut, action)| (shortcut, action))
+                .collect::<Vec<_>>(),
+            vec![(
+                settings.shortcuts.translator.as_str(),
+                HotkeyAction::Translator
+            )]
+        );
+        assert_eq!(
+            tray_feature_items(&settings),
+            vec![("translator", "文本翻译")]
+        );
+    }
+
+    #[test]
+    fn enablement_changes_require_shortcut_reregistration() {
+        let previous = AppSettings::default();
+        let mut next = previous.clone();
+        assert!(!shortcut_registration_changed(&previous, &next));
+        next.vision.enabled = false;
+        assert!(shortcut_registration_changed(&previous, &next));
     }
 
     #[test]

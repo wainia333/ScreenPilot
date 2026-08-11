@@ -21,7 +21,7 @@ const languages = new Set<InterfaceLanguage>(['zh', 'en'])
 const thinkingEfforts = new Set<ThinkingEffort>(['low', 'medium', 'high', 'xhigh', 'max'])
 const screenshotThinkingEfforts = new Set<Exclude<ThinkingEffort, 'max'>>(['low', 'medium', 'high', 'xhigh'])
 const messageOrders = new Set<MessageOrder>(['asc', 'desc'])
-const ocrMethods = new Set<OcrMethod>(['ai', 'baidu', 'chaoxing', 'system'])
+const ocrMethods = new Set<OcrMethod>(['ai', 'baidu', 'chaoxing'])
 const screenshotTargetLanguages = new Set<TranslationLanguage>(['auto', 'zh-CN', 'en', 'ja', 'ko'])
 const translationMethods = new Set<TranslationMethod>([
   'ai',
@@ -292,6 +292,13 @@ export function normalizeAiAvailability(settings: AppSettings): AppSettings {
 
 export function validateSettings(settings: AppSettings): SettingsIssue[] {
   const issues = shortcutIssues(settings.shortcuts)
+  if (settings.general.imageArchiveEnabled && settings.general.imageArchivePath.trim().length === 0) {
+    issues.push({
+      path: 'general.imageArchivePath',
+      code: 'missing',
+      message: 'Screenshot archive path is required when auto-archive is enabled',
+    })
+  }
   const providerIds = new Set<string>()
   for (const provider of settings.providers) {
     if (providerIds.has(provider.id)) {

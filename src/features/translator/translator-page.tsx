@@ -1,5 +1,6 @@
 import { Check, Clipboard, Languages, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 import { translationMethodOptions } from '../settings/translation-methods'
@@ -10,6 +11,9 @@ import type { TranslationSettingsPatch } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 import { HistoryMenu } from '../history/history-menu'
+import { copyFor, translationLanguageOptions, translationMethodLabel } from '../../shared/ui-copy'
+import { syncDocumentTheme } from '../../shared/theme'
+import { nextTranslationGeneration } from './translation-generation'
 
 type TargetLanguage = TranslationLanguage
 
@@ -24,21 +28,6 @@ type TranslationHistory = {
 const historyKey = 'screenpilot:translator-history'
 export const TRANSLATOR_INPUT_DEBOUNCE_MS = 700
 const goldenSectionRatio = (3 - Math.sqrt(5)) / 2
-const targetLanguageOptions: { value: TargetLanguage; label: string }[] = [
-  { value: 'auto', label: '自动' },
-  { value: 'zh-CN', label: '简体中文' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-]
-const sourceLanguageOptions: { value: TranslationLanguage; label: string }[] = [
-  { value: 'auto', label: '自动' },
-  { value: 'zh-CN', label: '简体中文' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語' },
-  { value: 'ko', label: '한국어' },
-]
-
 function translationRequestKey(input: string, settings: AppSettings): string {
   return JSON.stringify([
     input,
@@ -71,23 +60,103 @@ export function TranslatorPage() {
   const [copied, setCopied] = useState(false)
   const [arrivalCycle, setArrivalCycle] = useState(0)
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
-  const generation = useRef(0)
+  const activeGeneration = useRef(0)
+  const inputRevision = useRef(0)
+  const settingsRequest = useRef(0)
+  const selectionRequest = useRef(0)
+  const lastAppliedSelection = useRef<string | null>(null)
   const roundId = useRef<string>(crypto.randomUUID())
   const composing = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const immediateRequest = useRef<string | null>(null)
   const skipNextInputRequest = useRef<string | null>(null)
-  const { ratio, beginResize } = useSplitRatio(
+  const { ratio, beginResize, resizeByKeyboard } = useSplitRatio(
     'screenpilot:translator-ocr-golden-split',
     goldenSectionRatio,
   )
+  const interfaceLanguage = settings?.language ?? 'zh'
+  const t = copyFor(interfaceLanguage)
+  const sourceLanguageOptions = translationLanguageOptions(interfaceLanguage)
+  const targetLanguageOptions: { value: TargetLanguage; label: string }[] = sourceLanguageOptions
+  const cancelTranslation = useCallback(() => {
+    const cancelGeneration = nextTranslationGeneration()
+    activeGeneration.current = cancelGeneration
+    void desktop.cancelTranslation(cancelGeneration).catch((reason: unknown) => {
+      console.error('[translator] failed to cancel active translation', reason)
+    })
+    return cancelGeneration
+  }, [desktop])
+  const hideTranslator = useCallback(() => {
+    cancelTranslation()
+    return desktop.hideWindow()
+  }, [cancelTranslation, desktop])
+  useEffect(() => {
+    document.documentElement.lang = interfaceLanguage === 'zh' ? 'zh-CN' : 'en'
+    document.title = `ScreenPilot — ${t.translatorTitle}`
+    if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+  }, [interfaceLanguage, t.translatorTitle])
   useEffect(() => {
     const lifecycle = { active: true }
     let prepareUnlisten: (() => void) | undefined
     let selectionUnlisten: (() => void) | undefined
+
+    const focusInput = () => {
+      queueMicrotask(() => {
+        if (lifecycle.active) inputRef.current?.focus()
+      })
+    }
+    const applySelection = (selected: string) => {
+      if (!lifecycle.active || lastAppliedSelection.current === selected) return
+      lastAppliedSelection.current = selected
+      inputRevision.current += 1
+      cancelTranslation()
+      immediateRequest.current = null
+      skipNextInputRequest.current = null
+      roundId.current = crypto.randomUUID()
+      setInput(selected)
+      setOutput('')
+      setError(null)
+      setLoading(false)
+      setCopied(false)
+      focusInput()
+    }
+    const refreshSettings = () => {
+      const request = settingsRequest.current + 1
+      settingsRequest.current = request
+      setSettings(null)
+      void desktop.loadSettings().then((loaded) => {
+        if (lifecycle.active && request === settingsRequest.current) {
+          syncDocumentTheme(loaded.theme)
+          setSettings(loaded)
+        }
+      }).catch((reason: unknown) => {
+        if (lifecycle.active && request === settingsRequest.current) setError(String(reason))
+      })
+    }
+    const syncStoredSelection = () => {
+      const request = selectionRequest.current + 1
+      const revision = inputRevision.current
+      selectionRequest.current = request
+      void desktop.takeTranslatorSelection().then((selected) => {
+        if (
+          !lifecycle.active
+          || request !== selectionRequest.current
+          || revision !== inputRevision.current
+        ) return
+        applySelection(selected)
+      }).catch((reason: unknown) => {
+        if (lifecycle.active && request === selectionRequest.current) setError(String(reason))
+      })
+    }
+
     void desktop.onTranslatorPrepare(() => {
       if (!lifecycle.active) return
-      generation.current += 1
+      inputRevision.current += 1
+      cancelTranslation()
+      selectionRequest.current += 1
+      lastAppliedSelection.current = null
+      immediateRequest.current = null
+      skipNextInputRequest.current = null
       roundId.current = crypto.randomUUID()
       setInput('')
       setOutput('')
@@ -95,52 +164,41 @@ export function TranslatorPage() {
       setLoading(false)
       setCopied(false)
       setArrivalCycle((value) => value + 1)
+      refreshSettings()
     }).then((unlisten) => {
       if (lifecycle.active) prepareUnlisten = unlisten
       else unlisten()
     })
     void desktop.onTranslatorSelection((selected) => {
       if (!lifecycle.active) return
-      setInput(selected)
-      queueMicrotask(() => inputRef.current?.focus())
+      selectionRequest.current += 1
+      applySelection(selected)
     }).then((unlisten) => {
       if (lifecycle.active) selectionUnlisten = unlisten
       else unlisten()
     })
-    void Promise.all([desktop.loadSettings(), desktop.takeTranslatorSelection()]).then(([loaded, selected]) => {
-      if (!lifecycle.active) return
-      setSettings(loaded)
-      setInput(selected)
-      queueMicrotask(() => inputRef.current?.focus())
-    }).catch((reason: unknown) => {
-      if (lifecycle.active) setError(String(reason))
-    })
+    refreshSettings()
+    syncStoredSelection()
+    window.addEventListener('focus', syncStoredSelection)
     return () => {
       lifecycle.active = false
       prepareUnlisten?.()
       selectionUnlisten?.()
-      generation.current += 1
+      window.removeEventListener('focus', syncStoredSelection)
+      settingsRequest.current += 1
+      selectionRequest.current += 1
+      cancelTranslation()
     }
-  }, [desktop])
+  }, [cancelTranslation, desktop])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      void desktop.hideWindow()
+      void hideTranslator()
     }
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [desktop])
-  useEffect(() => {
-    const syncSelection = () => {
-      void desktop.takeTranslatorSelection().then((selected) => {
-        setInput(selected)
-        queueMicrotask(() => inputRef.current?.focus())
-      }).catch((reason: unknown) => setError(String(reason)))
-    }
-    window.addEventListener('focus', syncSelection)
-    return () => window.removeEventListener('focus', syncSelection)
-  }, [desktop])
+  }, [hideTranslator])
   useEffect(() => {
     if (settings === null || input.trim().length === 0) return
     if (skipNextInputRequest.current === input) {
@@ -150,8 +208,8 @@ export function TranslatorPage() {
     const requestKey = translationRequestKey(input, settings)
     const delay = immediateRequest.current === requestKey ? 0 : TRANSLATOR_INPUT_DEBOUNCE_MS
     if (delay === 0) immediateRequest.current = null
-    const requestGeneration = generation.current + 1
-    generation.current = requestGeneration
+    const requestGeneration = nextTranslationGeneration()
+    activeGeneration.current = requestGeneration
     const timer = window.setTimeout(() => {
       setLoading(true)
       setError(null)
@@ -162,8 +220,9 @@ export function TranslatorPage() {
         targetLanguage: settings.translation.targetLanguage,
         generation: requestGeneration,
       }).then((result) => {
-        if (result.generation !== generation.current) return
+        if (result.generation !== activeGeneration.current) return
         setOutput(result.text)
+        setCopied(false)
         setLoading(false)
         const entry: TranslationHistory = {
           id: roundId.current,
@@ -174,7 +233,7 @@ export function TranslatorPage() {
         }
         setHistory((items) => saveHistory(localStorage, historyKey, upsertHistory(items, entry)))
       }).catch((reason: unknown) => {
-        if (requestGeneration !== generation.current) return
+        if (requestGeneration !== activeGeneration.current) return
         setLoading(false)
         setError(String(reason))
       })
@@ -186,36 +245,46 @@ export function TranslatorPage() {
     const translation = { ...settings.translation, ...patch }
     const next = normalizeAiAvailability({ ...settings, translation })
     immediateRequest.current = translationRequestKey(input, next)
-    generation.current += 1
+    cancelTranslation()
     setOutput('')
     setLoading(false)
     setError(null)
+    setCopied(false)
     setSettings(next)
     void desktop.updateTranslationSettings(patch).catch((reason: unknown) => setError(String(reason)))
   }
   const updateInput = (value: string) => {
+    if (value === input) return
+    inputRevision.current += 1
+    cancelTranslation()
+    immediateRequest.current = null
+    skipNextInputRequest.current = null
     setInput(value)
+    setOutput('')
+    setLoading(false)
+    setError(null)
+    setCopied(false)
     if (value.trim().length === 0) {
-      generation.current += 1
-      setOutput('')
-      setLoading(false)
-      setError(null)
       roundId.current = crypto.randomUUID()
     }
   }
   const commit = async () => {
     const text = output.trim().length > 0 ? output : input
     if (text.trim().length === 0) return
+    cancelTranslation()
     await desktop.commitText(text, settings?.general.autoPaste ?? false)
     await desktop.hideWindow()
   }
   const restoreHistory = (item: TranslationHistory) => {
-    generation.current += 1
+    inputRevision.current += 1
+    cancelTranslation()
+    immediateRequest.current = null
     skipNextInputRequest.current = item.input === input ? null : item.input
     setInput(item.input)
     setOutput(item.output)
     setError(null)
     setLoading(false)
+    setCopied(false)
     roundId.current = item.id
     queueMicrotask(() => inputRef.current?.focus())
   }
@@ -225,7 +294,9 @@ export function TranslatorPage() {
   const selectedMethod = settings?.translation.method === 'ai' && !canUseAi
     ? DEFAULT_SETTINGS.translation.method
     : settings?.translation.method ?? 'microsoft'
-  const availableMethods = translationMethodOptions.filter((option) => option.value !== 'ai' || canUseAi)
+  const availableMethods = translationMethodOptions
+    .filter((option) => option.value !== 'ai' || canUseAi)
+    .map((option) => ({ ...option, label: translationMethodLabel(option.value, interfaceLanguage) }))
   return (
     <main
       key={arrivalCycle}
@@ -236,22 +307,23 @@ export function TranslatorPage() {
       <header className="ocr-result-header" onPointerDown={beginWindowDrag}>
         <div className="ocr-result-identity">
           <span className="ocr-result-mark"><Languages size={15} /></span>
-          <h1>文本翻译</h1>
+          <h1>{t.translatorTitle}</h1>
         </div>
         <span className="ocr-result-status" aria-live="polite">
-          {loading ? '翻译中…' : input.trim().length > 0 ? 'Ctrl+Enter 提交' : '等待输入'}
+          {loading ? t.translating : input.trim().length > 0 ? t.submitShortcut : t.waitingForInput}
         </span>
         <div className="ocr-result-header-actions">
           <HistoryMenu
             items={history}
-            title="翻译历史"
+            title={t.translationHistory}
             countAnnouncementId="translator-history-count"
-            getMeta={(item) => translationMethodOptions.find((option) => option.value === item.method)?.label ?? item.method}
+            language={interfaceLanguage}
+            getMeta={(item) => translationMethodLabel(item.method, interfaceLanguage)}
             onRestore={restoreHistory}
             onRemove={(id) => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== id)))}
             onClear={() => setHistory((items) => saveHistory(localStorage, historyKey, items.length === 0 ? items : []))}
           />
-          <button type="button" className="ocr-header-button" aria-label="关闭翻译" onClick={() => void desktop.hideWindow()}>
+          <button type="button" className="ocr-header-button" aria-label={t.closeTranslator} onClick={() => void hideTranslator()}>
             <X size={14} />
           </button>
         </div>
@@ -262,9 +334,9 @@ export function TranslatorPage() {
       >
         <section className="ocr-result-section ocr-result-source">
           <div className="ocr-result-section-heading">
-            <label htmlFor="translator-input">原文</label>
+            <label htmlFor="translator-input">{t.originalText}</label>
             <select
-              aria-label="源语言"
+              aria-label={t.sourceLanguage}
               className="translator-language-select"
               value={settings?.translation.sourceLanguage ?? 'auto'}
               disabled={settings === null}
@@ -280,7 +352,7 @@ export function TranslatorPage() {
             ref={inputRef}
             id="translator-input"
             value={input}
-            placeholder="输入或通过 F2 获取当前选中文本"
+            placeholder={t.translatorInputPlaceholder}
             onChange={(event) => updateInput(event.target.value)}
             onCompositionStart={() => { composing.current = true }}
             onCompositionEnd={() => { composing.current = false }}
@@ -296,22 +368,23 @@ export function TranslatorPage() {
           type="button"
           role="separator"
           className="ocr-result-divider translator-split-divider"
-          aria-label="调整原文和译文高度"
+          aria-label={t.resizeTranslationPanels}
           aria-orientation="horizontal"
           aria-valuemin={24}
           aria-valuemax={76}
           aria-valuenow={Math.round(ratio * 100)}
           onPointerDown={beginResize}
+          onKeyDown={resizeByKeyboard}
         >
           <span />
         </button>
         <section className="ocr-result-section ocr-result-output">
           <div className="ocr-result-section-heading">
-            <label>译文</label>
+            <label>{t.translatedText}</label>
             <button
               type="button"
               className="ocr-section-button"
-              aria-label="复制译文"
+              aria-label={t.copyTranslation}
               disabled={output.length === 0}
               onClick={() => {
                 void navigator.clipboard.writeText(output).then(() => {
@@ -323,7 +396,7 @@ export function TranslatorPage() {
               {copied ? <Check size={15} /> : <Clipboard size={15} />}
             </button>
             <select
-              aria-label="目标语言"
+              aria-label={t.targetLanguage}
               className="translator-language-select"
               value={settings?.translation.targetLanguage ?? 'auto'}
               disabled={settings === null}
@@ -335,7 +408,7 @@ export function TranslatorPage() {
               {targetLanguageOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
             </select>
             <select
-              aria-label="翻译接口"
+              aria-label={t.translationInterface}
               value={selectedMethod}
               disabled={settings === null}
               onChange={(event) => {
@@ -352,9 +425,9 @@ export function TranslatorPage() {
           {!loading && error === null ? (
             <textarea
               id="translator-output"
-              aria-label="译文"
+              aria-label={t.translatedText}
               value={output}
-              placeholder="译文将在这里显示，可直接编辑"
+              placeholder={t.translatedTextPlaceholder}
               onChange={(event) => setOutput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !composing.current) {

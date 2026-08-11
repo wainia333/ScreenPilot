@@ -5,6 +5,7 @@ import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings, OcrMethod, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
 import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
+import { copyFor, translationLanguageOptions, translationMethodLabel } from '../../../shared/ui-copy'
 
 export function ScreenshotSection({
   settings,
@@ -13,6 +14,7 @@ export function ScreenshotSection({
   settings: AppSettings
   onChange: (settings: AppSettings) => void
 }) {
+  const t = copyFor(settings.language)
   const current = settings.screenshotTranslation
   const update = (patch: Partial<AppSettings['screenshotTranslation']>) =>
     onChange(normalizeAiAvailability({ ...settings, screenshotTranslation: { ...current, ...patch } }))
@@ -26,110 +28,101 @@ export function ScreenshotSection({
   const translationMethod = current.translationMethod === 'ai' && !canUseTranslationAi
     ? DEFAULT_SETTINGS.screenshotTranslation.translationMethod
     : current.translationMethod
-  const methods = translationMethodOptions.filter((option) => option.value !== 'ai' || canUseTranslationAi)
+  const methods = translationMethodOptions
+    .filter((option) => option.value !== 'ai' || canUseTranslationAi)
+    .map((option) => ({ ...option, label: translationMethodLabel(option.value, settings.language) }))
   return (
     <>
-      <SettingGroup title="截图翻译">
-        <SettingRow label="启用截图翻译">
-          <Toggle checked={current.enabled} label="启用截图翻译" onChange={(enabled) => update({ enabled })} />
+      <SettingGroup title={t.screenshotTranslation}>
+        <SettingRow label={t.enableScreenshotTranslation}>
+          <Toggle checked={current.enabled} label={t.enableScreenshotTranslation} onChange={(enabled) => update({ enabled })} />
         </SettingRow>
-        <SettingRow label="目标语言">
+        <SettingRow label={t.targetLanguage}>
           <SelectField
             value={current.targetLanguage}
-            label="截图翻译目标语言"
-            options={[
-              { value: 'auto', label: '自动' },
-              { value: 'zh-CN', label: '简体中文' },
-              { value: 'en', label: 'English' },
-              { value: 'ja', label: '日本語' },
-              { value: 'ko', label: '한국어' },
-            ]}
+            label={t.screenshotTargetLanguage}
+            options={translationLanguageOptions(settings.language)}
             onChange={(targetLanguage) => update({ targetLanguage })}
           />
         </SettingRow>
-        <SettingRow label="源语言">
+        <SettingRow label={t.sourceLanguage}>
           <SelectField
             value={current.sourceLanguage}
-            label="截图翻译源语言"
-            options={[
-              { value: 'auto', label: '自动' },
-              { value: 'zh-CN', label: '简体中文' },
-              { value: 'en', label: 'English' },
-              { value: 'ja', label: '日本語' },
-              { value: 'ko', label: '한국어' },
-            ]}
+            label={t.screenshotSourceLanguage}
+            options={translationLanguageOptions(settings.language)}
             onChange={(sourceLanguage) => update({ sourceLanguage })}
           />
         </SettingRow>
-        <SettingRow label="开启大模型 OCR">
+        <SettingRow label={t.enableAiOcr}>
           <Toggle
             checked={current.ocrAiEnabled}
-            label="开启大模型 OCR"
+            label={t.enableAiOcr}
             onChange={(ocrAiEnabled) => update({ ocrAiEnabled })}
           />
         </SettingRow>
         {current.ocrAiEnabled ? (
-          <SettingRow label="OCR 模型">
+          <SettingRow label={t.ocrModel}>
             <ModelField
               value={current.ocrModel}
               providers={settings.providers}
-              label="OCR 模型"
+              label={t.ocrModel}
+              emptyLabel={t.noSelection}
               onChange={(ocrModel) => update({ ocrModel })}
             />
           </SettingRow>
         ) : null}
-        <SettingRow label="OCR 接口">
+        <SettingRow label={t.ocrInterface}>
           <SelectField<OcrMethod>
             value={ocrMethod}
-            label="OCR 接口"
+            label={t.ocrInterface}
             options={[
-              ...(canUseOcrAi ? [{ value: 'ai' as const, label: 'AI 视觉 OCR' }] : []),
-              { value: 'baidu', label: '百度 OCR' },
-              { value: 'chaoxing', label: '学习通 OCR' },
-              { value: 'system', label: '系统 OCR' },
+              ...(canUseOcrAi ? [{ value: 'ai' as const, label: t.aiVisionOcr }] : []),
+              { value: 'baidu', label: t.baiduOcr },
+              { value: 'chaoxing', label: t.chaoxingOcr },
             ]}
             onChange={(ocrMethod) => update({ ocrMethod })}
           />
         </SettingRow>
-        <SettingRow label="开启大模型翻译">
+        <SettingRow label={t.enableAiTranslation}>
           <Toggle
             checked={current.translationAiEnabled}
-            label="开启大模型翻译"
+            label={t.enableAiTranslation}
             onChange={(translationAiEnabled) => update({ translationAiEnabled })}
           />
         </SettingRow>
         {current.translationAiEnabled ? (
-          <SettingRow label="翻译模型">
+          <SettingRow label={t.translationModel}>
             <ModelField
               value={current.translationModel}
               providers={settings.providers}
-              label="截图翻译模型"
+              label={t.screenshotTranslationModel}
+              emptyLabel={t.noSelection}
               onChange={(translationModel) => update({ translationModel })}
             />
           </SettingRow>
         ) : null}
-        <SettingRow label="翻译接口">
+        <SettingRow label={t.translationInterface}>
           <SelectField
             value={translationMethod}
-            label="截图翻译接口"
+            label={t.screenshotTranslationInterface}
             options={methods}
             onChange={(translationMethod) => update({ translationMethod })}
           />
         </SettingRow>
-        <SettingRow label="显示识别原文">
-          <Toggle checked={current.showSource} label="显示识别原文" onChange={(showSource) => update({ showSource })} />
+        <SettingRow label={t.showRecognizedSource}>
+          <Toggle checked={current.showSource} label={t.showRecognizedSource} onChange={(showSource) => update({ showSource })} />
         </SettingRow>
-        <SettingRow label="流式输出">
-          <Toggle checked={current.stream} label="截图翻译流式输出" onChange={(stream) => update({ stream })} />
+        <SettingRow label={t.streamingOutput}>
+          <Toggle checked={current.stream} label={t.screenshotStreamingOutput} onChange={(stream) => update({ stream })} />
         </SettingRow>
-        <SettingRow label="显示思考过程">
-          <Toggle checked={current.thinking} label="显示思考过程" onChange={(thinking) => update({ thinking })} />
+        <SettingRow label={t.showReasoning}>
+          <Toggle checked={current.thinking} label={t.showReasoning} onChange={(thinking) => update({ thinking })} />
         </SettingRow>
         {current.thinking ? (
-          <SettingRow label="思考强度">
+          <SettingRow label={t.reasoningEffort}>
             <SelectField<ThinkingEffort>
               value={current.thinkingEffort}
-              label="截图翻译思考强度"
+              label={t.screenshotReasoningEffort}
               options={[
                 { value: 'low', label: 'low' },
                 { value: 'medium', label: 'medium' },
@@ -142,40 +135,42 @@ export function ScreenshotSection({
         ) : null}
       </SettingGroup>
       <SettingGroup
-        title="OCR 提示词"
+        title={t.ocrPrompt}
         titleAction={
           <PromptResetButton
             value={current.ocrPrompt}
-            label="OCR 提示词"
+            label={t.ocrPrompt}
             defaultValue={DEFAULT_SETTINGS.screenshotTranslation.ocrPrompt}
+            resetLabel={t.resetDefault}
             onChange={(ocrPrompt) => update({ ocrPrompt })}
           />
         }
       >
         <PromptField
           value={current.ocrPrompt}
-          label="OCR 提示词"
+          label={t.ocrPrompt}
           onChange={(ocrPrompt) => update({ ocrPrompt })}
         />
       </SettingGroup>
       <SettingGroup
-        title="截图翻译提示词"
+        title={t.screenshotTranslationPrompt}
         titleAction={
           <PromptResetButton
             value={current.translationPrompt}
-            label="截图翻译提示词"
+            label={t.screenshotTranslationPrompt}
             defaultValue={DEFAULT_SETTINGS.screenshotTranslation.translationPrompt}
+            resetLabel={t.resetDefault}
             onChange={(translationPrompt) => update({ translationPrompt })}
           />
         }
       >
         <PromptField
           value={current.translationPrompt}
-          label="截图翻译提示词"
+          label={t.screenshotTranslationPrompt}
           onChange={(translationPrompt) => update({ translationPrompt })}
         />
       </SettingGroup>
-      <AdapterCredentials />
+      <AdapterCredentials language={settings.language} />
     </>
   )
 }

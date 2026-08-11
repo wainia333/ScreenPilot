@@ -1,8 +1,24 @@
-import { isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { createContext, isValidElement, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
 import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X, Sparkles, MessageSquare } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, type VisionStreamPayload, type VisionTranslateStreamPayload, type VisionWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
+import {
+  loadVisionHistory,
+  saveVisionHistory,
+  VISION_HISTORY_MAX as HISTORY_MAX,
+  VISION_HISTORY_REPAIR_NOTICE_KEY,
+  type VisionCapturedFrame as CapturedFrame,
+  type VisionHistoryItem as HistoryItem,
+  type VisionHistoryLoadResult,
+} from './history'
+import {
+  adjustKeyboardArrow,
+  adjustKeyboardRegion,
+  defaultKeyboardArrow,
+  defaultKeyboardRegion,
+  nextWindowIndex,
+} from './accessibility'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -25,6 +41,7 @@ type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMet
 type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
 
 const APPLE_INTELLIGENCE_BASE_URL = 'applefoundation://local'
+const VisionLanguageContext = createContext<Lang>('zh')
 
 type FloatingRectRequest = Parameters<typeof api.visionSetFloating>[0]
 
@@ -111,8 +128,9 @@ function resolveVisionModelLabel(settings: Settings): string {
 }
 
 function resolveScreenshotOcrMethod(settings: Settings): ScreenshotOcrMethod {
-  return settings.screenshotTranslation?.ocrMethod
-    || (settings.screenshotTranslation?.useSystemOcr ? 'system' : 'ai')
+  const method = settings.screenshotTranslation?.ocrMethod
+  if (method === 'system' || settings.screenshotTranslation?.useSystemOcr) return 'chaoxing'
+  return method || 'ai'
 }
 
 function resolveScreenshotTranslationMethod(settings: Settings): ScreenshotTranslationMethod {
@@ -128,7 +146,7 @@ function providerKeyConfigError(
   const provider = settings.providers.find(p => p.id === providerId.trim())
   if (!provider) return missingProvider
   if (provider.baseUrl === APPLE_INTELLIGENCE_BASE_URL) return ''
-  return provider.apiKeys.some(key => key.trim()) ? '' : missingKey
+  return provider.keyCount > 0 ? '' : missingKey
 }
 
 function ocrConfigError(settings: Settings, method: ScreenshotOcrMethod, lang: Lang): string {
@@ -136,7 +154,7 @@ function ocrConfigError(settings: Settings, method: ScreenshotOcrMethod, lang: L
   const st = settings.screenshotTranslation
   if (method === 'baidu') {
     const cfg = st.baiduOcr
-    if (!cfg?.apiKey?.trim() || !cfg?.secretKey?.trim()) {
+    if (!cfg?.apiKeyConfigured || !cfg.secretKeyConfigured) {
       return zh
         ? '请先在设置中配置百度 OCR API Key 和 Secret Key。'
         : 'Configure the Baidu OCR API Key and Secret Key in Settings first.'
@@ -166,7 +184,7 @@ function translationConfigError(settings: Settings, method: ScreenshotTranslatio
   }
   if (method === 'baidu') {
     const cfg = st.baiduTranslate
-    if (!cfg?.appId?.trim() || !cfg?.appKey?.trim()) {
+    if (!cfg?.appIdConfigured || !cfg.appKeyConfigured) {
       return zh
         ? '请先在设置中配置百度翻译 APP ID 和 APP Key。'
         : 'Configure the Baidu Translate APP ID and APP Key in Settings first.'
@@ -174,14 +192,14 @@ function translationConfigError(settings: Settings, method: ScreenshotTranslatio
   }
   if (method === 'tencent') {
     const cfg = st.tencentTranslate
-    if (!cfg?.secretId?.trim() || !cfg?.secretKey?.trim()) {
+    if (!cfg?.secretIdConfigured || !cfg.secretKeyConfigured) {
       return zh
         ? '请先在设置中配置腾讯云 SecretId 和 SecretKey。'
         : 'Configure the Tencent Cloud SecretId and SecretKey in Settings first.'
     }
   }
   if (method === 'caiyun2') {
-    if (!st.caiyunTranslate?.token?.trim()) {
+    if (!st.caiyunTranslate?.tokenConfigured) {
       return zh
         ? '请先在设置中配置彩云小译 Token。'
         : 'Configure the Caiyun token in Settings first.'
@@ -381,6 +399,10 @@ function reactNodeToText(node: ReactNode): string {
 function MarkdownCodeCopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lang = useContext(VisionLanguageContext)
+  const label = copied
+    ? (lang === 'zh' ? '已复制' : 'Copied')
+    : (lang === 'zh' ? '复制代码' : 'Copy code')
 
   useEffect(() => () => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -403,9 +425,9 @@ function MarkdownCodeCopyButton({ text }: { text: string }) {
       onClick={handleCopy}
       onMouseDown={(event) => event.stopPropagation()}
       disabled={!text.trim()}
-      title={copied ? '已复制' : '复制代码'}
-      aria-label={copied ? '已复制' : '复制代码'}
-      className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
+      title={label}
+      aria-label={label}
+      className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
     >
       {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.1} />}
     </button>
@@ -643,7 +665,6 @@ function EditableOcrText({
 type Point = { x: number; y: number }
 type Rect = { x: number; y: number; width: number; height: number }
 type BarRect = { x: number; y: number; width: number }
-type CapturedFrame = { x: number; y: number; width: number; height: number; label: string }
 type CopyTarget = 'answer' | 'original' | 'translated'
 type Arrow = {
   x1: number
@@ -655,33 +676,12 @@ type Arrow = {
 const ARROW_COLOR = '#ff3b30'
 const ARROW_MIN_DRAG_PX = 8
 const ARROW_HEAD_ANGLE_DEG = 30
-type HistoryItem = {
-  id: string                   // 有图时是 imageId（恢复后重新提问复用同一张图）；纯文字会话是自造的会话 id
-  imagePreview: string         // base64 data URL；纯文字会话为空
-  appLabel: string
-  messages: ExplainMessage[]   // 完整多轮对话
-  capturedFrame: CapturedFrame | null
-  timestamp: number
-  /** 纯文字会话（没有截图）。恢复时据此把 imageIdRef 置空，
-      否则会拿这个自造 id 去后端找图，vision_ask 直接报 Image not found。
-      老数据没有这个字段 → undefined → 按有图处理，行为不变。 */
-  textOnly?: boolean
-}
-
-const HISTORY_MAX = 20
-
 /** 纯文字会话的历史 id。前缀便于排查；字符集刻意只用字母数字和连字符，
     保证即便误传到后端也能过 is_safe_image_id 的校验。 */
 function makeTextSessionId(): string {
   return `text-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-const HISTORY_STORAGE_KEY = 'kivio:vision-history:v1'
-const HISTORY_STORAGE_KEYS_LEGACY = [
-  'kivio:lens-history:v1',
-  'keylingo:lens-history:v1',
-  'keylingo:vision-history:v1',
-] as const
 const HISTORY_THUMB_SIZE = 96     // 历史记录缩略图边长（px），原始截图压成这个尺寸再持久化
 const HISTORY_PANEL_W = 240
 const HISTORY_PANEL_MAX_H = 200
@@ -978,38 +978,6 @@ function ArrowSvg({ arrow }: { arrow: Arrow }) {
   )
 }
 
-/** 从 localStorage 读历史。失败 / 损坏数据 → 空数组。
-    一次性迁移旧 Lens / KeyLingo key → kivio:vision-history:v1。 */
-function loadHistoryFromStorage(): HistoryItem[] {
-  try {
-    let raw = localStorage.getItem(HISTORY_STORAGE_KEY)
-    if (!raw) {
-      for (const legacyKey of HISTORY_STORAGE_KEYS_LEGACY) {
-        const legacy = localStorage.getItem(legacyKey)
-        if (!legacy) continue
-        localStorage.setItem(HISTORY_STORAGE_KEY, legacy)
-        localStorage.removeItem(legacyKey)
-        raw = legacy
-        break
-      }
-      if (!raw) return []
-    }
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.slice(0, HISTORY_MAX)
-  } catch {
-    return []
-  }
-}
-
-function saveHistoryToStorage(history: HistoryItem[]) {
-  try {
-    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history))
-  } catch (err) {
-    console.error('[vision-history] localStorage save failed:', err)
-  }
-}
-
 type Metrics = {
   READY_W: number
   SELECT_W: number
@@ -1202,6 +1170,9 @@ export default function Vision() {
   const [dragStart, setDragStart] = useState<Point | null>(null)
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [keyboardSelectionMode, setKeyboardSelectionMode] = useState<'window' | 'region' | null>(null)
+  const [keyboardRegion, setKeyboardRegion] = useState<Rect | null>(null)
+  const [a11yAnnouncement, setA11yAnnouncement] = useState('')
   const [selectBarCollapsed, setSelectBarCollapsed] = useState(false)
   const [animatedHoverRect, setAnimatedHoverRect] = useState<Rect | null>(null)
   const [imagePreview, setImagePreview] = useState('')
@@ -1233,6 +1204,7 @@ export default function Vision() {
   const [translateText, setTranslateText] = useState('')
   const [translateError, setTranslateError] = useState('')
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
+  const [captureWarning, setCaptureWarning] = useState('')
   const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
   const [translateOcrMethod, setTranslateOcrMethod] = useState<ScreenshotOcrMethod>('ai')
@@ -1283,12 +1255,27 @@ export default function Vision() {
       setDraftArrow(null)
     }
   }, [stage])
-  const [history, setHistory] = useState<HistoryItem[]>(loadHistoryFromStorage)
+  const initialHistoryRef = useRef<VisionHistoryLoadResult | null>(null)
+  if (initialHistoryRef.current === null) initialHistoryRef.current = loadVisionHistory(localStorage)
+  const [history, setHistory] = useState<HistoryItem[]>(initialHistoryRef.current.items)
+  const historyRejectedCount = initialHistoryRef.current.rejectedCount
   const [historyOpen, setHistoryOpen] = useState(false)
   const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
   const [nativeHitRegionActive, setNativeHitRegionActive] = useState(false)
   const [panelDragActive, setPanelDragActive] = useState(false)
   const [windowMoveRevision, setWindowMoveRevision] = useState(0)
+
+  useEffect(() => {
+    if (historyRejectedCount <= 0) return
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.removeItem(VISION_HISTORY_REPAIR_NOTICE_KEY)
+      } catch {
+        // A stale notice is harmless and can be retried on the next open.
+      }
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [historyRejectedCount])
 
   const inputRef = useRef<HTMLInputElement>(null)
   const barPanelRef = useRef<HTMLDivElement>(null)
@@ -1298,6 +1285,8 @@ export default function Vision() {
   const promptPreviewEditorRef = useRef<HTMLTextAreaElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
   const historyDropdownRef = useRef<HTMLDivElement>(null)
+  const historyTriggerRef = useRef<HTMLButtonElement>(null)
+  const drawSurfaceRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<Stage>('select')
   const modeRef = useRef<Mode>(mode)
   const historyOpenRef = useRef(false)
@@ -1307,6 +1296,8 @@ export default function Vision() {
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const captureWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const historyPersistenceRef = useRef<Set<Promise<void>>>(new Set())
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const speechSeqRef = useRef(0)
   const nativeFlySeqRef = useRef(0)
@@ -1330,6 +1321,13 @@ export default function Vision() {
   // capture 期间 macOS screencapture 可能短暂让 vision webview 失焦 → 触发 blur 误关闭。
   // 这个 ref 标记"截图进行中"，blur handler 看到就跳过。
   const capturingRef = useRef(false)
+  // Capture IPC can finish after the Vision surface has already been closed or
+  // replaced. Keep it separate from the AI request lifecycle: a stale capture
+  // must never restore the hidden surface, and any late temporary image must be
+  // released instead of being adopted by the next Vision session.
+  const captureSequenceRef = useRef(0)
+  const captureSurfaceActiveRef = useRef(false)
+  const visionSurfaceEpochRef = useRef(0)
   // selectionText 异步 take 的重入 token：每次 enterSelect / resetBeforeHide / restoreHistory 都 +1，
   // 老请求看到 myReq !== current 直接丢弃，避免 take 完成时已经进入新会话被错误注入。
   const selectionReqIdRef = useRef(0)
@@ -1356,6 +1354,56 @@ export default function Vision() {
     nativeFlySeqRef.current++
     return sequence
   }, [])
+
+  const invalidateCapture = useCallback(() => {
+    captureSequenceRef.current += 1
+    captureSurfaceActiveRef.current = false
+    capturingRef.current = false
+  }, [])
+
+  const invalidateVisionSurface = useCallback(() => {
+    visionSurfaceEpochRef.current += 1
+    invalidateCapture()
+    selectionReqIdRef.current += 1
+    nativeFlySeqRef.current += 1
+    focusReqIdRef.current += 1
+  }, [invalidateCapture])
+
+  const captureResultIsCurrent = useCallback(async (sequence: number) => {
+    if (
+      sequence !== captureSequenceRef.current
+      || !captureSurfaceActiveRef.current
+    ) return false
+    try {
+      const visible = await getCurrentWindow().isVisible()
+      return visible
+        && sequence === captureSequenceRef.current
+        && captureSurfaceActiveRef.current
+    } catch (error) {
+      console.error('[vision-capture] window visibility check failed:', error)
+      return false
+    }
+  }, [])
+
+  const deleteStaleCaptureImage = useCallback(async (imageId?: string) => {
+    if (!imageId) return
+    try {
+      await api.visionDeleteTemporaryImage(imageId)
+    } catch (error) {
+      console.error('[vision-capture] stale image cleanup failed:', error)
+    }
+  }, [])
+
+  const showArchiveWarning = useCallback((warning?: string) => {
+    if (!warning) return
+    const detail = warning.replace(/^Screenshot archive failed:\s*/i, '')
+    setCaptureWarning(`${i18n[lang].visionArchiveWarning}${lang === 'zh' ? '：' : ': '}${detail}`)
+    if (captureWarningTimeoutRef.current) clearTimeout(captureWarningTimeoutRef.current)
+    captureWarningTimeoutRef.current = window.setTimeout(() => {
+      captureWarningTimeoutRef.current = null
+      setCaptureWarning('')
+    }, 6000)
+  }, [lang])
 
   const isVisionRequestCurrent = useCallback((requestId: string) => (
     visionRequestLifecycleRef.current.isCurrent(requestId)
@@ -1462,6 +1510,10 @@ export default function Vision() {
   }, [])
 
   const focusVisionInput = useCallback((delays: number[] = [0, 40, 120, 240, 420]) => {
+    if (historyOpenRef.current) {
+      focusReqIdRef.current += 1
+      return
+    }
     const requestId = ++focusReqIdRef.current
     const canFocus = () => (
       requestId === focusReqIdRef.current
@@ -1525,6 +1577,14 @@ export default function Vision() {
   }, [])
 
   const enterSelect = useCallback(async () => {
+    const previousImageId = imageIdRef.current
+    invalidateVisionSurface()
+    const surfaceEpoch = visionSurfaceEpochRef.current
+    captureSurfaceActiveRef.current = true
+    const surfaceIsCurrent = () => (
+      surfaceEpoch === visionSurfaceEpochRef.current
+      && captureSurfaceActiveRef.current
+    )
     invalidateVisionRequest()
     setVisionCursorPassthrough(false)
     void api.visionSetHitRegion(null).catch(err => console.error('[vision-floating] clear hit region failed:', err))
@@ -1559,6 +1619,11 @@ export default function Vision() {
     resetVisionStreamBuffer()
     justFinishedStreamRef.current = false
     imageIdRef.current = ''
+    if (previousImageId) {
+      void api.visionDeleteTemporaryImage(previousImageId).catch(err => {
+        console.error('[vision-image] temporary cleanup failed:', err)
+      })
+    }
     textSessionIdRef.current = ''
     // 用 flushSync 同步提交所有 reset 后的状态：webview show 之前 DOM 必须已经反映新位置，
     // 否则 Rust 的 show() 会先把旧 frame 露出来。
@@ -1577,6 +1642,9 @@ export default function Vision() {
       setDragStart(null)
       setDragCurrent(null)
       setDragging(false)
+      setKeyboardSelectionMode(null)
+      setKeyboardRegion(null)
+      setA11yAnnouncement('')
       setSelectBarCollapsed(false)
       // 历史下拉是"上一次开窗遗留"的典型：webview 不销毁，state 一直留着。
       // 展开着按 esc 关窗，下次打开还是展开的。两条复位路径都要收掉。
@@ -1594,6 +1662,7 @@ export default function Vision() {
       setTranslateText('')
       setTranslateError('')
       setTranslateDurationMs(null)
+      setCaptureWarning('')
       setTranslateRetranslating(false)
       setOcrMethodSwitching(false)
       setTranslationMethodSwitching(false)
@@ -1606,8 +1675,10 @@ export default function Vision() {
     })
     try {
       const settings = await api.getSettings()
+      if (!surfaceIsCurrent()) return
       const curMode = readModeFromHash()
       const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.vision
+      setLang(settings.settingsLanguage === 'en' ? 'en' : 'zh')
       setActiveVisionModel(resolveVisionModelLabel(settings))
       setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
       if (curMode === 'translate') {
@@ -1615,7 +1686,11 @@ export default function Vision() {
         setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
         setTranslateMethod(resolveScreenshotTranslationMethod(settings))
       }
-    } catch (err) { console.error('Failed to reload settings', err) }
+    } catch (err) {
+      if (!surfaceIsCurrent()) return
+      console.error('Failed to reload settings', err)
+    }
+    if (!surfaceIsCurrent()) return
     hoverAnimationRef.current.rect = null
     if (hoverAnimationRef.current.raf !== null) {
       cancelAnimationFrame(hoverAnimationRef.current.raf)
@@ -1629,7 +1704,7 @@ export default function Vision() {
       void (async () => {
         try {
           const text = await api.takeVisionSelection()
-          if (myReq !== selectionReqIdRef.current) return
+          if (!surfaceIsCurrent() || myReq !== selectionReqIdRef.current) return
           if (text.length > 200_000) return
           if (text.trim()) {
             setSelectionText(text)
@@ -1641,9 +1716,11 @@ export default function Vision() {
       })()
     }
     requestAnimationFrame(() => {
+      if (!surfaceIsCurrent()) return
       // 第二个 raf 同时恢复 transitions 并触发 intro：现在 bar 已经在 select 位置，
       // 只对 transform/opacity 做缩放进入动画，不会回放历史 left/top 过渡。
       requestAnimationFrame(() => {
+        if (!surfaceIsCurrent()) return
         setBarIntro(true)
         setBarNoTransition(false)
       })
@@ -1652,10 +1729,15 @@ export default function Vision() {
     try {
       const win = getCurrentWindow()
       const [pos, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()])
+      if (!surfaceIsCurrent()) return
       const sf = scale || 1
       currentOrigin = { x: pos.x / sf, y: pos.y / sf }
       setWinOrigin(currentOrigin)
-    } catch (err) { console.error('Failed to read window origin', err) }
+    } catch (err) {
+      if (!surfaceIsCurrent()) return
+      console.error('Failed to read window origin', err)
+    }
+    if (!surfaceIsCurrent()) return
     try {
       const [list, cursor] = await Promise.all([
         api.visionListWindows(),
@@ -1664,16 +1746,36 @@ export default function Vision() {
           return null
         }),
       ])
+      if (!surfaceIsCurrent()) return
       setWindows(list)
       setHovered(cursor ? findWindowAt(list, cursor) : null)
     } catch (err) {
+      if (!surfaceIsCurrent()) return
       console.error('Failed to list windows', err)
       setWindows([])
       setHovered(null)
     }
-    await api.showWindow()
+    if (!surfaceIsCurrent()) return
+    try {
+      await api.showWindow()
+    } catch (err) {
+      if (surfaceIsCurrent()) console.error('Failed to show Vision window', err)
+      return
+    }
+    if (!surfaceIsCurrent()) {
+      // show() may resolve after Rust has already closed this surface. Only
+      // compensate when no newer enterSelect session owns the shared window.
+      if (!captureSurfaceActiveRef.current) {
+        try {
+          await api.hideWindow()
+        } catch (err) {
+          if (!captureSurfaceActiveRef.current) console.error('Failed to re-hide stale Vision window', err)
+        }
+      }
+      return
+    }
     focusVisionInput()
-  }, [cancelPromptOptimization, focusVisionInput, invalidateVisionRequest, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, focusVisionInput, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     void enterSelect()
@@ -1681,6 +1783,21 @@ export default function Vision() {
     window.addEventListener('vision:reset', handleReset)
     return () => window.removeEventListener('vision:reset', handleReset)
   }, [enterSelect])
+
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void api.onVisionClosing(() => {
+      invalidateVisionSurface()
+    }).then((dispose) => {
+      if (cancelled) dispose()
+      else unlisten = dispose
+    }).catch(error => console.error('[vision-capture] closing listener failed:', error))
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [invalidateVisionSurface])
 
   useEffect(() => {
     let cancelled = false
@@ -1799,13 +1916,20 @@ export default function Vision() {
     }
     const id = textOnly ? textSessionIdRef.current : imageIdRef.current
     let cancelled = false
-    void (async () => {
+    const persistence = (async () => {
       const thumb = textOnly ? '' : await makeThumbnail(imagePreview, HISTORY_THUMB_SIZE)
       if (cancelled) return
-      // 把活跃 image 拷贝到 vision-history 持久目录（vision_close 不会再删它，下次打开历史还能继续聊）
-      // 纯文字会话没有图可拷，跳过这次 IPC
       if (!textOnly) {
-        api.visionCommitImageToHistory(id).catch(err => console.error('[vision-history] commit failed:', err))
+        try {
+          // 先完成持久化，再写历史元数据，避免关闭窗口时留下无法恢复的记录。
+          await api.visionCommitImageToHistory(id)
+        } catch (err) {
+          console.error('[vision-history] commit failed:', err)
+          await api.visionDeleteTemporaryImage(id).catch(cleanupError => {
+            console.error('[vision-history] failed image cleanup failed:', cleanupError)
+          })
+          return
+        }
       }
       setHistory(prev => {
         const filtered = prev.filter(h => h.id !== id)
@@ -1821,12 +1945,16 @@ export default function Vision() {
         return [next, ...filtered].slice(0, HISTORY_MAX)
       })
     })()
+    historyPersistenceRef.current.add(persistence)
+    void persistence.finally(() => {
+      historyPersistenceRef.current.delete(persistence)
+    })
     return () => { cancelled = true }
   }, [mode, streaming, messages, imagePreview, appLabel, capturedFrame])
 
   const prevHistoryIdsRef = useRef<Set<string>>(new Set(history.map(h => h.id)))
   useEffect(() => {
-    saveHistoryToStorage(history)
+    saveVisionHistory(localStorage, history)
     const curIds = new Set(history.map(h => h.id))
     prevHistoryIdsRef.current.forEach(id => {
       if (!curIds.has(id)) {
@@ -1922,6 +2050,8 @@ export default function Vision() {
   // 否则下次 show 时可能先显示上次的 ready/result 态 surface 一帧，再被 vision:reset 覆盖。
   // barNoTransition：禁用 left/top/width transition，避免 380ms 动画被 hide 暂停后下次 show 续播。
   const resetBeforeHide = useCallback(() => {
+    const previousImageId = imageIdRef.current
+    invalidateVisionSurface()
     invalidateVisionRequest()
     setVisionCursorPassthrough(false)
     void api.visionSetHitRegion(null).catch(err => console.error('[vision-floating] clear hit region failed:', err))
@@ -1947,6 +2077,11 @@ export default function Vision() {
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
     justFinishedStreamRef.current = false
     imageIdRef.current = ''
+    if (previousImageId) {
+      void api.visionDeleteTemporaryImage(previousImageId).catch(err => {
+        console.error('[vision-image] temporary cleanup failed:', err)
+      })
+    }
     textSessionIdRef.current = ''
     flushSync(() => {
       setBarNoTransition(true)
@@ -1960,6 +2095,9 @@ export default function Vision() {
       setDragStart(null)
       setDragCurrent(null)
       setDragging(false)
+      setKeyboardSelectionMode(null)
+      setKeyboardRegion(null)
+      setA11yAnnouncement('')
       setSelectBarCollapsed(false)
       setHistoryOpen(false)
       setImagePreview('')
@@ -1974,6 +2112,7 @@ export default function Vision() {
       setTranslateText('')
       setTranslateError('')
       setTranslateDurationMs(null)
+      setCaptureWarning('')
       setTranslateRetranslating(false)
       setOcrMethodSwitching(false)
       setTranslationMethodSwitching(false)
@@ -1984,7 +2123,7 @@ export default function Vision() {
     // 让任何还没落地的 takeVisionSelection 老 promise 作废，避免关闭后 setSelectionText 拖回来
     selectionReqIdRef.current++
     focusReqIdRef.current++
-  }, [cancelPromptOptimization, invalidateVisionRequest, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
 
   const resetAfterClose = useCallback(() => {
     if (closeResetTimerRef.current) clearTimeout(closeResetTimerRef.current)
@@ -1995,6 +2134,7 @@ export default function Vision() {
   }, [resetBeforeHide])
 
   const closeLikeEscape = useCallback(async () => {
+    invalidateVisionSurface()
     invalidateVisionRequest()
     if (stageRef.current === 'answering' && streaming) {
       closingStreamRef.current = true
@@ -2004,18 +2144,30 @@ export default function Vision() {
       setStreaming(false)
     }
     setVisionCursorPassthrough(false)
+    if (historyPersistenceRef.current.size > 0) {
+      await Promise.allSettled([...historyPersistenceRef.current])
+    }
     try { await api.visionClose() } catch (err) { console.error(err) }
     resetAfterClose()
-  }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, invalidateVisionRequest, resetAfterClose, setVisionCursorPassthrough, streaming])
+  }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, invalidateVisionRequest, invalidateVisionSurface, resetAfterClose, setVisionCursorPassthrough, streaming])
 
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (stageRef.current === 'select' && keyboardSelectionMode !== null) {
+        e.preventDefault()
+        e.stopPropagation()
+        setKeyboardSelectionMode(null)
+        setKeyboardRegion(null)
+        setHovered(null)
+        setA11yAnnouncement(lang === 'zh' ? '已退出键盘截图选择。' : 'Keyboard screenshot selection cancelled.')
+        return
+      }
       await closeLikeEscape()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [closeLikeEscape])
+  }, [closeLikeEscape, keyboardSelectionMode, lang])
 
   useEffect(() => {
     if (!drawMode) return
@@ -2034,19 +2186,35 @@ export default function Vision() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && !isInput) {
         e.preventDefault()
         e.stopPropagation()
-        setArrows(prev => prev.slice(0, -1))
+        setArrows(prev => {
+          if (prev.length > 0) {
+            setA11yAnnouncement(lang === 'zh' ? '已撤销上一支箭头。' : 'Previous arrow removed.')
+          }
+          return prev.slice(0, -1)
+        })
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [drawMode])
+  }, [drawMode, lang])
+
+  useEffect(() => {
+    if (!drawMode) return
+    setA11yAnnouncement(lang === 'zh'
+      ? '箭头标注已开启。按 Enter 创建箭头，方向键调整终点，Shift+方向键平移，再按 Enter 提交。'
+      : 'Arrow annotation enabled. Press Enter to create an arrow, use Arrow keys to adjust its endpoint, Shift+Arrow keys to move it, then press Enter to commit.')
+    const frame = window.requestAnimationFrame(() => drawSurfaceRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [drawMode, lang])
 
   // select 态切到其他应用 → 自动收起灰幕。
   // 注意：截图过程中 screencapture 可能让 vision 短暂失焦，capturingRef 防止误关。
   useEffect(() => {
     const handleBlur = () => {
+      if (!captureSurfaceActiveRef.current) return
       if (capturingRef.current) return
       if (stageRef.current === 'select') {
+        invalidateVisionSurface()
         void (async () => {
           try { await api.visionClose() } catch (err) { console.error(err) }
           resetAfterClose()
@@ -2055,7 +2223,7 @@ export default function Vision() {
     }
     window.addEventListener('blur', handleBlur)
     return () => window.removeEventListener('blur', handleBlur)
-  }, [resetAfterClose])
+  }, [invalidateVisionSurface, resetAfterClose])
 
   const clientToGlobal = (p: Point): Point => ({
     x: winOrigin.x + p.x,
@@ -2129,12 +2297,18 @@ export default function Vision() {
   }, [hoverRect, dragging])
 
   const selectFocusRect = useMemo(() => {
-    return clampRect(dragging && dragRect ? dragRect : null, viewport)
-  }, [dragging, dragRect, viewport])
+    const keyboardRect = keyboardSelectionMode === 'region'
+      ? keyboardRegion
+      : keyboardSelectionMode === 'window'
+        ? animatedHoverRect
+        : null
+    return clampRect(dragging && dragRect ? dragRect : keyboardRect, viewport)
+  }, [animatedHoverRect, dragging, dragRect, keyboardRegion, keyboardSelectionMode, viewport])
 
   const selectFrameRect = useMemo(() => {
-    return clampRect(dragging && dragRect ? dragRect : animatedHoverRect, viewport)
-  }, [dragging, dragRect, animatedHoverRect, viewport])
+    const keyboardRect = keyboardSelectionMode === 'region' ? keyboardRegion : animatedHoverRect
+    return clampRect(dragging && dragRect ? dragRect : keyboardRect, viewport)
+  }, [dragging, dragRect, animatedHoverRect, keyboardRegion, keyboardSelectionMode, viewport])
 
   const selectFrameText = useMemo(() => {
     if (!selectFrameRect) return ''
@@ -2145,6 +2319,8 @@ export default function Vision() {
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (stage !== 'select') return
+    setKeyboardSelectionMode(null)
+    setKeyboardRegion(null)
     const p: Point = { x: e.clientX, y: e.clientY }
     setDragStart(p)
     setDragCurrent(p)
@@ -2319,6 +2495,7 @@ export default function Vision() {
           startLandingJelly()
         }
       } catch (err) {
+        if (flySeq !== nativeFlySeqRef.current) return
         console.error('[vision-floating] native floating failed:', err)
         flushSync(() => {
           setFloatingRebased(false)
@@ -2354,7 +2531,9 @@ export default function Vision() {
         setStage(targetStage)
       })
       requestAnimationFrame(() => {
+        if (flySeq !== nativeFlySeqRef.current) return
         requestAnimationFrame(() => {
+          if (flySeq !== nativeFlySeqRef.current) return
           setBarNoTransition(false)
           setBarFlyOffset({ x: 0, y: 0 })
           markBarFlight(TRANSITION_MS, () => {
@@ -2368,7 +2547,7 @@ export default function Vision() {
         })
       })
     }
-    if (mode === 'chat') {
+    if (mode === 'chat' && flySeq === nativeFlySeqRef.current) {
       focusVisionInput([TRANSITION_MS + 20, TRANSITION_MS + 120, TRANSITION_MS + 260])
     }
   }
@@ -2503,7 +2682,7 @@ export default function Vision() {
           }
         }
       })()
-    }, 900)
+    }, 1000)
     translateEditDebounceRef.current = timer
 
     return () => {
@@ -2762,9 +2941,15 @@ export default function Vision() {
 
   const handleCaptureWindow = async (info: VisionWindowInfo) => {
     // capturingRef 全程 true，避免 macOS screencapture 短暂让 vision webview 失焦时触发 blur handler 误关
+    const captureSequence = ++captureSequenceRef.current
     capturingRef.current = true
     try {
       const result = await api.visionCaptureWindow(info.id)
+      if (!await captureResultIsCurrent(captureSequence)) {
+        await deleteStaleCaptureImage(result.success ? result.imageId : undefined)
+        return
+      }
+      showArchiveWarning(result.archiveWarning)
       if (!result.success || !result.imageId) {
         console.error('visionCaptureWindow failed:', result.error)
         const fallbackRect = {
@@ -2774,7 +2959,7 @@ export default function Vision() {
           height: info.height,
         }
         if (fallbackRect.width >= 10 && fallbackRect.height >= 10) {
-          await handleCaptureRegion(fallbackRect, info.owner)
+          await handleCaptureRegion(fallbackRect, info.owner, captureSequence)
         } else {
           void enterSelect()
         }
@@ -2795,20 +2980,30 @@ export default function Vision() {
       void (async () => {
         try {
           const img = await api.explainReadImage(newId)
-          if (img.success) setImagePreview(img.data ?? '')
+          if (img.success && await captureResultIsCurrent(captureSequence)) {
+            setImagePreview(img.data ?? '')
+          }
         } catch (err) { console.error(err) }
       })()
       await flyBarToAnchor(
         Math.round(info.x), Math.round(info.y), Math.round(info.width), Math.round(info.height),
         info.owner,
       )
+      if (!await captureResultIsCurrent(captureSequence)) {
+        await deleteStaleCaptureImage(newId)
+        return
+      }
       if (mode === 'translate') void runTranslate(newId)
     } finally {
-      capturingRef.current = false
+      if (captureSequence === captureSequenceRef.current) capturingRef.current = false
     }
   }
 
-  const handleCaptureRegion = async (rect: Rect, label = '') => {
+  const handleCaptureRegion = async (
+    rect: Rect,
+    label = '',
+    existingCaptureSequence?: number,
+  ) => {
     const gp = clientToGlobal({ x: rect.x, y: rect.y })
     const params = {
       absoluteX: Math.round(gp.x),
@@ -2820,9 +3015,15 @@ export default function Vision() {
       scaleFactor: window.devicePixelRatio || 1,
     }
     // capturingRef 全程 true 直到 flyBarToAnchor 完成（同 handleCaptureWindow 注释）
+    const captureSequence = existingCaptureSequence ?? ++captureSequenceRef.current
     capturingRef.current = true
     try {
       const result = await api.visionCaptureRegion(params)
+      if (!await captureResultIsCurrent(captureSequence)) {
+        await deleteStaleCaptureImage(result.success ? result.imageId : undefined)
+        return
+      }
+      showArchiveWarning(result.archiveWarning)
       if (!result.success || !result.imageId) {
         console.error('visionCaptureRegion failed:', result.error)
         void enterSelect()
@@ -2843,13 +3044,19 @@ export default function Vision() {
       void (async () => {
         try {
           const img = await api.explainReadImage(newId)
-          if (img.success) setImagePreview(img.data ?? '')
+          if (img.success && await captureResultIsCurrent(captureSequence)) {
+            setImagePreview(img.data ?? '')
+          }
         } catch (err) { console.error(err) }
       })()
       await flyBarToAnchor(params.absoluteX, params.absoluteY, params.width, params.height, label)
+      if (!await captureResultIsCurrent(captureSequence)) {
+        await deleteStaleCaptureImage(newId)
+        return
+      }
       if (mode === 'translate') void runTranslate(newId)
     } finally {
-      capturingRef.current = false
+      if (captureSequence === captureSequenceRef.current) capturingRef.current = false
     }
   }
 
@@ -2881,6 +3088,109 @@ export default function Vision() {
       await handleCaptureWindow(hovered)
     }
   }
+
+  useEffect(() => {
+    if (stage !== 'select') return
+
+    const describeWindow = (info: VisionWindowInfo) => {
+      const label = info.owner || (lang === 'zh' ? '未命名窗口' : 'Unnamed window')
+      return lang === 'zh'
+        ? `已选择窗口：${label}，${Math.round(info.width)} × ${Math.round(info.height)}。按 Alt+Enter 截图。`
+        : `Window selected: ${label}, ${Math.round(info.width)} by ${Math.round(info.height)}. Press Alt+Enter to capture.`
+    }
+    const describeRegion = (rect: Rect) => lang === 'zh'
+      ? `已选择区域：X ${Math.round(winOrigin.x + rect.x)}，Y ${Math.round(winOrigin.y + rect.y)}，${Math.round(rect.width)} × ${Math.round(rect.height)}。`
+      : `Region selected: X ${Math.round(winOrigin.x + rect.x)}, Y ${Math.round(winOrigin.y + rect.y)}, ${Math.round(rect.width)} by ${Math.round(rect.height)}.`
+
+    const selectWindow = (direction: -1 | 1) => {
+      const currentIndex = hovered === null ? -1 : windows.findIndex(candidate => candidate.id === hovered.id)
+      const index = nextWindowIndex(windows.length, currentIndex, direction)
+      if (index < 0) {
+        setKeyboardSelectionMode('window')
+        setKeyboardRegion(null)
+        setA11yAnnouncement(lang === 'zh' ? '没有可选择的窗口。' : 'No selectable windows are available.')
+        return
+      }
+      const next = windows[index]
+      setKeyboardSelectionMode('window')
+      setKeyboardRegion(null)
+      setHovered(next)
+      setA11yAnnouncement(describeWindow(next))
+    }
+
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey) return
+      const isArrow = event.key === 'ArrowLeft'
+        || event.key === 'ArrowRight'
+        || event.key === 'ArrowUp'
+        || event.key === 'ArrowDown'
+
+      if (event.key.toLowerCase() === 'w') {
+        event.preventDefault()
+        event.stopPropagation()
+        selectWindow(1)
+        return
+      }
+
+      if (event.key.toLowerCase() === 'r') {
+        event.preventDefault()
+        event.stopPropagation()
+        const region = defaultKeyboardRegion(viewport)
+        setKeyboardSelectionMode('region')
+        setKeyboardRegion(region)
+        setHovered(null)
+        setA11yAnnouncement(`${describeRegion(region)} ${lang === 'zh' ? '使用 Alt+方向键移动，Alt+Shift+方向键调整大小，Alt+Enter 截图。' : 'Use Alt+Arrow keys to move, Alt+Shift+Arrow keys to resize, and Alt+Enter to capture.'}`)
+        return
+      }
+
+      if (event.key === 'Enter') {
+        if (keyboardSelectionMode === 'window' && hovered !== null) {
+          event.preventDefault()
+          event.stopPropagation()
+          void handleCaptureWindow(hovered)
+        } else if (keyboardSelectionMode === 'region' && keyboardRegion !== null) {
+          event.preventDefault()
+          event.stopPropagation()
+          void handleCaptureRegion(keyboardRegion)
+        }
+        return
+      }
+
+      if (!isArrow) return
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (keyboardSelectionMode === 'region' && keyboardRegion !== null) {
+        const next = adjustKeyboardRegion(
+          keyboardRegion,
+          viewport,
+          event.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown',
+          event.shiftKey,
+        )
+        setKeyboardRegion(next)
+        setA11yAnnouncement(describeRegion(next))
+        return
+      }
+
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        selectWindow(event.key === 'ArrowLeft' ? -1 : 1)
+      }
+    }
+
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [
+    handleCaptureRegion,
+    handleCaptureWindow,
+    hovered,
+    keyboardRegion,
+    keyboardSelectionMode,
+    lang,
+    stage,
+    viewport,
+    winOrigin,
+    windows,
+  ])
 
 
   /**
@@ -3139,10 +3449,23 @@ export default function Vision() {
           )
           if (!isVisionRequestCurrent(requestId)) return
           const result = await api.visionRegisterAnnotatedImage(base64)
-          if (!isVisionRequestCurrent(requestId)) return
+          if (!isVisionRequestCurrent(requestId)) {
+            if (result.success && result.imageId) {
+              void api.visionDeleteTemporaryImage(result.imageId).catch(err => {
+                console.error('[vision-arrow] stale image cleanup failed:', err)
+              })
+            }
+            return
+          }
           if (result.success && result.imageId) {
+            const replacedImageId = effectiveImageId
             effectiveImageId = result.imageId
             imageIdRef.current = result.imageId
+            if (replacedImageId && replacedImageId !== result.imageId) {
+              void api.visionDeleteTemporaryImage(replacedImageId).catch(err => {
+                console.error('[vision-arrow] replaced image cleanup failed:', err)
+              })
+            }
             setImagePreview(`data:image/png;base64,${base64}`)
             setArrows([])
             setDraftArrow(null)
@@ -3419,26 +3742,45 @@ export default function Vision() {
 
   useEffect(() => () => {
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
+    if (captureWarningTimeoutRef.current) clearTimeout(captureWarningTimeoutRef.current)
+    invalidateVisionSurface()
     invalidateVisionRequest()
-    nativeFlySeqRef.current++
     if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
     if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
     translateEditSeqRef.current++
     promptOptimizeSeqRef.current++
     stopSpeechPlayback()
-    focusReqIdRef.current++
     setVisionCursorPassthrough(false)
-  }, [invalidateVisionRequest, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [invalidateVisionRequest, invalidateVisionSurface, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     if (!historyOpen) return
+    focusReqIdRef.current += 1
+    const focusFrame = window.requestAnimationFrame(() => {
+      const target = historyDropdownRef.current?.querySelector<HTMLElement>('button') ?? historyDropdownRef.current
+      target?.focus()
+    })
     const onDown = (e: MouseEvent) => {
       if (!historyPanelRef.current?.contains(e.target as Node)) {
         setHistoryOpen(false)
       }
     }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      e.stopImmediatePropagation()
+      focusReqIdRef.current += 1
+      setHistoryOpen(false)
+      window.requestAnimationFrame(() => historyTriggerRef.current?.focus())
+    }
     document.addEventListener('mousedown', onDown, true)
-    return () => document.removeEventListener('mousedown', onDown, true)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('mousedown', onDown, true)
+      window.removeEventListener('keydown', onKey, true)
+    }
   }, [historyOpen])
 
   const showThumb = stage !== 'select' && (imagePreview || appLabel)
@@ -3457,7 +3799,6 @@ export default function Vision() {
     { value: 'ai', label: t.screenshotOcrAI },
     { value: 'baidu', label: t.screenshotOcrBaidu },
     { value: 'chaoxing', label: t.screenshotOcrChaoxing },
-    { value: 'system', label: t.screenshotOcrSystem },
   ], [t])
   const translationMethodOptions = useMemo<{ value: ScreenshotTranslationMethod; label: string }[]>(() => [
     { value: 'ai', label: t.screenshotTranslationAI },
@@ -4004,12 +4345,15 @@ export default function Vision() {
   ])
 
   return (
+    <VisionLanguageContext.Provider value={lang}>
     <div
       className="fixed inset-0 select-none"
       data-screenpilot-floating-layout={isFloatingLayout ? 'true' : undefined}
       data-screenpilot-floating-width={isFloatingLayout
         ? String(Math.max(1, Math.round(barRect.width + FLOATING_PADDING * 2)))
         : undefined}
+      data-screenpilot-keyboard-selection={keyboardSelectionMode ?? undefined}
+      aria-keyshortcuts="Alt+W Alt+R Alt+Enter"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
@@ -4018,6 +4362,41 @@ export default function Vision() {
         cursor: stage === 'select' ? 'crosshair' : undefined,
       }}
     >
+      {captureWarning ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute left-1/2 top-3 z-[90] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-amber-300/70 bg-amber-50/95 px-3 py-2 text-[12px] leading-5 text-amber-900 shadow-lg backdrop-blur dark:border-amber-700/70 dark:bg-amber-950/90 dark:text-amber-100"
+        >
+          {captureWarning}
+        </div>
+      ) : null}
+      {historyRejectedCount > 0 ? (
+        <div className="sr-only" role="status" aria-live="polite">
+          {lang === 'zh'
+            ? `已忽略 ${historyRejectedCount} 条损坏的 Vision 历史记录。`
+            : `${historyRejectedCount} corrupt Vision history item${historyRejectedCount === 1 ? '' : 's'} ignored.`}
+        </div>
+      ) : null}
+      <p id="vision-selection-keyboard-help" className="sr-only">
+        {lang === 'zh'
+          ? '键盘截图：Alt+W 选择或循环窗口，Alt+左右方向键切换窗口，Alt+R 创建区域，Alt+方向键移动区域，Alt+Shift+方向键调整区域大小，Alt+Enter 截图，Escape 退出键盘选择。'
+          : 'Keyboard capture: Alt+W selects or cycles windows, Alt+Left and Alt+Right switch windows, Alt+R creates a region, Alt+Arrow keys move it, Alt+Shift+Arrow keys resize it, Alt+Enter captures, and Escape exits keyboard selection.'}
+      </p>
+      <p id="vision-arrow-keyboard-help" className="sr-only">
+        {lang === 'zh'
+          ? '箭头标注：按 Enter 创建箭头，方向键调整终点，Shift+方向键平移箭头，再按 Enter 提交，Control+Z 撤销，Escape 退出。'
+          : 'Arrow annotation: press Enter to create an arrow, use Arrow keys to adjust its endpoint, Shift+Arrow keys to move it, Enter again to commit, Control+Z to undo, and Escape to exit.'}
+      </p>
+      <div
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-screenpilot-vision-announcement="true"
+      >
+        {a11yAnnouncement}
+      </div>
       {stage === 'select' && (
         <div className="absolute inset-0 pointer-events-none">
           {!selectFocusRect ? (
@@ -4108,7 +4487,14 @@ export default function Vision() {
 
       {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && !barRebaseHidden && drawMode && (
         <div
-          className="absolute"
+          ref={drawSurfaceRef}
+          id="vision-arrow-surface"
+          tabIndex={0}
+          role="group"
+          aria-label={lang === 'zh' ? '截图箭头标注画布' : 'Screenshot arrow annotation canvas'}
+          aria-describedby="vision-arrow-keyboard-help"
+          data-screenpilot-arrow-surface="true"
+          className="absolute focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--kv-accent)]"
           style={{
             left: capturedFrame.x,
             top: capturedFrame.y,
@@ -4141,6 +4527,7 @@ export default function Vision() {
             const dy = draftArrow.y2 - draftArrow.y1
             if (Math.hypot(dx, dy) >= ARROW_MIN_DRAG_PX) {
               setArrows(prev => [...prev, draftArrow])
+              setA11yAnnouncement(lang === 'zh' ? '箭头已添加。' : 'Arrow added.')
             }
             setDraftArrow(null)
             ;(e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId)
@@ -4149,6 +4536,45 @@ export default function Vision() {
             e.stopPropagation()
             setDraftArrow(null)
             try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId) } catch { void 0 }
+          }}
+          onKeyDown={(e) => {
+            const isArrowKey = e.key === 'ArrowLeft'
+              || e.key === 'ArrowRight'
+              || e.key === 'ArrowUp'
+              || e.key === 'ArrowDown'
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              e.stopPropagation()
+              if (draftArrow === null) {
+                setDraftArrow(defaultKeyboardArrow({ w: capturedFrame.width, h: capturedFrame.height }))
+                setA11yAnnouncement(lang === 'zh'
+                  ? '已创建默认箭头。使用方向键调整终点，Shift+方向键平移，再按 Enter 提交。'
+                  : 'Default arrow created. Use Arrow keys to adjust its endpoint, Shift+Arrow keys to move it, then press Enter to commit.')
+              } else {
+                const dx = draftArrow.x2 - draftArrow.x1
+                const dy = draftArrow.y2 - draftArrow.y1
+                if (Math.hypot(dx, dy) >= ARROW_MIN_DRAG_PX) {
+                  setArrows(prev => [...prev, draftArrow])
+                  setA11yAnnouncement(lang === 'zh' ? '箭头已添加。' : 'Arrow added.')
+                }
+                setDraftArrow(null)
+              }
+              return
+            }
+            if (!isArrowKey) return
+            e.preventDefault()
+            e.stopPropagation()
+            const current = draftArrow ?? defaultKeyboardArrow({ w: capturedFrame.width, h: capturedFrame.height })
+            const next = adjustKeyboardArrow(
+              current,
+              { w: capturedFrame.width, h: capturedFrame.height },
+              e.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown',
+              e.shiftKey,
+            )
+            setDraftArrow(next)
+            setA11yAnnouncement(lang === 'zh'
+              ? `箭头起点 ${Math.round(next.x1)}, ${Math.round(next.y1)}；终点 ${Math.round(next.x2)}, ${Math.round(next.y2)}。`
+              : `Arrow start ${Math.round(next.x1)}, ${Math.round(next.y1)}; endpoint ${Math.round(next.x2)}, ${Math.round(next.y2)}.`)
           }}
         >
           <svg
@@ -4179,6 +4605,9 @@ export default function Vision() {
       {showBar && (
         <div
           ref={barPanelRef}
+          data-screenpilot-prompt-panel="true"
+          data-screenpilot-ready-prompt-panel={stage !== 'select' || hasScreenshot ? 'true' : 'false'}
+          data-screenpilot-captured-prompt-panel={hasScreenshot ? 'true' : 'false'}
           className="absolute ease-out"
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
@@ -4202,6 +4631,8 @@ export default function Vision() {
         >
           <div
             className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 ring-1 ring-[color:var(--kv-panel-edge)] ${stage === 'select' ? 'cursor-default' : 'cursor-move'} ${jellyActive && isFloatingLayout ? 'vision-jelly-pop' : ''}`}
+            data-screenpilot-prompt-bar="true"
+            data-screenpilot-window-frame="true"
             data-screenpilot-vision-image={hasScreenshot ? 'true' : 'false'}
             onMouseDown={beginFloatingPanelDrag}
             onAnimationEnd={handleJellyAnimationEnd}
@@ -4242,6 +4673,13 @@ export default function Vision() {
                   type="button"
                   onClick={() => setDrawMode(m => !m)}
                   disabled={!imagePreview}
+                  aria-pressed={drawMode}
+                  aria-controls="vision-arrow-surface"
+                  aria-describedby="vision-arrow-keyboard-help"
+                  aria-label={imagePreview
+                    ? (drawMode ? t.visionArrowToggleOff : t.visionArrowToggle)
+                    : t.visionArrowDisabledHint}
+                  data-screenpilot-arrow-toggle="true"
                   title={imagePreview
                     ? (drawMode ? t.visionArrowToggleOff : t.visionArrowToggle)
                     : t.visionArrowDisabledHint}
@@ -4257,6 +4695,7 @@ export default function Vision() {
             </div>
             <input
               ref={inputRef}
+              data-screenpilot-vision-prompt="true"
               autoFocus
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -4269,13 +4708,20 @@ export default function Vision() {
               }}
               readOnly={streaming || promptOptimizing}
               aria-disabled={streaming || promptOptimizing}
+              aria-describedby={stage === 'select' ? 'vision-selection-keyboard-help' : undefined}
               placeholder={t.visionAskPlaceholder}
               className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none cursor-text ${streaming || promptOptimizing ? 'opacity-60' : ''}`}
             />
             <div ref={historyPanelRef} className="relative shrink-0">
               <button
+                ref={historyTriggerRef}
                 type="button"
                 onClick={() => setHistoryOpen(o => !o)}
+                aria-label={t.visionHistory}
+                aria-expanded={historyOpen}
+                aria-haspopup="dialog"
+                aria-controls="vision-history-dialog"
+                data-screenpilot-vision-history-trigger="true"
                 className="flex items-center gap-1 h-9 px-2.5 rounded-lg text-neutral-600 dark:text-neutral-300 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] active:bg-black/[0.08] dark:active:bg-white/[0.1] transition-colors cursor-pointer"
                 title={t.visionHistory}
               >
@@ -4288,6 +4734,16 @@ export default function Vision() {
               {historyOpen && (
                 <div
                   ref={historyDropdownRef}
+                  id="vision-history-dialog"
+                  role="dialog"
+                  aria-label={t.visionHistory}
+                  tabIndex={-1}
+                  data-screenpilot-vision-history-dialog="true"
+                  onBlur={(event) => {
+                    const nextTarget = event.relatedTarget
+                    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+                    setHistoryOpen(false)
+                  }}
                   className={`absolute right-0 ${historyDropdownLayout.openBelow ? 'top-full mt-2' : 'bottom-full mb-2'} w-[240px] rounded-xl bg-white dark:bg-neutral-900 shadow-[0_20px_50px_-12px_rgba(15,23,42,0.35)] dark:shadow-[0_20px_50px_-12px_rgba(0,0,0,0.8)] ring-1 ring-black/[0.06] dark:ring-white/[0.08] overflow-hidden z-50`}
                 >
                   <div
@@ -4335,8 +4791,8 @@ export default function Vision() {
                               <div className="text-[11.5px] text-neutral-800 dark:text-neutral-200 truncate leading-tight">
                                 {firstUserQ}
                               </div>
-                              <div className="text-[9.5px] text-neutral-400 dark:text-neutral-500 mt-0.5 truncate leading-tight">
-                                {item.appLabel ? `${item.appLabel} · ` : ''}{turns > 1 ? `${turns} 轮 · ` : ''}{relTime(item.timestamp)}
+                              <div className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5 truncate leading-tight">
+                                {item.appLabel ? `${item.appLabel} · ` : ''}{turns > 1 ? `${turns} ${lang === 'zh' ? '轮' : 'turns'} · ` : ''}{relTime(item.timestamp)}
                               </div>
                             </div>
                           </button>
@@ -4351,6 +4807,8 @@ export default function Vision() {
               type="button"
               onClick={() => void handleSend()}
               disabled={sendDisabled}
+              aria-label={t.visionHintSend}
+              data-screenpilot-vision-send="true"
               className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 active:scale-95 ${
                 !sendDisabled
                   ? 'bg-[#D97757] hover:bg-[#C56646] hover:scale-105 cursor-pointer shadow-[0_1px_3px_rgba(15,23,42,0.2)]'
@@ -4404,6 +4862,7 @@ export default function Vision() {
           {showPromptPreview && (
             <div
               ref={promptPreviewCardRef}
+              data-screenpilot-vision-prompt-preview="true"
               className="animate-in fade-in slide-in-from-top-1 duration-150 absolute left-0 right-0 z-40 rounded-2xl overflow-hidden window-frosted select-text"
               // maxHeight 是硬约束不是装饰：见 PROMPT_PREVIEW_MAX_H 的说明
               style={promptPreviewPlaceAbove
@@ -4427,13 +4886,14 @@ export default function Vision() {
                 </div>
 
                 {promptPreviewStatus === 'loading' ? (
-                  <div className="space-y-2 py-1">
+                  <div className="space-y-2 py-1" role="status" aria-live="polite">
+                    <span className="sr-only">{lang === 'zh' ? '正在优化提示词。' : 'Optimizing prompt.'}</span>
                     <div className="h-3 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800" />
                     <div className="h-3 w-[82%] rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800" />
                     <div className="h-3 w-[64%] rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800" />
                   </div>
                 ) : promptPreviewStatus === 'error' ? (
-                  <div className="text-[12.5px] leading-[1.5] text-rose-600 dark:text-rose-400">
+                  <div role="alert" className="text-[12.5px] leading-[1.5] text-rose-600 dark:text-rose-400">
                     {t.visionPromptFailed}
                   </div>
                 ) : (
@@ -4483,6 +4943,8 @@ export default function Vision() {
 
           <div
             ref={answerPanelRef}
+            data-screenpilot-answer-panel="true"
+            aria-busy={stage === 'answering' && streaming}
             className="absolute left-0 right-0 rounded-2xl overflow-hidden window-frosted transition-all ease-out select-text"
             style={{
               top: answerLayout.placeAbove ? undefined : 'calc(100% + 8px)',
@@ -4499,7 +4961,7 @@ export default function Vision() {
               const lastMsg = messages[lastChronoIdx]
               const showActions = lastMsg && lastMsg.role === 'assistant' && !!lastMsg.content
               const Actions = (
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1" data-screenpilot-answer-actions="true">
                   <button
                     onClick={() => void handleCopy()}
                     className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
@@ -4521,6 +4983,11 @@ export default function Vision() {
               return (
               <div
                 ref={chatScrollRef}
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions text"
+                aria-busy={streaming}
+                data-screenpilot-answer-scroll="true"
                 className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3"
                 onScroll={updateChatAutoFollow}
               >
@@ -4548,7 +5015,7 @@ export default function Vision() {
                           {m.content ? (
                             <StreamingMarkdownText text={m.content} active={isLast && streaming} />
                           ) : isLast && streaming && !m.reasoning ? (
-                            <div className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                            <div role="status" className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
                               <Loader2 className="animate-spin" size={14} />
                               <span className="text-[12px]">{formatVisionAsking(t.visionAsking, activeVisionModel)}</span>
                             </div>
@@ -4569,6 +5036,8 @@ export default function Vision() {
       {showTranslateCard && (
         <div
           ref={translateCardRef}
+          data-screenpilot-translation-card="true"
+          aria-busy={stage === 'translating' || methodSwitching || translateRetranslating}
           className={`absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text ${jellyActive && isFloatingLayout ? 'vision-ocr-jelly-pop' : ''}`}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
@@ -4646,7 +5115,12 @@ export default function Vision() {
                     <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                       {t.shotOriginal}
                     </span>
-                    {ocrMethodSwitching && <Loader2 size={10} className="shrink-0 animate-spin text-neutral-400 dark:text-neutral-500" />}
+                    {ocrMethodSwitching && (
+                      <span role="status" aria-live="polite" className="shrink-0 inline-flex">
+                        <Loader2 size={10} className="animate-spin text-neutral-400 dark:text-neutral-500" />
+                        <span className="sr-only">{lang === 'zh' ? '正在切换 OCR 方法。' : 'Switching OCR method.'}</span>
+                      </span>
+                    )}
                     {translateOriginal && (
                       <>
                         <button
@@ -4678,6 +5152,7 @@ export default function Vision() {
                       </>
                     )}
                     <select
+                      data-screenpilot-ocr-method="true"
                       value={translateOcrMethod}
                       disabled={methodSwitching}
                       onChange={(e) => void handleOcrMethodSelect(e.target.value)}
@@ -4691,7 +5166,7 @@ export default function Vision() {
                     </select>
                   </div>
                   {translateOriginalError ? (
-                    <div className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                    <div role="alert" className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
                       {translateOriginalError}
                     </div>
                   ) : translateOriginal || translateOriginalEditedRef.current ? readonlyAiOcrOriginal ? (
@@ -4702,7 +5177,8 @@ export default function Vision() {
                       onChange={handleTranslateOriginalChange}
                     />
                   ) : (
-                    <div className="space-y-2">
+                    <div className="space-y-2" role="status" aria-live="polite">
+                      <span className="sr-only">{lang === 'zh' ? '正在识别截图文字。' : 'Recognizing text in the screenshot.'}</span>
                       <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
                       <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[82%]" />
                     </div>
@@ -4719,7 +5195,7 @@ export default function Vision() {
                   {t.shotTranslated}
                 </span>
                 {(translateRetranslating || translationMethodSwitching) && (
-                  <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
+                  <span role="status" aria-live="polite" className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
                     <Loader2 size={10} className="animate-spin" />
                     {t.shotTranslating}
                   </span>
@@ -4753,6 +5229,7 @@ export default function Vision() {
                   </>
                 )}
                 <select
+                  data-screenpilot-translation-method="true"
                   value={translateMethod}
                   disabled={methodSwitching}
                   onChange={(e) => void handleTranslationMethodSelect(e.target.value)}
@@ -4775,12 +5252,13 @@ export default function Vision() {
                 )
               )}
               {translateError && (
-                <div className="mt-2 text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                <div role="alert" className="mt-2 text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
                   {t.visionError}: {translateError}
                 </div>
               )}
               {!translateText && !translateError && !translateOriginalError && (!translateOriginalEditedRef.current || translateRetranslating) && (
-                <div className="space-y-2">
+                <div className="space-y-2" role="status" aria-live="polite">
+                  <span className="sr-only">{t.shotTranslating}</span>
                   <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
                   <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[88%]" />
                   <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[72%]" />
@@ -4791,5 +5269,6 @@ export default function Vision() {
         </div>
       )}
     </div>
+    </VisionLanguageContext.Provider>
   )
 }

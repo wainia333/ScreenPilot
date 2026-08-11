@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
-import type { AppSettings, ProviderSettings, SettingsExport } from '../features/settings/types'
+import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from '../features/settings/types'
 import { providerCommandArgs } from './provider-command-args'
 import type {
   DesktopPort,
@@ -39,6 +39,7 @@ function command(name: string, args?: Record<string, unknown>): Promise<void> {
 export class TauriDesktopPort implements DesktopPort {
   loadSettings = () => invoke<AppSettings>('settings_load')
   takeStartupNotice = () => invoke<string | null>('startup_notice_take')
+  acknowledgeStartupNotice = () => invoke<boolean>('startup_notice_acknowledge')
   saveSettings = (settings: AppSettings) => invoke<SettingsSaveResult>('settings_save', { settings })
   updateTranslationSettings = (patch: TranslationSettingsPatch) =>
     command('translation_settings_update', { patch })
@@ -47,6 +48,8 @@ export class TauriDesktopPort implements DesktopPort {
   pickDirectory = () => invoke<string | null>('directory_pick')
   saveProviderKeyChanges = (changes: ProviderKeyChanges) =>
     command('credentials_set_provider_keys_batch', { changes })
+  saveImportedSecrets = (secrets: SettingsSecrets, providerDeletionIds: string[]) =>
+    command('credentials_set_imported_secrets', { secrets, providerDeletionIds })
   setProviderKeys = (providerId: string, keys: string[]) =>
     command('credentials_set_provider_keys', { providerId, keys })
   providerKeyCount = (providerId: string) => invoke<number>('credentials_provider_key_count', { providerId })
@@ -56,6 +59,7 @@ export class TauriDesktopPort implements DesktopPort {
   testProvider = (provider: ProviderSettings, keys?: string[]) =>
     invoke<{ success: boolean; error: string | null }>('providers_test', providerCommandArgs(provider, keys))
   translate = (request: TranslationRequest) => invoke<TranslationResult>('translator_translate', { request })
+  cancelTranslation = (generation: number) => invoke<boolean>('translator_cancel', { generation })
   optimizePrompt = (request: PromptOptimizationRequest) =>
     invoke<PromptOptimizationResult>('optimizer_run', { request })
   commitText = (text: string, autoPaste: boolean) => command('text_commit', { text, autoPaste })

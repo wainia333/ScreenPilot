@@ -2,6 +2,7 @@ import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, 
 import { ModelField } from '../model-options'
 import type { AppSettings, MessageOrder, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
+import { copyFor } from '../../../shared/ui-copy'
 
 export function VisionSection({
   settings,
@@ -10,46 +11,48 @@ export function VisionSection({
   settings: AppSettings
   onChange: (settings: AppSettings) => void
 }) {
+  const t = copyFor(settings.language)
   const current = settings.vision
   const update = (patch: Partial<AppSettings['vision']>) =>
     onChange({ ...settings, vision: { ...current, ...patch } })
   return (
     <>
-      <SettingGroup title="Vision 问答">
-        <SettingRow label="启用 Vision">
-          <Toggle checked={current.enabled} label="启用 Vision" onChange={(enabled) => update({ enabled })} />
+      <SettingGroup title={t.visionQa}>
+        <SettingRow label={t.enableVision}>
+          <Toggle checked={current.enabled} label={t.enableVision} onChange={(enabled) => update({ enabled })} />
         </SettingRow>
-        <SettingRow label="回答语言">
+        <SettingRow label={t.responseLanguage}>
           <SelectField
             value={current.responseLanguage}
-            label="Vision 回答语言"
+            label={t.visionResponseLanguage}
             options={[
-              { value: 'auto', label: '跟随问题' },
-              { value: 'zh-CN', label: '简体中文' },
-              { value: 'en', label: 'English' },
+              { value: 'auto', label: t.followQuestion },
+              { value: 'zh-CN', label: t.simplifiedChinese },
+              { value: 'en', label: t.english },
             ]}
             onChange={(responseLanguage) => update({ responseLanguage })}
           />
         </SettingRow>
-        <SettingRow label="模型">
+        <SettingRow label={t.model}>
           <ModelField
             value={current.model}
             providers={settings.providers}
-            label="Vision 模型"
+            label={t.visionModel}
+            emptyLabel={t.noSelection}
             onChange={(model) => update({ model })}
           />
         </SettingRow>
-        <SettingRow label="流式输出">
-          <Toggle checked={current.stream} label="Vision 流式输出" onChange={(stream) => update({ stream })} />
+        <SettingRow label={t.streamingOutput}>
+          <Toggle checked={current.stream} label={t.visionStreamingOutput} onChange={(stream) => update({ stream })} />
         </SettingRow>
-        <SettingRow label="显示思考过程/摘要">
-          <Toggle checked={current.thinking} label="Vision 显示思考过程/摘要" onChange={(thinking) => update({ thinking })} />
+        <SettingRow label={t.visionReasoning}>
+          <Toggle checked={current.thinking} label={t.visionReasoningLabel} onChange={(thinking) => update({ thinking })} />
         </SettingRow>
         {current.thinking ? (
-          <SettingRow label="思考强度">
+          <SettingRow label={t.reasoningEffort}>
             <SelectField<ThinkingEffort>
               value={current.thinkingEffort}
-              label="Vision 思考强度"
+              label={t.visionReasoningEffort}
               options={[
                 { value: 'low', label: 'low' },
                 { value: 'medium', label: 'medium' },
@@ -61,52 +64,54 @@ export function VisionSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label="联网搜索">
-          <Toggle checked={current.webSearch} label="联网搜索" onChange={(webSearch) => update({ webSearch })} />
+        <SettingRow label={t.webSearch}>
+          <Toggle checked={current.webSearch} label={t.webSearch} onChange={(webSearch) => update({ webSearch })} />
         </SettingRow>
-        <SettingRow label="消息顺序">
+        <SettingRow label={t.messageOrder}>
           <SelectField<MessageOrder>
             value={current.messageOrder}
-            label="消息顺序"
+            label={t.messageOrder}
             options={[
-              { value: 'asc', label: '旧消息在上' },
-              { value: 'desc', label: '新消息在上' },
+              { value: 'asc', label: t.oldMessagesFirst },
+              { value: 'desc', label: t.newMessagesFirst },
             ]}
             onChange={(messageOrder) => update({ messageOrder })}
           />
         </SettingRow>
       </SettingGroup>
       <SettingGroup
-        title="系统提示词"
+        title={t.systemPrompt}
         titleAction={
           <PromptResetButton
             value={current.systemPrompt}
-            label="Vision 系统提示词"
+            label={t.visionSystemPrompt}
             defaultValue={DEFAULT_SETTINGS.vision.systemPrompt}
+            resetLabel={t.resetDefault}
             onChange={(systemPrompt) => update({ systemPrompt })}
           />
         }
       >
         <PromptField
           value={current.systemPrompt}
-          label="Vision 系统提示词"
+          label={t.visionSystemPrompt}
           onChange={(systemPrompt) => update({ systemPrompt })}
         />
       </SettingGroup>
       <SettingGroup
-        title="问答提示词"
+        title={t.questionPrompt}
         titleAction={
           <PromptResetButton
             value={current.questionPrompt}
-            label="Vision 问答提示词"
+            label={t.visionQuestionPrompt}
             defaultValue={DEFAULT_SETTINGS.vision.questionPrompt}
+            resetLabel={t.resetDefault}
             onChange={(questionPrompt) => update({ questionPrompt })}
           />
         }
       >
         <PromptField
           value={current.questionPrompt}
-          label="Vision 问答提示词"
+          label={t.visionQuestionPrompt}
           onChange={(questionPrompt) => update({ questionPrompt })}
         />
       </SettingGroup>

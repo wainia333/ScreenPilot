@@ -1,6 +1,6 @@
 import { DEFAULT_SETTINGS } from '../features/settings/defaults'
 import { sanitizeSettings } from '../features/settings/sanitize'
-import type { AppSettings, ProviderSettings, SettingsExport } from '../features/settings/types'
+import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from '../features/settings/types'
 import type {
   DesktopPort,
   PromptOptimizationRequest,
@@ -23,11 +23,19 @@ type FakeListeners = {
 
 export class FakeDesktopPort implements DesktopPort {
   private settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
+  startupNotice: string | null = null
+  startupNoticeAcknowledgeCalls = 0
   private readonly keys = new Map<string, string[]>()
   readonly providerKeySaveCalls: ProviderKeyChanges[] = []
+  readonly importedSecretsSaveCalls: {
+    secrets: SettingsSecrets
+    providerDeletionIds: string[]
+  }[] = []
   readonly providerModelFetchCalls: { provider: ProviderSettings; keys?: string[] }[] = []
   readonly providerTestCalls: { provider: ProviderSettings; keys?: string[] }[] = []
+  readonly translationCancelCalls: number[] = []
   providerKeySaveError: string | null = null
+  importedSecretsSaveError: string | null = null
   private readonly listeners: FakeListeners = {
     route: new Set(),
     reset: new Set(),
@@ -40,7 +48,13 @@ export class FakeDesktopPort implements DesktopPort {
   }
 
   takeStartupNotice(): Promise<string | null> {
-    return Promise.resolve(null)
+    return Promise.resolve(this.startupNotice)
+  }
+
+  acknowledgeStartupNotice(): Promise<boolean> {
+    this.startupNoticeAcknowledgeCalls += 1
+    this.startupNotice = null
+    return Promise.resolve(true)
   }
 
   saveSettings(settings: AppSettings): Promise<SettingsSaveResult> {
@@ -77,6 +91,21 @@ export class FakeDesktopPort implements DesktopPort {
     if (this.providerKeySaveError !== null) return Promise.reject(new Error(this.providerKeySaveError))
     Object.entries(changes).forEach(([providerId, keys]) => {
       this.keys.set(providerId, keys.filter((key) => key.trim().length > 0))
+    })
+    return Promise.resolve()
+  }
+
+  saveImportedSecrets(secrets: SettingsSecrets, providerDeletionIds: string[]): Promise<void> {
+    this.importedSecretsSaveCalls.push({
+      secrets: structuredClone(secrets),
+      providerDeletionIds: [...providerDeletionIds],
+    })
+    if (this.importedSecretsSaveError !== null) {
+      return Promise.reject(new Error(this.importedSecretsSaveError))
+    }
+    providerDeletionIds.forEach((providerId) => this.keys.delete(providerId))
+    Object.entries({ ...secrets.providers, ...secrets.adapters }).forEach(([credentialId, keys]) => {
+      this.keys.set(credentialId, keys.filter((key) => key.trim().length > 0))
     })
     return Promise.resolve()
   }
@@ -124,6 +153,11 @@ export class FakeDesktopPort implements DesktopPort {
 
   translate(request: TranslationRequest): Promise<TranslationResult> {
     return Promise.resolve({ generation: request.generation, text: `译文：${request.text}` })
+  }
+
+  cancelTranslation(generation: number): Promise<boolean> {
+    this.translationCancelCalls.push(generation)
+    return Promise.resolve(true)
   }
 
   optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult> {

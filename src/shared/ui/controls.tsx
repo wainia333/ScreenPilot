@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type KeyboardEvent, type ReactNode } from 'react'
 
 export function SettingGroup({ title, titleAction, children }: { title: string; titleAction?: ReactNode; children: ReactNode }) {
   return (
@@ -67,16 +67,36 @@ export function Segmented<T extends string>({
   label: string
   onChange: (value: T) => void
 }) {
+  const buttonRefs = useRef(new Map<T, HTMLButtonElement>())
+  const moveSelection = (event: KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % options.length
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + options.length) % options.length
+    if (event.key === 'Home') nextIndex = 0
+    if (event.key === 'End') nextIndex = options.length - 1
+    if (nextIndex === null) return
+    const next = options[nextIndex]
+    if (next === undefined) return
+    event.preventDefault()
+    onChange(next.value)
+    buttonRefs.current.get(next.value)?.focus()
+  }
   return (
     <div className="segmented" role="radiogroup" aria-label={label}>
-      {options.map((option) => (
+      {options.map((option, index) => (
         <button
           type="button"
           role="radio"
           aria-checked={value === option.value}
           data-active={value === option.value}
+          tabIndex={value === option.value ? 0 : -1}
           key={option.value}
+          ref={(element) => {
+            if (element === null) buttonRefs.current.delete(option.value)
+            else buttonRefs.current.set(option.value, element)
+          }}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => moveSelection(event, index)}
         >
           {option.label}
         </button>
@@ -144,22 +164,24 @@ export function PromptResetButton({
   value,
   label,
   defaultValue,
+  resetLabel = '恢复默认',
   onChange,
 }: {
   value: string
   label: string
   defaultValue: string
+  resetLabel?: string
   onChange: (value: string) => void
 }) {
   return (
     <button
       type="button"
       className="prompt-reset-button"
-      aria-label={`恢复默认：${label}`}
+      aria-label={`${resetLabel}：${label}`}
       disabled={value === defaultValue}
       onClick={() => onChange(defaultValue)}
     >
-      恢复默认
+      {resetLabel}
     </button>
   )
 }

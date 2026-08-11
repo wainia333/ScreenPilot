@@ -1,5 +1,7 @@
 use crate::application::state::AppState;
-use crate::infrastructure::ai_http::{complete_text, complete_text_with_effort, AiRequestPolicy};
+use crate::infrastructure::ai_http::{
+    complete_text_cancelled, complete_text_with_effort, AiRequestPolicy,
+};
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::translation;
 use arboard::Clipboard;
@@ -42,6 +44,9 @@ pub async fn translator_translate(
     state: State<'_, AppState>,
     request: TranslationRequest,
 ) -> Result<TranslationResult, String> {
+    let signal = state
+        .begin_translator_request(request.generation)
+        .ok_or("Request cancelled")?;
     let text = request.text.trim();
     if text.is_empty() {
         return Ok(TranslationResult {
@@ -75,7 +80,7 @@ pub async fn translator_translate(
             .find(|provider| provider.id == selection.provider_id)
             .ok_or("The selected translation provider no longer exists")?;
         let keys = CredentialVault::provider_keys(&provider.id)?;
-        complete_text(
+        complete_text_cancelled(
             provider,
             &selection.model,
             &keys,
@@ -87,23 +92,33 @@ pub async fn translator_translate(
             ),
             "",
             AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
+            Some(signal.clone()),
         )
         .await?
     } else {
         let credentials = adapter_credentials(&request.method)?;
-        translation::translate_with_source(
+        translation::translate_with_source_cancelled(
             &request.method,
             text,
             source_language,
             target_language,
             &credentials,
+            Some(&signal),
         )
         .await?
     };
+    if !state.translator_request_current(request.generation) {
+        return Err("Request cancelled".into());
+    }
     Ok(TranslationResult {
         generation: request.generation,
         text: translated,
     })
+}
+
+#[tauri::command]
+pub fn translator_cancel(state: State<'_, AppState>, generation: u64) -> bool {
+    state.cancel_translator_request(generation)
 }
 
 fn translation_target_language_name(target_language: &str) -> Result<&'static str, String> {
@@ -197,12 +212,52 @@ fn adapter_credentials(method: &str) -> Result<Vec<String>, String> {
         .map(Option::unwrap_or_default)
 }
 
+trait PasteKeyboard {
+    fn press_control(&mut self) -> Result<(), String>;
+    fn click_paste(&mut self) -> Result<(), String>;
+    fn release_control(&mut self) -> Result<(), String>;
+}
+
+impl PasteKeyboard for Enigo {
+    fn press_control(&mut self) -> Result<(), String> {
+        self.key(Key::Control, Direction::Press)
+            .map_err(|error| error.to_string())
+    }
+
+    fn click_paste(&mut self) -> Result<(), String> {
+        self.key(Key::Unicode('v'), Direction::Click)
+            .map_err(|error| error.to_string())
+    }
+
+    fn release_control(&mut self) -> Result<(), String> {
+        self.key(Key::Control, Direction::Release)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn inject_paste<K: PasteKeyboard>(keyboard: &mut K) -> Result<(), String> {
+    keyboard.press_control()?;
+    let paste = keyboard.click_paste();
+    let release = keyboard.release_control();
+    match (paste, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(paste_error), Ok(())) => Err(paste_error),
+        (Ok(()), Err(release_error)) => Err(release_error),
+        (Err(paste_error), Err(release_error)) => Err(format!(
+            "Paste key injection failed: {paste_error}; Ctrl release failed: {release_error}"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn optimizer_run(
     state: State<'_, AppState>,
     request: PromptOptimizationRequest,
 ) -> Result<PromptOptimizationResult, String> {
     let settings = state.current()?;
+    if !settings.prompt_optimizer.enabled {
+        return Err("Prompt optimizer is disabled in settings".into());
+    }
     let selection = settings
         .prompt_optimizer
         .model
@@ -250,6 +305,7 @@ pub async fn text_commit(
         .map_err(|error| error.to_string())?;
     if let Some(window) = app.get_webview_window("translator") {
         state.begin_surface_action();
+        state.cancel_active_translator_request();
         window.hide().map_err(|error| error.to_string())?;
     } else if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|error| error.to_string())?;
@@ -257,15 +313,7 @@ pub async fn text_commit(
     if auto_paste {
         sleep(Duration::from_millis(600)).await;
         let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
-        enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|error| error.to_string())?;
-        enigo
-            .key(Key::Unicode('v'), Direction::Click)
-            .map_err(|error| error.to_string())?;
-        enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|error| error.to_string())?;
+        inject_paste(&mut enigo)?;
     }
     Ok(())
 }
@@ -279,6 +327,7 @@ pub fn translator_take_selection(state: State<'_, AppState>) -> String {
 pub fn window_hide(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     if window.label() == "translator" {
         state.begin_surface_action();
+        state.cancel_active_translator_request();
     }
     window.hide().map_err(|error| error.to_string())
 }
@@ -291,9 +340,41 @@ pub fn vision_take_selection(state: State<'_, AppState>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_template_prompt, build_translation_prompt, optimizer_response_language_name,
-        translation_target_language_name,
+        build_template_prompt, build_translation_prompt, inject_paste,
+        optimizer_response_language_name, translation_target_language_name, PasteKeyboard,
     };
+
+    #[derive(Default)]
+    struct FaultingKeyboard {
+        actions: Vec<&'static str>,
+        fail_paste: bool,
+        fail_release: bool,
+    }
+
+    impl PasteKeyboard for FaultingKeyboard {
+        fn press_control(&mut self) -> Result<(), String> {
+            self.actions.push("press-control");
+            Ok(())
+        }
+
+        fn click_paste(&mut self) -> Result<(), String> {
+            self.actions.push("click-paste");
+            if self.fail_paste {
+                Err("paste unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn release_control(&mut self) -> Result<(), String> {
+            self.actions.push("release-control");
+            if self.fail_release {
+                Err("release unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[test]
     fn matches_the_screenshot_translation_target_language_contract() {
@@ -354,6 +435,41 @@ mod tests {
         assert_eq!(
             optimizer_response_language_name("en", "请优化这段提示词"),
             "English"
+        );
+    }
+
+    #[test]
+    fn releases_control_when_paste_key_injection_fails() {
+        let mut keyboard = FaultingKeyboard {
+            fail_paste: true,
+            ..FaultingKeyboard::default()
+        };
+
+        assert_eq!(inject_paste(&mut keyboard), Err("paste unavailable".into()));
+        assert_eq!(
+            keyboard.actions,
+            ["press-control", "click-paste", "release-control"]
+        );
+    }
+
+    #[test]
+    fn reports_both_paste_and_release_failures_after_attempting_release() {
+        let mut keyboard = FaultingKeyboard {
+            fail_paste: true,
+            fail_release: true,
+            ..FaultingKeyboard::default()
+        };
+
+        assert_eq!(
+            inject_paste(&mut keyboard),
+            Err(
+                "Paste key injection failed: paste unavailable; Ctrl release failed: release unavailable"
+                    .into()
+            )
+        );
+        assert_eq!(
+            keyboard.actions,
+            ["press-control", "click-paste", "release-control"]
         );
     }
 }

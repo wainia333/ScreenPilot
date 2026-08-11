@@ -16,10 +16,12 @@ function shortcutFromEvent(event: KeyboardEvent<HTMLButtonElement>): string | nu
 export function ShortcutRecorder({
   value,
   label,
+  recordingLabel = '请按快捷键',
   onChange,
 }: {
   value: string
   label: string
+  recordingLabel?: string
   onChange: (value: string) => void
 }) {
   const [recording, setRecording] = useState(false)
@@ -28,19 +30,31 @@ export function ShortcutRecorder({
       type="button"
       className="shortcut-recorder"
       data-recording={recording}
+      aria-pressed={recording}
       aria-label={label}
       onClick={() => setRecording(true)}
       onBlur={() => setRecording(false)}
       onKeyDown={(event) => {
         if (!recording) return
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          setRecording(false)
+          return
+        }
+        if (event.key === 'Tab') {
+          setRecording(false)
+          return
+        }
+        event.preventDefault()
+        event.stopPropagation()
         const shortcut = shortcutFromEvent(event)
         if (shortcut === null) return
-        event.preventDefault()
         onChange(shortcut)
         setRecording(false)
       }}
     >
-      {recording ? '请按快捷键' : value}
+      {recording ? recordingLabel : value}
     </button>
   )
 }

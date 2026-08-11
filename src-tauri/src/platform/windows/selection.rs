@@ -1,19 +1,37 @@
 use arboard::Clipboard;
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::core::Interface;
-use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+use windows::core::{w, Interface};
+use windows::Win32::Foundation::{
+    GetLastError, GlobalFree, SetLastError, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND,
+    RPC_E_CHANGED_MODE,
+};
+use windows::Win32::Graphics::Gdi::{
+    DeleteEnhMetaFile, DeleteMetaFile, DeleteObject, HENHMETAFILE, HGDIOBJ, HMETAFILE,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardSequenceNumber, OpenClipboard, SetClipboardData, METAFILEPICT,
+};
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Ole::{
+    OleDuplicateData, CF_BITMAP, CF_DSPBITMAP, CF_DSPENHMETAFILE, CF_DSPMETAFILEPICT,
+    CF_ENHMETAFILE, CF_GDIOBJFIRST, CF_GDIOBJLAST, CF_METAFILEPICT, CF_OWNERDISPLAY, CF_PALETTE,
+    CF_PRIVATEFIRST, CF_PRIVATELAST, CLIPBOARD_FORMAT,
+};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN,
     VK_MENU, VK_RWIN, VK_SHIFT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
 const SELECTION_LIMIT: usize = 200_000;
@@ -22,6 +40,38 @@ enum SelectionProbe {
     Selected(String),
     NoSelection,
     Unsupported,
+}
+
+trait ClipboardFallbackBackend {
+    type Snapshot;
+
+    fn wait_for_modifier_release(&mut self);
+    fn previous_text(&mut self) -> Option<String>;
+    fn sequence(&mut self) -> Option<u32>;
+    fn backup(&mut self) -> Result<Self::Snapshot, String>;
+    fn send_copy(&mut self) -> bool;
+    fn read_copied_text(&mut self, previous_sequence: Option<u32>)
+        -> (Option<String>, Option<u32>);
+    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), String>;
+}
+
+struct WindowsClipboardFallback;
+
+struct ClipboardSnapshot {
+    formats: Vec<ClipboardFormatBackup>,
+}
+
+struct ClipboardFormatBackup {
+    format: u32,
+    handle: Option<HANDLE>,
+}
+
+struct ClipboardOwnerWindow {
+    hwnd: HWND,
+}
+
+struct OpenClipboardGuard {
+    _owner: Option<ClipboardOwnerWindow>,
 }
 
 pub fn selected_text(clipboard_fallback: bool) -> String {
@@ -75,25 +125,250 @@ fn selected_text_uia() -> SelectionProbe {
 }
 
 fn selected_text_clipboard() -> Option<String> {
-    let previous = Clipboard::new()
-        .ok()
-        .and_then(|mut clipboard| clipboard.get_text().ok());
-    let previous_sequence = clipboard_sequence();
-    wait_for_modifier_release(Duration::from_millis(450));
-    send_copy()?;
-    let (current, current_sequence) =
-        read_copied_text(previous_sequence, Duration::from_millis(500));
-    if let Some(value) = &previous {
-        if let Ok(mut clipboard) = Clipboard::new() {
-            let _ = clipboard.set_text(value.clone());
+    capture_clipboard_selection(&mut WindowsClipboardFallback)
+}
+
+fn capture_clipboard_selection<B: ClipboardFallbackBackend>(backend: &mut B) -> Option<String> {
+    backend.wait_for_modifier_release();
+    let previous = backend.previous_text();
+    let previous_sequence = backend.sequence();
+    let snapshot = match backend.backup() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("[selection] Clipboard fallback skipped because backup failed: {error}");
+            return None;
+        }
+    };
+    let copied = if backend.send_copy() {
+        let (current, current_sequence) = backend.read_copied_text(previous_sequence);
+        copied_selection(
+            previous.as_deref(),
+            current,
+            previous_sequence,
+            current_sequence,
+        )
+    } else {
+        None
+    };
+    if let Err(error) = backend.restore(snapshot) {
+        eprintln!("[selection] Clipboard restore failed: {error}");
+        return None;
+    }
+    copied
+}
+
+impl ClipboardFallbackBackend for WindowsClipboardFallback {
+    type Snapshot = ClipboardSnapshot;
+
+    fn wait_for_modifier_release(&mut self) {
+        wait_for_modifier_release(Duration::from_millis(450));
+    }
+
+    fn previous_text(&mut self) -> Option<String> {
+        Clipboard::new()
+            .ok()
+            .and_then(|mut clipboard| clipboard.get_text().ok())
+    }
+
+    fn sequence(&mut self) -> Option<u32> {
+        clipboard_sequence()
+    }
+
+    fn backup(&mut self) -> Result<Self::Snapshot, String> {
+        ClipboardSnapshot::capture()
+    }
+
+    fn send_copy(&mut self) -> bool {
+        send_copy().is_some()
+    }
+
+    fn read_copied_text(
+        &mut self,
+        previous_sequence: Option<u32>,
+    ) -> (Option<String>, Option<u32>) {
+        read_copied_text(previous_sequence, Duration::from_millis(500))
+    }
+
+    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), String> {
+        snapshot.restore()
+    }
+}
+
+impl ClipboardSnapshot {
+    fn capture() -> Result<Self, String> {
+        let _clipboard = OpenClipboardGuard::open(Duration::from_millis(100))?;
+        let mut formats = Vec::new();
+        let mut current = 0;
+        loop {
+            unsafe { SetLastError(ERROR_SUCCESS) };
+            let format = unsafe { EnumClipboardFormats(current) };
+            if format == 0 {
+                let error = unsafe { GetLastError() };
+                if error == ERROR_SUCCESS {
+                    break;
+                }
+                return Err(format!("Clipboard format enumeration failed: {error:?}"));
+            }
+            if !clipboard_format_has_safe_ownership(format) {
+                return Err(format!(
+                    "Clipboard format {format} cannot be safely owned and restored"
+                ));
+            }
+            let source = unsafe { GetClipboardData(format) }
+                .map_err(|error| format!("Clipboard format {format} is unavailable: {error}"))?;
+            let duplicated =
+                unsafe { OleDuplicateData(source, CLIPBOARD_FORMAT(format as u16), GMEM_MOVEABLE) };
+            if duplicated.is_invalid() {
+                return Err(format!("Clipboard format {format} could not be duplicated"));
+            }
+            formats.push(ClipboardFormatBackup {
+                format,
+                handle: Some(duplicated),
+            });
+            current = format;
+        }
+        Ok(Self { formats })
+    }
+
+    fn restore(mut self) -> Result<(), String> {
+        let _clipboard = OpenClipboardGuard::open_owned(Duration::from_millis(100))?;
+        unsafe { EmptyClipboard() }.map_err(|error| error.to_string())?;
+        let mut failures = Vec::new();
+        for format in &mut self.formats {
+            let Some(handle) = format.handle.take() else {
+                continue;
+            };
+            if let Err(error) = unsafe { SetClipboardData(format.format, Some(handle)) } {
+                format.handle = Some(handle);
+                failures.push(format!("{}: {error}", format.format));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Clipboard formats could not be restored: {}",
+                failures.join("; ")
+            ))
         }
     }
-    copied_selection(
-        previous.as_deref(),
-        current,
-        previous_sequence,
-        current_sequence,
-    )
+}
+
+impl ClipboardOwnerWindow {
+    fn create() -> Result<Self, String> {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("ScreenPilot Clipboard Owner"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        }
+        .map_err(|error| format!("Clipboard owner window creation failed: {error}"))?;
+        Ok(Self { hwnd })
+    }
+}
+
+impl Drop for ClipboardOwnerWindow {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+impl OpenClipboardGuard {
+    fn open(timeout: Duration) -> Result<Self, String> {
+        Self::open_with_owner(None, timeout)
+    }
+
+    fn open_owned(timeout: Duration) -> Result<Self, String> {
+        Self::open_with_owner(Some(ClipboardOwnerWindow::create()?), timeout)
+    }
+
+    fn open_with_owner(
+        owner: Option<ClipboardOwnerWindow>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let started = Instant::now();
+        let hwnd = owner.as_ref().map(|owner| owner.hwnd);
+        loop {
+            match unsafe { OpenClipboard(hwnd) } {
+                Ok(()) => return Ok(Self { _owner: owner }),
+                Err(error) if started.elapsed() < timeout => {
+                    let _ = error;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+}
+
+impl Drop for OpenClipboardGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseClipboard() };
+    }
+}
+
+impl Drop for ClipboardFormatBackup {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        unsafe { free_duplicated_clipboard_data(self.format, handle) };
+    }
+}
+
+fn clipboard_format_has_safe_ownership(format: u32) -> bool {
+    let owner_display = u32::from(CF_OWNERDISPLAY.0);
+    let private_first = u32::from(CF_PRIVATEFIRST.0);
+    let private_last = u32::from(CF_PRIVATELAST.0);
+    let gdi_first = u32::from(CF_GDIOBJFIRST.0);
+    let gdi_last = u32::from(CF_GDIOBJLAST.0);
+    format != owner_display
+        && !(private_first..=private_last).contains(&format)
+        && !(gdi_first..=gdi_last).contains(&format)
+}
+
+unsafe fn free_duplicated_clipboard_data(format: u32, handle: HANDLE) {
+    let bitmap = u32::from(CF_BITMAP.0);
+    let display_bitmap = u32::from(CF_DSPBITMAP.0);
+    let palette = u32::from(CF_PALETTE.0);
+    let enhanced_metafile = u32::from(CF_ENHMETAFILE.0);
+    let display_enhanced_metafile = u32::from(CF_DSPENHMETAFILE.0);
+    let metafile_picture = u32::from(CF_METAFILEPICT.0);
+    let display_metafile_picture = u32::from(CF_DSPMETAFILEPICT.0);
+    if matches!(format, value if value == bitmap || value == display_bitmap || value == palette) {
+        let _ = unsafe { DeleteObject(HGDIOBJ(handle.0)) };
+    } else if matches!(
+        format,
+        value if value == enhanced_metafile || value == display_enhanced_metafile
+    ) {
+        let _ = unsafe { DeleteEnhMetaFile(Some(HENHMETAFILE(handle.0))) };
+    } else if matches!(
+        format,
+        value if value == metafile_picture || value == display_metafile_picture
+    ) {
+        let memory = HGLOBAL(handle.0);
+        let pointer = unsafe { GlobalLock(memory) }.cast::<METAFILEPICT>();
+        if !pointer.is_null() {
+            let metafile = unsafe { (*pointer).hMF };
+            if !metafile.is_invalid() {
+                let _ = unsafe { DeleteMetaFile(HMETAFILE(metafile.0)) };
+            }
+            let _ = unsafe { GlobalUnlock(memory) };
+        }
+        let _ = unsafe { GlobalFree(Some(memory)) };
+    } else {
+        let _ = unsafe { GlobalFree(Some(HGLOBAL(handle.0))) };
+    }
 }
 
 fn send_copy() -> Option<()> {
@@ -183,7 +458,76 @@ fn bounded_selection(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::copied_selection;
+    use super::{
+        capture_clipboard_selection, clipboard_format_has_safe_ownership, copied_selection,
+        ClipboardFallbackBackend, ClipboardOwnerWindow,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+    struct FakeClipboardBackend {
+        actions: Vec<&'static str>,
+        backup_error: Option<String>,
+        restore_error: Option<String>,
+        send_succeeds: bool,
+    }
+
+    impl Default for FakeClipboardBackend {
+        fn default() -> Self {
+            Self {
+                actions: Vec::new(),
+                backup_error: None,
+                restore_error: None,
+                send_succeeds: true,
+            }
+        }
+    }
+
+    impl ClipboardFallbackBackend for FakeClipboardBackend {
+        type Snapshot = ();
+
+        fn wait_for_modifier_release(&mut self) {
+            self.actions.push("wait");
+        }
+
+        fn previous_text(&mut self) -> Option<String> {
+            self.actions.push("previous-text");
+            Some("old".into())
+        }
+
+        fn sequence(&mut self) -> Option<u32> {
+            self.actions.push("sequence");
+            Some(10)
+        }
+
+        fn backup(&mut self) -> Result<Self::Snapshot, String> {
+            self.actions.push("backup");
+            match &self.backup_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+
+        fn send_copy(&mut self) -> bool {
+            self.actions.push("send-copy");
+            self.send_succeeds
+        }
+
+        fn read_copied_text(
+            &mut self,
+            _previous_sequence: Option<u32>,
+        ) -> (Option<String>, Option<u32>) {
+            self.actions.push("read-copy");
+            (Some("selected".into()), Some(11))
+        }
+
+        fn restore(&mut self, _snapshot: Self::Snapshot) -> Result<(), String> {
+            self.actions.push("restore");
+            match &self.restore_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
 
     #[test]
     fn accepts_equal_clipboard_text_when_the_sequence_changes() {
@@ -207,5 +551,82 @@ mod tests {
                 .count(),
             200_000
         );
+    }
+
+    #[test]
+    fn backup_failure_aborts_before_sending_copy() {
+        let mut backend = FakeClipboardBackend {
+            backup_error: Some("snapshot unavailable".into()),
+            ..FakeClipboardBackend::default()
+        };
+
+        assert_eq!(capture_clipboard_selection(&mut backend), None);
+        assert_eq!(
+            backend.actions,
+            ["wait", "previous-text", "sequence", "backup"]
+        );
+    }
+
+    #[test]
+    fn restores_the_snapshot_after_copy_and_before_returning_selection() {
+        let mut backend = FakeClipboardBackend::default();
+
+        assert_eq!(
+            capture_clipboard_selection(&mut backend),
+            Some("selected".into())
+        );
+        assert_eq!(
+            backend.actions,
+            [
+                "wait",
+                "previous-text",
+                "sequence",
+                "backup",
+                "send-copy",
+                "read-copy",
+                "restore"
+            ]
+        );
+    }
+
+    #[test]
+    fn restores_the_snapshot_even_when_copy_injection_fails() {
+        let mut backend = FakeClipboardBackend {
+            send_succeeds: false,
+            ..FakeClipboardBackend::default()
+        };
+
+        assert_eq!(capture_clipboard_selection(&mut backend), None);
+        assert_eq!(
+            backend.actions,
+            [
+                "wait",
+                "previous-text",
+                "sequence",
+                "backup",
+                "send-copy",
+                "restore"
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_formats_whose_clipboard_ownership_cannot_be_safely_transferred() {
+        assert!(!clipboard_format_has_safe_ownership(128));
+        assert!(!clipboard_format_has_safe_ownership(512));
+        assert!(!clipboard_format_has_safe_ownership(768));
+        assert!(clipboard_format_has_safe_ownership(13));
+        assert!(clipboard_format_has_safe_ownership(0xc000));
+    }
+
+    #[test]
+    fn clipboard_owner_window_is_valid_for_its_raii_lifetime() {
+        let hwnd = {
+            let owner = ClipboardOwnerWindow::create().expect("create clipboard owner window");
+            assert!(unsafe { IsWindow(Some(owner.hwnd)) }.as_bool());
+            owner.hwnd
+        };
+
+        assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
     }
 }

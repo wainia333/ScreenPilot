@@ -2,6 +2,7 @@ import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, 
 import { ModelField } from '../model-options'
 import type { AppSettings, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
+import { copyFor } from '../../../shared/ui-copy'
 
 export function OptimizerSection({
   settings,
@@ -10,39 +11,41 @@ export function OptimizerSection({
   settings: AppSettings
   onChange: (settings: AppSettings) => void
 }) {
+  const t = copyFor(settings.language)
   const current = settings.promptOptimizer
   const update = (patch: Partial<AppSettings['promptOptimizer']>) =>
     onChange({ ...settings, promptOptimizer: { ...current, ...patch } })
   return (
     <>
-      <SettingGroup title="提示词优化">
-        <SettingRow label="启用优化器">
-          <Toggle checked={current.enabled} label="启用提示词优化器" onChange={(enabled) => update({ enabled })} />
+      <SettingGroup title={t.promptOptimization}>
+        <SettingRow label={t.enableOptimizer}>
+          <Toggle checked={current.enabled} label={t.enablePromptOptimizer} onChange={(enabled) => update({ enabled })} />
         </SettingRow>
-        <SettingRow label="输出语言">
+        <SettingRow label={t.outputLanguage}>
           <SelectField
             value={current.responseLanguage}
-            label="优化器输出语言"
+            label={t.optimizerOutputLanguage}
             options={[
-              { value: 'auto', label: '跟随原文' },
-              { value: 'zh-CN', label: '简体中文' },
-              { value: 'en', label: 'English' },
+              { value: 'auto', label: t.followInput },
+              { value: 'zh-CN', label: t.simplifiedChinese },
+              { value: 'en', label: t.english },
             ]}
             onChange={(responseLanguage) => update({ responseLanguage })}
           />
         </SettingRow>
-        <SettingRow label="模型">
+        <SettingRow label={t.model}>
           <ModelField
             value={current.model}
             providers={settings.providers}
-            label="提示词优化模型"
+            label={t.optimizerModel}
+            emptyLabel={t.noSelection}
             onChange={(model) => update({ model })}
           />
         </SettingRow>
-        <SettingRow label="思考强度">
+        <SettingRow label={t.reasoningEffort}>
           <SelectField<ThinkingEffort>
             value={current.thinkingEffort}
-            label="提示词优化思考强度"
+            label={t.optimizerReasoningEffort}
             options={[
               { value: 'low', label: 'low' },
               { value: 'medium', label: 'medium' },
@@ -55,36 +58,38 @@ export function OptimizerSection({
         </SettingRow>
       </SettingGroup>
       <SettingGroup
-        title="系统提示词"
+        title={t.systemPrompt}
         titleAction={
           <PromptResetButton
             value={current.systemPrompt}
-            label="优化器系统提示词"
+            label={t.optimizerSystemPrompt}
             defaultValue={DEFAULT_SETTINGS.promptOptimizer.systemPrompt}
+            resetLabel={t.resetDefault}
             onChange={(systemPrompt) => update({ systemPrompt })}
           />
         }
       >
         <PromptField
           value={current.systemPrompt}
-          label="优化器系统提示词"
+          label={t.optimizerSystemPrompt}
           onChange={(systemPrompt) => update({ systemPrompt })}
         />
       </SettingGroup>
       <SettingGroup
-        title="优化提示词"
+        title={t.optimizationPrompt}
         titleAction={
           <PromptResetButton
             value={current.optimizePrompt}
-            label="优化提示词"
+            label={t.optimizationPrompt}
             defaultValue={DEFAULT_SETTINGS.promptOptimizer.optimizePrompt}
+            resetLabel={t.resetDefault}
             onChange={(optimizePrompt) => update({ optimizePrompt })}
           />
         }
       >
         <PromptField
           value={current.optimizePrompt}
-          label="优化提示词"
+          label={t.optimizationPrompt}
           onChange={(optimizePrompt) => update({ optimizePrompt })}
         />
       </SettingGroup>

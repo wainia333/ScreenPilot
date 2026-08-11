@@ -4,7 +4,7 @@ import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { DEFAULT_SETTINGS } from './defaults'
-import type { AppSettings, ProviderSettings, SettingsExport } from './types'
+import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from './types'
 import type { SettingsSaveResult } from '../../desktop/contract'
 import { SettingsPage } from './settings-page'
 import { primaryProviderKeyDraft } from './provider-key-draft'
@@ -64,6 +64,15 @@ class CountingSettingsDesktop extends ClosingDesktop {
   }
 }
 
+class VisibilityAwareNoticeDesktop extends ClosingDesktop {
+  override acknowledgeStartupNotice(): Promise<boolean> {
+    this.startupNoticeAcknowledgeCalls += 1
+    if (this.startupNoticeAcknowledgeCalls === 1) return Promise.resolve(false)
+    this.startupNotice = null
+    return Promise.resolve(true)
+  }
+}
+
 class DeferredSaveDesktop extends ClosingDesktop {
   saves = 0
   resolveSave: (() => void) | null = null
@@ -83,7 +92,10 @@ class DeferredSaveDesktop extends ClosingDesktop {
 }
 
 class ImportSettingsDesktop extends CountingSettingsDesktop {
-  constructor(private readonly importedSettings: AppSettings) {
+  constructor(
+    private readonly importedSettings: AppSettings,
+    private readonly importedSecrets?: SettingsSecrets,
+  ) {
     super()
   }
 
@@ -93,20 +105,30 @@ class ImportSettingsDesktop extends CountingSettingsDesktop {
       schemaVersion: 1,
       appVersion: '0.1.0',
       exportedAt: '2026-08-02T00:00:00.000Z',
-      includesSecrets: false,
+      includesSecrets: this.importedSecrets !== undefined,
       settings: structuredClone(this.importedSettings),
+      ...(this.importedSecrets === undefined ? {} : { secrets: structuredClone(this.importedSecrets) }),
     })
   }
 }
 
 class DeferredProviderDesktop extends ClosingDesktop {
   resolveModels: ((models: string[]) => void) | null = null
+  resolveConnection: ((result: { success: boolean; error: string | null }) => void) | null = null
 
   override fetchProviderModels(provider: ProviderSettings, keys?: string[]): Promise<string[]> {
     void provider
     void keys
     return new Promise((resolve) => {
       this.resolveModels = resolve
+    })
+  }
+
+  override testProvider(provider: ProviderSettings, keys?: string[]): Promise<{ success: boolean; error: string | null }> {
+    void provider
+    void keys
+    return new Promise((resolve) => {
+      this.resolveConnection = resolve
     })
   }
 }
@@ -124,19 +146,60 @@ describe('SettingsPage', () => {
     expect(primaryProviderKeyDraft(['  ', ' draft-primary ', 'backup'])).toEqual(['draft-primary'])
   })
 
+  it('switches the complete settings shell and document language to English', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'English' }))
+
+    expect(screen.getByRole('navigation', { name: 'Settings sections' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'General' })).toBeInTheDocument()
+    expect(screen.getByText('Appearance & language')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Close settings' })).toBeInTheDocument()
+    expect(document.documentElement).toHaveAttribute('lang', 'en')
+  })
+
+  it('keeps a startup recovery notice until the visible settings window acknowledges it', async () => {
+    const desktop = new VisibilityAwareNoticeDesktop()
+    desktop.startupNotice = '设置文件已隔离，当前使用默认设置。'
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+
+    expect(await screen.findByText('设置文件已隔离，当前使用默认设置。')).toBeVisible()
+    expect(desktop.startupNoticeAcknowledgeCalls).toBe(1)
+    expect(desktop.startupNotice).not.toBeNull()
+
+    fireEvent.focus(window)
+    await act(async () => Promise.resolve())
+
+    expect(desktop.startupNoticeAcknowledgeCalls).toBe(2)
+    expect(desktop.startupNotice).toBeNull()
+    expect(screen.getByText('设置文件已隔离，当前使用默认设置。')).toBeVisible()
+  })
+
   it('offers save, discard and continue choices before closing dirty settings', async () => {
     const desktop = new ClosingDesktop()
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     fireEvent.click(await screen.findByRole('radio', { name: '深色' }))
-    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const closeSettings = screen.getByRole('button', { name: '关闭设置' })
+    closeSettings.focus()
+    fireEvent.click(closeSettings)
     const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
     expect(dialog).toHaveClass('decision-dialog', 'unsaved-close-dialog')
     expect(dialog.parentElement).toHaveClass('dialog-backdrop', 'unsaved-close-backdrop')
     expect(dialog).toHaveTextContent('保存并关闭')
     expect(dialog).toHaveTextContent('放弃更改')
-    fireEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+    const continueEditing = screen.getByRole('button', { name: '继续编辑' })
+    await act(async () => Promise.resolve())
+    expect(document.activeElement).toBe(continueEditing)
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '保存并关闭' }))
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(continueEditing)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await act(async () => Promise.resolve())
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '关闭设置' }))
     fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
     fireEvent.click(screen.getByRole('button', { name: '放弃更改' }))
     expect(desktop.hides).toBe(1)
@@ -330,6 +393,112 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('radio', { name: '系统' })).toBeChecked()
     expect(cancel).toBeDisabled()
     expect(desktop.saves).toBe(0)
+  })
+
+  it('saves imported provider and adapter secrets through the combined command', async () => {
+    const removedProvider: ProviderSettings = {
+      id: 'removed-provider',
+      name: 'Removed Provider',
+      baseUrl: 'https://removed.example.com/v1',
+      keyCount: 1,
+      availableModels: [],
+      enabledModels: [],
+    }
+    const provider: ProviderSettings = {
+      id: 'imported-provider',
+      name: 'Imported Provider',
+      baseUrl: 'https://example.com/v1',
+      keyCount: 1,
+      availableModels: ['model'],
+      enabledModels: ['model'],
+    }
+    const secrets: SettingsSecrets = {
+      schemaVersion: 1,
+      providers: { [provider.id]: ['provider-secret'] },
+      adapters: { 'adapter-baidu-ocr': ['ocr-api-key', 'ocr-secret-key'] },
+    }
+    const desktop = new ImportSettingsDesktop({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [provider],
+    }, secrets)
+    const initialSettings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [removedProvider],
+    }
+    await desktop.saveSettings(initialSettings)
+    await desktop.setProviderKeys(removedProvider.id, ['old-provider-secret'])
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    fireEvent.click(screen.getByRole('button', { name: '导入配置' }))
+    await act(async () => Promise.resolve())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await Promise.resolve()
+    })
+
+    expect(desktop.importedSecretsSaveCalls).toEqual([{
+      secrets,
+      providerDeletionIds: [removedProvider.id],
+    }])
+    expect(desktop.providerKeySaveCalls).toEqual([])
+    expect(await desktop.providerKeyCount(removedProvider.id)).toBe(0)
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+  })
+
+  it('rolls settings back when the combined imported-secrets save fails', async () => {
+    const removedProvider: ProviderSettings = {
+      id: 'removed-provider',
+      name: 'Removed Provider',
+      baseUrl: 'https://removed.example.com/v1',
+      keyCount: 1,
+      availableModels: [],
+      enabledModels: [],
+    }
+    const provider: ProviderSettings = {
+      id: 'imported-provider',
+      name: 'Imported Provider',
+      baseUrl: 'https://example.com/v1',
+      keyCount: 1,
+      availableModels: [],
+      enabledModels: [],
+    }
+    const secrets: SettingsSecrets = {
+      schemaVersion: 1,
+      providers: { [provider.id]: ['provider-secret'] },
+      adapters: { 'adapter-baidu-ocr': ['ocr-api-key', 'ocr-secret-key'] },
+    }
+    const desktop = new ImportSettingsDesktop({
+      ...structuredClone(DEFAULT_SETTINGS),
+      theme: 'dark',
+      providers: [provider],
+    }, secrets)
+    const initialSettings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [removedProvider],
+    }
+    await desktop.saveSettings(initialSettings)
+    await desktop.setProviderKeys(removedProvider.id, ['old-provider-secret'])
+    desktop.importedSecretsSaveError = 'synthetic credential failure'
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    fireEvent.click(screen.getByRole('button', { name: '导入配置' }))
+    await act(async () => Promise.resolve())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(desktop.importedSecretsSaveCalls).toEqual([{
+      secrets,
+      providerDeletionIds: [removedProvider.id],
+    }])
+    expect(desktop.saves).toBe(3)
+    expect(await desktop.loadSettings()).toEqual(initialSettings)
+    expect(await desktop.providerKeyCount(removedProvider.id)).toBe(1)
+    expect(screen.getByText(/保存失败.*synthetic credential failure/u)).toBeInTheDocument()
   })
 
   it('offers a default reset for every editable prompt field', async () => {
@@ -698,7 +867,122 @@ describe('SettingsPage', () => {
       await Promise.resolve()
     })
     expect(screen.getByRole('textbox', { name: '提供商名称' })).toHaveValue('Edited while fetching')
-    expect(screen.getByRole('button', { name: 'model-a' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'model-a' })).not.toBeInTheDocument()
+    expect(screen.queryByText('获取到 1 个模型')).not.toBeInTheDocument()
+  })
+
+  it('keeps a current model fetch result when its own provider update replaces the draft', async () => {
+    const desktop = new DeferredProviderDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'current-model-fetch',
+        name: 'Current provider',
+        baseUrl: 'https://current.example.com/v1',
+        keyCount: 0,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '拉取模型' }))
+
+    await act(async () => {
+      desktop.resolveModels?.(['current-model'])
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('button', { name: 'current-model' })).toBeVisible()
+    expect(screen.getByText('获取到 1 个模型')).toBeVisible()
+  })
+
+  it('does not apply a model fetch that finishes after provider changes are cancelled', async () => {
+    const desktop = new DeferredProviderDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'cancelled-model-fetch',
+        name: 'Saved provider',
+        baseUrl: 'https://saved.example.com/v1',
+        keyCount: 0,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '提供商名称' }), {
+      target: { value: 'Unsaved provider' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '拉取模型' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('textbox', { name: '提供商名称' })).toHaveValue('Saved provider')
+
+    await act(async () => {
+      desktop.resolveModels?.(['stale-model'])
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByRole('button', { name: 'stale-model' })).not.toBeInTheDocument()
+    expect(screen.queryByText('获取到 1 个模型')).not.toBeInTheDocument()
+  })
+
+  it('does not show a connection result that finishes after provider changes are cancelled', async () => {
+    const desktop = new DeferredProviderDesktop()
+    await desktop.saveSettings({
+      ...structuredClone(DEFAULT_SETTINGS),
+      providers: [{
+        id: 'cancelled-connection-test',
+        name: 'Saved provider',
+        baseUrl: 'https://saved.example.com/v1',
+        keyCount: 0,
+        availableModels: [],
+        enabledModels: [],
+      }],
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    const keys = screen.getByRole('textbox', { name: 'Saved provider API Keys' })
+    fireEvent.change(keys, {
+      target: { value: 'unsaved-key' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(keys).toHaveValue('')
+
+    await act(async () => {
+      desktop.resolveConnection?.({ success: true, error: null })
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText('连接成功')).not.toBeInTheDocument()
+  })
+
+  it('keeps the raw multiline key draft and invalidates stale connection status', async () => {
+    const desktop = new DeferredProviderDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '新增' }))
+    const keys = screen.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })
+    fireEvent.change(keys, { target: { value: 'first-key\n' } })
+    expect(keys).toHaveValue('first-key\n')
+    fireEvent.change(keys, { target: { value: 'first-key\nsecond-key' } })
+    expect(keys).toHaveValue('first-key\nsecond-key')
+
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '提供商 Base URL' }), {
+      target: { value: 'https://changed.example/v1' },
+    })
+    await act(async () => {
+      desktop.resolveConnection?.({ success: true, error: null })
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('连接成功')).not.toBeInTheDocument()
   })
 
   it('passes the current draft URL and plaintext keys to model fetch and connection test', async () => {

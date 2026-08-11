@@ -127,7 +127,13 @@ export type SettingsExport = {
   exportedAt: string
   includesSecrets: boolean
   settings: AppSettings
-  secrets?: Record<string, string[]>
+  secrets?: SettingsSecrets
+}
+
+export type SettingsSecrets = {
+  schemaVersion: 1
+  providers: Record<string, string[]>
+  adapters: Record<string, string[]>
 }
 
 export type SettingsIssue = {

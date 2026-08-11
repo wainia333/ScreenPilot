@@ -4,11 +4,13 @@ export function ModelField({
   value,
   providers,
   label,
+  emptyLabel = '未选择',
   onChange,
 }: {
   value: ModelSelection | null
   providers: ProviderSettings[]
   label: string
+  emptyLabel?: string
   onChange: (value: ModelSelection | null) => void
 }) {
   const encoded = value === null ? '' : JSON.stringify(value)
@@ -22,7 +24,7 @@ export function ModelField({
         onChange(selection.length === 0 ? null : (JSON.parse(selection) as ModelSelection))
       }}
     >
-      <option value="">未选择</option>
+      <option value="">{emptyLabel}</option>
       {providers.flatMap((provider) =>
         provider.enabledModels.map((model) => {
           const selection = { providerId: provider.id, model }

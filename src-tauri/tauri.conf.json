@@ -5,7 +5,7 @@
   "identifier": "com.wainia.screenpilot",
   "build": {
     "beforeDevCommand": "npm run dev:ui",
-    "beforeBuildCommand": "npm run build:ui",
+    "beforeBuildCommand": "npm run release:prepare",
     "devUrl": "http://127.0.0.1:5713",
     "frontendDist": "../dist"
   },
@@ -28,7 +28,7 @@
       },
       {
         "label": "translator",
-        "title": "ScreenPilot 文本翻译",
+        "title": "ScreenPilot",
         "url": "index.html",
         "width": 680,
         "height": 400,

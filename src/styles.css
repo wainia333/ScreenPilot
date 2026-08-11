@@ -2089,16 +2089,21 @@ select:focus-visible {
 
 .history-menu-output {
   margin-top: 2px;
-  color: #737373;
+  color: #666;
   font-size: 11px;
   line-height: 1.25;
 }
 
 .history-menu-meta {
   margin-top: 2px;
-  color: #a3a3a3;
-  font-size: 9.5px;
+  color: #666;
+  font-size: 11px;
   line-height: 1.25;
+}
+
+.history-menu-item:hover .history-menu-output,
+.history-menu-item:hover .history-menu-meta {
+  color: #666;
 }
 
 .history-menu-delete {
@@ -2185,7 +2190,7 @@ select:focus-visible {
 }
 
 :root[data-theme="dark"] .history-menu-meta {
-  color: #737373;
+  color: #a3a3a3;
 }
 
 :root[data-theme="dark"] .history-menu-empty {
@@ -2242,7 +2247,7 @@ select:focus-visible {
   }
 
   :root[data-theme="system"] .history-menu-meta {
-    color: #737373;
+    color: #a3a3a3;
   }
 
   :root[data-theme="system"] .history-menu-empty {

@@ -12,8 +12,9 @@ export async function installVisionTauriMock(
   visionStreamDelayMs = 0,
   deferFloatingSetResponses = 0,
   nativeResizeClientWidthDelta = 0,
+  archiveWarning = '',
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
@@ -22,6 +23,14 @@ export async function installVisionTauriMock(
     let nativeResizeFeedbackFlip = false
     let nativeResizeFeedbackCount = 0
     let nativeResizeFeedbackBaseWidth: number | null = null
+    type CaptureResult = {
+      success: boolean
+      imageId?: string
+      error?: string
+      archiveWarning?: string
+    }
+    const pendingCaptureResolvers: ((result: CaptureResult) => void)[] = []
+    const pendingShowResolvers: (() => void)[] = []
     const floatingPadding = 8
     const floatingInset = floatingPadding * 2
     const visionTestState = {
@@ -41,6 +50,22 @@ export async function installVisionTauriMock(
       floatingDeferredResponsesRemaining: Math.max(0, deferSetResponses || 0),
       safeDragCalls: 0,
       safeDragRejectsRemaining: 0,
+      windowVisible: true,
+      deferShow: false,
+      pendingShowCount: 0,
+      resolveNextShow: () => false,
+      hideCount: 0,
+      deferCapture: false,
+      pendingCaptureCount: 0,
+      resolveNextCapture: (success?: boolean) => {
+        void success
+        return false
+      },
+      closeVisionSurface: () => undefined,
+      interfaceLanguage: 'zh' as 'zh' | 'en',
+      temporaryImageIds: [] as string[],
+      committedImageIds: [] as string[],
+      deletedTemporaryImageIds: [] as string[],
     }
     const settings = {
       hotkey: 'F2',
@@ -57,7 +82,7 @@ export async function installVisionTauriMock(
       providers: [{
         id: 'test-provider',
         name: 'Synthetic Provider',
-        apiKeys: ['test-key'],
+        keyCount: 1,
         baseUrl: 'https://example.invalid/v1',
         availableModels: ['test-model'],
         enabledModels: ['test-model'],
@@ -77,6 +102,10 @@ export async function installVisionTauriMock(
         translationAiEnabled: true,
         translateProviderId: 'test-provider',
         translateModel: 'test-model',
+        baiduOcr: { apiKeyConfigured: true, secretKeyConfigured: true },
+        baiduTranslate: { appIdConfigured: true, appKeyConfigured: true },
+        tencentTranslate: { secretIdConfigured: true, secretKeyConfigured: true },
+        caiyunTranslate: { tokenConfigured: true },
         directTranslate: false,
         thinkingEnabled: false,
         thinkingEffort: 'medium',
@@ -116,10 +145,46 @@ export async function installVisionTauriMock(
       imageArchiveEnabled: false,
       imageArchivePath: '',
     }
+    const createCaptureSuccess = (): CaptureResult => {
+      const imageId = `capture-${++imageSequence}`
+      visionTestState.temporaryImageIds.push(imageId)
+      return {
+        success: true,
+        imageId,
+        ...(archiveWarningText ? { archiveWarning: archiveWarningText } : {}),
+      }
+    }
+    visionTestState.resolveNextCapture = (success = true) => {
+      const resolve = pendingCaptureResolvers.shift()
+      visionTestState.pendingCaptureCount = pendingCaptureResolvers.length
+      if (!resolve) return false
+      resolve(success
+        ? createCaptureSuccess()
+        : { success: false, error: 'Vision surface is no longer active' })
+      return true
+    }
+    visionTestState.resolveNextShow = () => {
+      const resolve = pendingShowResolvers.shift()
+      visionTestState.pendingShowCount = pendingShowResolvers.length
+      if (!resolve) return false
+      visionTestState.windowVisible = true
+      resolve()
+      return true
+    }
     const emit = (event: string, payload: unknown) => {
       for (const [eventId, callbackId] of listeners.get(event) ?? []) {
         callbacks.get(callbackId)?.({ event, id: eventId, payload })
       }
+    }
+    visionTestState.closeVisionSurface = () => {
+      emit('screenpilot:vision-closing', null)
+      visionTestState.windowVisible = false
+      visionTestState.floatingRect = null
+      visionTestState.floatingHitRegion = null
+      visionTestState.floatingHitRegionHistory.push(null)
+      visionTestState.floatingResizable = false
+      visionTestState.floatingHasScreenshot = true
+      visionTestState.floatingMinimumHeight = 0
     }
     const unregisterListener = (event: string, eventId: number) => {
       listeners.get(event)?.delete(eventId)
@@ -144,8 +209,21 @@ export async function installVisionTauriMock(
       if (command === 'plugin:window|outer_size') return { width: innerWidth, height: innerHeight }
       if (command === 'plugin:window|inner_size') return { width: innerWidth, height: innerHeight }
       if (command === 'plugin:window|scale_factor') return 1
+      if (command === 'plugin:window|is_visible') return visionTestState.windowVisible
       if (command === 'plugin:window|show') {
         visionTestState.showCount += 1
+        if (visionTestState.deferShow) {
+          return new Promise<void>((resolve) => {
+            pendingShowResolvers.push(resolve)
+            visionTestState.pendingShowCount = pendingShowResolvers.length
+          })
+        }
+        visionTestState.windowVisible = true
+        return null
+      }
+      if (command === 'plugin:window|hide') {
+        visionTestState.hideCount += 1
+        visionTestState.windowVisible = false
         return null
       }
       if (command.startsWith('plugin:window|')) return null
@@ -153,7 +231,10 @@ export async function installVisionTauriMock(
         visionTestState.externalUrls.push(String(args.url))
         return null
       }
-      if (command === 'get_settings') return structuredClone(settings)
+      if (command === 'get_settings') {
+        settings.settingsLanguage = visionTestState.interfaceLanguage
+        return structuredClone(settings)
+      }
       if (command === 'save_settings') {
         Object.assign(settings, args.settings)
         return null
@@ -167,11 +248,19 @@ export async function installVisionTauriMock(
         return { success: false, error: 'Windows frozen-region fallback' }
       }
       if (command === 'vision_capture_region') {
-        return { success: true, imageId: `capture-${++imageSequence}` }
+        if (visionTestState.deferCapture) {
+          return new Promise<CaptureResult>((resolve) => {
+            pendingCaptureResolvers.push(resolve)
+            visionTestState.pendingCaptureCount = pendingCaptureResolvers.length
+          })
+        }
+        return createCaptureSuccess()
       }
       if (command === 'explain_read_image') return { success: true, data: image }
       if (command === 'vision_register_annotated_image') {
-        return { success: true, imageId: `annotated-${++imageSequence}` }
+        const imageId = `annotated-${++imageSequence}`
+        visionTestState.temporaryImageIds.push(imageId)
+        return { success: true, imageId }
       }
       if (command === 'vision_ask') {
         const imageId = stringArgument(args.imageId)
@@ -227,12 +316,10 @@ export async function installVisionTauriMock(
       if (command === 'optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
       if (command === 'synthesize_speech') return { success: true, data: '' }
       if (command === 'vision_close') {
-        visionTestState.floatingRect = null
-        visionTestState.floatingHitRegion = null
-        visionTestState.floatingHitRegionHistory.push(null)
-        visionTestState.floatingResizable = false
-        visionTestState.floatingHasScreenshot = true
-        visionTestState.floatingMinimumHeight = 0
+        visionTestState.closeVisionSurface()
+        visionTestState.windowVisible = false
+        visionTestState.deletedTemporaryImageIds.push(...visionTestState.temporaryImageIds)
+        visionTestState.temporaryImageIds = []
         return null
       }
       if (command === 'vision_set_hit_region') {
@@ -357,6 +444,26 @@ export async function installVisionTauriMock(
         visionTestState.floatingAppliedRects.push(floatingRect)
         return null
       }
+      if (command === 'vision_commit_image_to_history') {
+        const imageId = stringArgument(args.imageId)
+        visionTestState.temporaryImageIds = visionTestState.temporaryImageIds.filter((id) => id !== imageId)
+        if (!visionTestState.committedImageIds.includes(imageId)) visionTestState.committedImageIds.push(imageId)
+        return null
+      }
+      if (command === 'vision_delete_temporary_image') {
+        const imageId = stringArgument(args.imageId)
+        const wasTemporary = visionTestState.temporaryImageIds.includes(imageId)
+        visionTestState.temporaryImageIds = visionTestState.temporaryImageIds.filter((id) => id !== imageId)
+        if (wasTemporary && !visionTestState.deletedTemporaryImageIds.includes(imageId)) {
+          visionTestState.deletedTemporaryImageIds.push(imageId)
+        }
+        return null
+      }
+      if (command === 'vision_delete_history_image') {
+        const imageId = stringArgument(args.imageId)
+        visionTestState.committedImageIds = visionTestState.committedImageIds.filter((id) => id !== imageId)
+        return null
+      }
       if (command === 'vision_start_safe_drag') {
         visionTestState.safeDragCalls += 1
         if (visionTestState.safeDragRejectsRemaining > 0) {
@@ -395,5 +502,6 @@ export async function installVisionTauriMock(
     streamDelayMs: visionStreamDelayMs,
     deferSetResponses: deferFloatingSetResponses,
     nativeWidthDelta: nativeResizeClientWidthDelta,
+    archiveWarningText: archiveWarning,
   })
 }

@@ -2,6 +2,7 @@ import { FolderOpen } from 'lucide-react'
 import { SettingGroup, SettingRow, Segmented, SelectField, Toggle } from '../../../shared/ui/controls'
 import { ShortcutRecorder } from '../shortcut-recorder'
 import type { AppSettings, InterfaceLanguage, ThemeMode } from '../types'
+import { copyFor } from '../../../shared/ui-copy'
 
 export function GeneralSection({
   settings,
@@ -12,120 +13,125 @@ export function GeneralSection({
   onChange: (settings: AppSettings) => void
   onPickDirectory: () => void
 }) {
+  const t = copyFor(settings.language)
   const updateGeneral = (patch: Partial<AppSettings['general']>) =>
     onChange({ ...settings, general: { ...settings.general, ...patch } })
   const updateShortcut = (key: keyof AppSettings['shortcuts'], value: string) =>
     onChange({ ...settings, shortcuts: { ...settings.shortcuts, [key]: value } })
   return (
     <>
-      <SettingGroup title="外观与语言">
-        <SettingRow label="主题">
+      <SettingGroup title={t.appearanceAndLanguage}>
+        <SettingRow label={t.theme}>
           <Segmented<ThemeMode>
             value={settings.theme}
-            label="主题"
+            label={t.theme}
             options={[
-              { value: 'system', label: '系统' },
-              { value: 'light', label: '浅色' },
-              { value: 'dark', label: '深色' },
+              { value: 'system', label: t.themeSystem },
+              { value: 'light', label: t.themeLight },
+              { value: 'dark', label: t.themeDark },
             ]}
             onChange={(theme) => onChange({ ...settings, theme })}
           />
         </SettingRow>
-        <SettingRow label="界面语言">
+        <SettingRow label={t.interfaceLanguage}>
           <Segmented<InterfaceLanguage>
             value={settings.language}
-            label="界面语言"
+            label={t.interfaceLanguage}
             options={[
-              { value: 'zh', label: '中文' },
-              { value: 'en', label: 'English' },
+              { value: 'zh', label: t.chinese },
+              { value: 'en', label: t.english },
             ]}
             onChange={(language) => onChange({ ...settings, language })}
           />
         </SettingRow>
       </SettingGroup>
-      <SettingGroup title="运行行为">
-        <SettingRow label="自动重试">
+      <SettingGroup title={t.runtimeBehavior}>
+        <SettingRow label={t.automaticRetry}>
           <Toggle
             checked={settings.retry.enabled}
-            label="自动重试"
+            label={t.automaticRetry}
             onChange={(enabled) => onChange({ ...settings, retry: { ...settings.retry, enabled } })}
           />
         </SettingRow>
-        <SettingRow label="重试次数">
+        <SettingRow label={t.retryAttempts}>
           <SelectField
             value={String(settings.retry.attempts)}
-            label="重试次数"
+            label={t.retryAttempts}
             options={[1, 2, 3, 4, 5].map((attempt) => ({ value: String(attempt), label: String(attempt) }))}
             onChange={(attempts) =>
               onChange({ ...settings, retry: { ...settings.retry, attempts: Number(attempts) } })
             }
           />
         </SettingRow>
-        <SettingRow label="自动上屏" description="提交后等待约 600ms，再粘贴回原应用">
+        <SettingRow label={t.autoPaste} description={t.autoPasteDescription}>
           <Toggle
             checked={settings.general.autoPaste}
-            label="自动上屏"
+            label={t.autoPaste}
             onChange={(autoPaste) => updateGeneral({ autoPaste })}
           />
         </SettingRow>
-        <SettingRow label="开机启动">
+        <SettingRow label={t.launchAtStartup}>
           <Toggle
             checked={settings.general.launchAtStartup}
-            label="开机启动"
+            label={t.launchAtStartup}
             onChange={(launchAtStartup) => updateGeneral({ launchAtStartup })}
           />
         </SettingRow>
-        <SettingRow label="管理员开机启动" description="保存时 Windows 会请求 UAC 确认">
+        <SettingRow label={t.launchAsAdministrator} description={t.launchAsAdministratorDescription}>
           <Toggle
             checked={settings.general.launchAtStartupAsAdministrator}
-            label="管理员开机启动"
+            label={t.launchAsAdministrator}
             onChange={(launchAtStartupAsAdministrator) =>
               updateGeneral({ launchAtStartupAsAdministrator })
             }
           />
         </SettingRow>
-        <SettingRow label="截图自动归档">
+        <SettingRow label={t.screenshotArchive}>
           <Toggle
             checked={settings.general.imageArchiveEnabled}
-            label="截图自动归档"
+            label={t.screenshotArchive}
             onChange={(imageArchiveEnabled) => updateGeneral({ imageArchiveEnabled })}
           />
         </SettingRow>
         {settings.general.imageArchiveEnabled ? (
-          <SettingRow label="归档目录">
+          <SettingRow label={t.archiveDirectory}>
             <button type="button" className="path-button" onClick={onPickDirectory}>
               <FolderOpen size={15} />
-              <span>{settings.general.imageArchivePath || '选择目录'}</span>
+              <span>{settings.general.imageArchivePath || t.chooseDirectory}</span>
             </button>
           </SettingRow>
         ) : null}
       </SettingGroup>
-      <SettingGroup title="全局快捷键">
-        <SettingRow label="文本翻译">
+      <SettingGroup title={t.globalShortcuts}>
+        <SettingRow label={t.textTranslation}>
           <ShortcutRecorder
             value={settings.shortcuts.translator}
-            label="录制文本翻译快捷键"
+            label={t.recordTextTranslationShortcut}
+            recordingLabel={t.pressShortcut}
             onChange={(value) => updateShortcut('translator', value)}
           />
         </SettingRow>
         <SettingRow label="Vision">
           <ShortcutRecorder
             value={settings.shortcuts.vision}
-            label="录制 Vision 快捷键"
+            label={t.recordVisionShortcut}
+            recordingLabel={t.pressShortcut}
             onChange={(value) => updateShortcut('vision', value)}
           />
         </SettingRow>
-        <SettingRow label="截图翻译">
+        <SettingRow label={t.screenshotTranslation}>
           <ShortcutRecorder
             value={settings.shortcuts.screenshotTranslation}
-            label="录制截图翻译快捷键"
+            label={t.recordScreenshotShortcut}
+            recordingLabel={t.pressShortcut}
             onChange={(value) => updateShortcut('screenshotTranslation', value)}
           />
         </SettingRow>
-        <SettingRow label="提示词优化">
+        <SettingRow label={t.promptOptimization}>
           <ShortcutRecorder
             value={settings.shortcuts.promptOptimizer}
-            label="录制提示词优化快捷键"
+            label={t.recordOptimizerShortcut}
+            recordingLabel={t.pressShortcut}
             onChange={(value) => updateShortcut('promptOptimizer', value)}
           />
         </SettingRow>

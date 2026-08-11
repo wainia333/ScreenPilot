@@ -9,18 +9,22 @@ import {
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useDesktop } from '../../desktop/use-desktop'
 import { normalizeAiAvailability, sanitizeSettings, validateSettings } from './sanitize'
 import { AboutSection } from './sections/about-section'
 import { GeneralSection } from './sections/general-section'
 import { OptimizerSection } from './sections/optimizer-section'
-import { ProvidersSection } from './sections/providers-section'
+import { ProvidersSection, type ProviderKeyTextDrafts } from './sections/providers-section'
 import { ScreenshotSection } from './sections/screenshot-section'
 import { TranslationSection } from './sections/translation-section'
 import { VisionSection } from './sections/vision-section'
-import type { AppSettings, SettingsExport } from './types'
+import type { AppSettings, SettingsExport, SettingsIssue, SettingsSecrets } from './types'
 import type { PermissionStatus, ProviderKeyChanges } from '../../desktop/contract'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
+import { copyFor, type UiCopy } from '../../shared/ui-copy'
+import { syncDocumentTheme } from '../../shared/theme'
+import { ModalDialog } from '../../shared/ui/modal-dialog'
 
 type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
@@ -35,46 +39,52 @@ type SaveSuccessToast = {
 }
 
 const navigation = [
-  { id: 'general', label: '常规', icon: Settings2 },
-  { id: 'translation', label: '翻译', icon: Languages },
-  { id: 'screenshot', label: 'OCR', icon: ScanText },
-  { id: 'vision', label: 'Vision', icon: Aperture },
-  { id: 'optimizer', label: '提示词优化', icon: Sparkles },
-  { id: 'providers', label: '模型提供商', icon: Bot },
-  { id: 'about', label: '关于', icon: Info },
-] satisfies { id: Section; label: string; icon: typeof Settings2 }[]
+  { id: 'general', label: 'navGeneral', icon: Settings2 },
+  { id: 'translation', label: 'navTranslation', icon: Languages },
+  { id: 'screenshot', label: 'navScreenshot', icon: ScanText },
+  { id: 'vision', label: 'navVision', icon: Aperture },
+  { id: 'optimizer', label: 'navOptimizer', icon: Sparkles },
+  { id: 'providers', label: 'navProviders', icon: Bot },
+  { id: 'about', label: 'navAbout', icon: Info },
+] satisfies { id: Section; label: keyof UiCopy; icon: typeof Settings2 }[]
 
 function sameSettings(left: AppSettings | null, right: AppSettings | null): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function sameProviderKeyDrafts(left: ProviderKeyChanges, right: ProviderKeyChanges): boolean {
+function sameProviderKeyDrafts(left: ProviderKeyTextDrafts, right: ProviderKeyTextDrafts): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function normalizeProviderKeys(keys: string[]): string[] {
-  return keys.map((key) => key.trim()).filter(Boolean)
+function normalizeProviderKeys(value: string): string[] {
+  return value.split(/\r?\n/u).map((key) => key.trim()).filter(Boolean)
 }
 
-function normalizeProviderKeyDrafts(drafts: ProviderKeyChanges): ProviderKeyChanges {
+function normalizeProviderKeyDrafts(drafts: ProviderKeyTextDrafts): ProviderKeyChanges {
   return Object.fromEntries(
-    Object.entries(drafts).map(([providerId, keys]) => [providerId, normalizeProviderKeys(keys)]),
+    Object.entries(drafts).map(([providerId, value]) => [providerId, normalizeProviderKeys(value)]),
   )
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  if (typeof error === 'string') return error
-  return '未知错误'
+function providerKeyTextDrafts(changes: ProviderKeyChanges): ProviderKeyTextDrafts {
+  return Object.fromEntries(
+    Object.entries(changes).map(([providerId, keys]) => [providerId, keys.join('\n')]),
+  )
 }
 
-function credentialErrorMessage(error: unknown, changes: ProviderKeyChanges): string {
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  return fallback
+}
+
+function credentialErrorMessage(error: unknown, changes: ProviderKeyChanges, fallback: string): string {
   return Object.values(changes).reduce(
     (message, keys) => keys.reduce(
       (current, key) => key.length === 0 ? current : current.split(key).join('***'),
       message,
     ),
-    errorMessage(error),
+    errorMessage(error, fallback),
   )
 }
 
@@ -105,6 +115,19 @@ function applyProviderKeyCounts(settings: AppSettings, keyDrafts: ProviderKeyCha
   }
 }
 
+function settingsIssueMessage(issue: SettingsIssue | undefined, t: UiCopy): string | undefined {
+  if (issue === undefined) return undefined
+  if (issue.path.startsWith('shortcuts.')) {
+    return issue.code === 'missing' ? t.shortcutMissing : t.shortcutConflict
+  }
+  if (issue.path.endsWith('.baseUrl')) {
+    return issue.code === 'unsafe' ? t.providerHttpsRequired : t.providerUrlInvalid
+  }
+  if (issue.path === 'general.imageArchivePath') return t.archiveDirectoryRequired
+  if (issue.path.startsWith('providers.') && issue.code === 'conflict') return t.duplicateProviderId
+  return issue.message
+}
+
 function mergeSavedProviderKeyCounts(current: AppSettings, saved: AppSettings): AppSettings {
   const savedProviders = new Map(saved.providers.map((provider) => [provider.id, provider.keyCount]))
   return {
@@ -123,9 +146,11 @@ export function SettingsPage() {
   const [section, setSection] = useState<Section>('general')
   const [saved, setSaved] = useState<AppSettings | null>(null)
   const [draft, setDraft] = useState<AppSettings | null>(null)
-  const [providerKeyDrafts, setProviderKeyDrafts] = useState<ProviderKeyChanges>({})
+  const [providerKeyDrafts, setProviderKeyDrafts] = useState<ProviderKeyTextDrafts>({})
+  const [importedSecrets, setImportedSecrets] = useState<SettingsSecrets | null>(null)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [status, setStatusState] = useState<string | null>(null)
+  const [startupNoticePending, setStartupNoticePending] = useState(false)
   const [saveSuccessToast, setSaveSuccessToast] = useState<SaveSuccessToast | null>(null)
   const saveSuccessToastSequence = useRef(0)
   const saveSuccessToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -134,7 +159,16 @@ export function SettingsPage() {
   const [dialog, setDialog] = useState<DialogState>('none')
   const [pendingImport, setPendingImport] = useState<SettingsExport | null>(null)
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>()
-  const dirty = !sameSettings(saved, draft) || Object.keys(providerKeyDrafts).length > 0
+  const continueEditingRef = useRef<HTMLButtonElement>(null)
+  const cancelImportRef = useRef<HTMLButtonElement>(null)
+  const language = draft?.language ?? saved?.language ?? 'zh'
+  const t = copyFor(language)
+  const activeNavigation = navigation.find((item) => item.id === section) ?? {
+    id: 'general' as const,
+    label: 'navGeneral' as const,
+    icon: Settings2,
+  }
+  const dirty = !sameSettings(saved, draft) || Object.keys(providerKeyDrafts).length > 0 || importedSecrets !== null
   const clearSaveSuccessToastTimer = useCallback(() => {
     if (saveSuccessToastTimer.current !== null) {
       clearTimeout(saveSuccessToastTimer.current)
@@ -160,7 +194,7 @@ export function SettingsPage() {
     saveSuccessToastSequence.current = key
     setSaveSuccessToast({
       key,
-      message: '设置已保存并立即生效',
+      message: t.settingsSaved,
       phase: 'visible',
     })
     saveSuccessToastTimer.current = setTimeout(() => {
@@ -172,7 +206,7 @@ export function SettingsPage() {
         if (saveSuccessToastSequence.current === key) setSaveSuccessToast(null)
       }, SAVE_SUCCESS_TOAST_EXIT_MS)
     }, SAVE_SUCCESS_TOAST_VISIBLE_MS)
-  }, [clearSaveSuccessToastTimer])
+  }, [clearSaveSuccessToastTimer, t.settingsSaved])
   useEffect(() => () => clearSaveSuccessToastTimer(), [clearSaveSuccessToastTimer])
   const load = useCallback(async () => {
     setLoadingError(null)
@@ -186,8 +220,12 @@ export function SettingsPage() {
       setSaved(normalized)
       setDraft(normalized)
       setProviderKeyDrafts({})
+      setImportedSecrets(null)
       setPermissionStatus(permissions)
-      if (startupNotice !== null) setStatus(startupNotice)
+      if (startupNotice !== null) {
+        setStatus(startupNotice)
+        setStartupNoticePending(true)
+      }
     } catch (error) {
       setLoadingError(String(error))
     }
@@ -196,23 +234,60 @@ export function SettingsPage() {
     queueMicrotask(() => void load())
   }, [load])
   useEffect(() => {
+    if (!startupNoticePending) return
+    let active = true
+    const acknowledge = () => {
+      void desktop.acknowledgeStartupNotice().then((acknowledged) => {
+        if (active && acknowledged) setStartupNoticePending(false)
+      }).catch(() => undefined)
+    }
+    acknowledge()
+    window.addEventListener('focus', acknowledge)
+    return () => {
+      active = false
+      window.removeEventListener('focus', acknowledge)
+    }
+  }, [desktop, startupNoticePending])
+  useEffect(() => {
     if (draft === null) return
-    document.documentElement.dataset.theme = draft.theme
+    syncDocumentTheme(draft.theme)
     document.documentElement.lang = draft.language === 'zh' ? 'zh-CN' : 'en'
-  }, [draft])
+    document.title = `ScreenPilot — ${copyFor(draft.language)[activeNavigation.label]}`
+    if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+  }, [activeNavigation.label, draft])
   const issues = useMemo(() => (draft === null ? [] : validateSettings(draft)), [draft])
   const save = useCallback(async (): Promise<boolean> => {
     if (draft === null || issues.length > 0 || saving) return false
     const keyDraftSnapshot = structuredClone(providerKeyDrafts)
-    const submitted = applyProviderKeyCounts(structuredClone(draft), keyDraftSnapshot)
-    const changes = providerKeyChanges(saved, submitted, keyDraftSnapshot)
+    const importedSecretsSnapshot = importedSecrets === null ? null : structuredClone(importedSecrets)
+    const normalizedKeyDraftSnapshot = normalizeProviderKeyDrafts(keyDraftSnapshot)
+    const submitted = applyProviderKeyCounts(structuredClone(draft), normalizedKeyDraftSnapshot)
+    const changes = providerKeyChanges(saved, submitted, normalizedKeyDraftSnapshot)
+    const submittedProviderIds = new Set(submitted.providers.map((provider) => provider.id))
+    const providerDeletionIds = saved?.providers
+      .filter((provider) => !submittedProviderIds.has(provider.id))
+      .map((provider) => provider.id) ?? []
     setSaving(true)
     setStatus(null)
     try {
       const result = await desktop.saveSettings(submitted)
-      if (Object.keys(changes).length > 0) {
+      if (importedSecretsSnapshot !== null || Object.keys(changes).length > 0) {
         try {
-          await desktop.saveProviderKeyChanges(changes)
+          if (importedSecretsSnapshot !== null) {
+            const currentProviderIds = new Set(submitted.providers.map((provider) => provider.id))
+            const providers = Object.fromEntries(
+              Object.entries(normalizedKeyDraftSnapshot).filter(([providerId, keys]) => (
+                currentProviderIds.has(providerId) && keys.length > 0
+              )),
+            )
+            await desktop.saveImportedSecrets({
+              schemaVersion: 1,
+              providers,
+              adapters: importedSecretsSnapshot.adapters,
+            }, providerDeletionIds)
+          } else {
+            await desktop.saveProviderKeyChanges(changes)
+          }
         } catch (error) {
           let rollbackError: unknown = null
           if (saved !== null) {
@@ -222,30 +297,36 @@ export function SettingsPage() {
               rollbackError = restoreError
             }
           }
-          const credentialError = credentialErrorMessage(error, changes)
-          const suffix = rollbackError === null ? '' : `；设置回滚失败：${credentialErrorMessage(rollbackError, changes)}`
-          setStatus(`保存失败：凭据保存失败：${credentialError}${suffix}`)
+          const credentialError = credentialErrorMessage(error, changes, t.unknownError)
+          const separator = language === 'zh' ? '：' : ': '
+          const suffix = rollbackError === null
+            ? ''
+            : `${language === 'zh' ? '；' : '; '}${t.settingsRollbackFailed}${separator}${credentialErrorMessage(rollbackError, changes, t.unknownError)}`
+          setStatus(`${t.saveFailed}${separator}${t.credentialSaveFailed}${separator}${credentialError}${suffix}`)
           return false
         }
       }
       setSaved(result.settings)
       setDraft((current) => {
         if (current === null) return current
-        const currentSubmitted = applyProviderKeyCounts(current, keyDraftSnapshot)
+        const currentSubmitted = applyProviderKeyCounts(current, normalizedKeyDraftSnapshot)
         return sameSettings(currentSubmitted, submitted)
           ? result.settings
           : mergeSavedProviderKeyCounts(current, result.settings)
       })
       setProviderKeyDrafts((current) => sameProviderKeyDrafts(current, keyDraftSnapshot) ? {} : current)
+      setImportedSecrets((current) => (
+        JSON.stringify(current) === JSON.stringify(importedSecretsSnapshot) ? null : current
+      ))
       showSaveSuccessToast()
       return true
     } catch (error) {
-      setStatus(`保存失败：${String(error)}`)
+      setStatus(`${t.saveFailed}${language === 'zh' ? '：' : ': '}${String(error)}`)
       return false
     } finally {
       setSaving(false)
     }
-  }, [desktop, draft, issues.length, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast])
+  }, [desktop, draft, importedSecrets, issues.length, language, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast, t])
   const hide = useCallback(() => {
     dismissSaveSuccessToast()
     void desktop.hideWindow()
@@ -260,6 +341,7 @@ export function SettingsPage() {
     if (saved === null) return
     setDraft(normalizeAiAvailability(structuredClone(saved)))
     setProviderKeyDrafts({})
+    setImportedSecrets(null)
     setStatus(null)
     setPendingImport(null)
     setDialog('none')
@@ -279,14 +361,18 @@ export function SettingsPage() {
   }, [dialog, requestClose])
   const applyImport = useCallback(
     (value: SettingsExport) => {
-      setDraft(sanitizeSettings(value.settings))
+      const imported = sanitizeSettings(value.settings)
+      setDraft(imported)
       setProviderKeyDrafts(
-        value.includesSecrets
-          ? normalizeProviderKeyDrafts(structuredClone(value.secrets ?? {}))
+        value.includesSecrets && value.secrets !== undefined
+          ? providerKeyTextDrafts(structuredClone(value.secrets.providers))
           : {},
       )
+      setImportedSecrets(value.includesSecrets && value.secrets !== undefined
+        ? structuredClone(value.secrets)
+        : null)
       setSection('general')
-      setStatus('配置已载入，保存后才会应用')
+      setStatus(copyFor(imported.language).settingsLoadedPendingSave)
       setPendingImport(null)
       setDialog('none')
     },
@@ -296,21 +382,21 @@ export function SettingsPage() {
     return (
       <main className="load-state" onPointerDown={beginWindowDrag}>
         <img src="/app-mark.png" alt="" />
-        <h1>无法加载设置</h1>
+        <h1>{t.settingsLoadFailed}</h1>
         <p>{loadingError}</p>
         <div>
           <button type="button" className="primary-button" onClick={() => void load()}>
-            重试
+            {t.retry}
           </button>
           <button type="button" className="secondary-button" onClick={hide}>
-            关闭
+            {t.close}
           </button>
         </div>
       </main>
     )
   }
   if (draft === null) {
-    return <main className="load-state" aria-label="正在加载设置" onPointerDown={beginWindowDrag}><div className="spinner" /></main>
+    return <main className="load-state" aria-label={t.settingsLoading} onPointerDown={beginWindowDrag}><div className="spinner" /></main>
   }
   const content = {
     general: (
@@ -338,10 +424,10 @@ export function SettingsPage() {
         settings={draft}
         onChange={(update) => setDraft((current) => current === null ? current : normalizeAiAvailability(update(current)))}
         keyDrafts={providerKeyDrafts}
-        onKeyDraftChange={(providerId, keys) =>
+        onKeyDraftChange={(providerId, value) =>
           setProviderKeyDrafts((current) => ({
             ...current,
-            [providerId]: normalizeProviderKeys(keys),
+            [providerId]: value,
           }))
         }
         onKeyDraftRemove={(providerId) =>
@@ -357,10 +443,11 @@ export function SettingsPage() {
     ),
     about: (
       <AboutSection
+        language={draft.language}
         disabled={saving}
         onExport={(includeSecrets) => {
           void desktop.exportSettings(includeSecrets).then((exported) => {
-            setStatus(exported ? '配置已导出' : null)
+            setStatus(exported ? t.settingsExported : null)
           })
         }}
         onImport={() => {
@@ -385,7 +472,7 @@ export function SettingsPage() {
           <img src="/app-mark.png" alt="" />
           <span>ScreenPilot</span>
         </div>
-        <nav aria-label="设置分区">
+        <nav aria-label={t.settingsSections}>
           {navigation.map((item) => {
             const Icon = item.icon
             return (
@@ -397,7 +484,7 @@ export function SettingsPage() {
                 onClick={() => setSection(item.id)}
               >
                 <Icon size={16} />
-                <span>{item.label}</span>
+                <span>{t[item.label]}</span>
               </button>
             )
           })}
@@ -406,28 +493,28 @@ export function SettingsPage() {
           className="settings-permission-state"
           data-administrator={permissionStatus?.administrator ?? false}
           role="status"
-          aria-label="当前运行权限"
+          aria-label={t.currentPermission}
         >
           <span />
           {permissionStatus === undefined
-            ? '权限：检测中'
+            ? t.permissionChecking
             : permissionStatus === null
-              ? '权限：检测失败'
+              ? t.permissionFailed
               : permissionStatus.administrator
-                ? '权限：管理员'
-                : '权限：普通用户'}
+                ? t.permissionAdministrator
+                : t.permissionStandard}
         </div>
         <div className="settings-save-state" data-dirty={dirty}>
-          <span />{dirty ? '有未保存更改' : '所有更改已保存'}
+          <span />{dirty ? t.unsavedChanges : t.allChangesSaved}
         </div>
       </aside>
       <section className="settings-main">
         <header className="settings-toolbar" onPointerDown={beginWindowDrag}>
-          <h1>{navigation.find((item) => item.id === section)?.label}</h1>
+          <h1>{t[activeNavigation.label]}</h1>
           <button
             type="button"
             className="icon-button"
-            aria-label="关闭设置"
+            aria-label={t.closeSettings}
             disabled={saving}
             onClick={requestClose}
           >
@@ -436,7 +523,7 @@ export function SettingsPage() {
         </header>
         <div className="settings-scroll">
           {issues.length === 0 ? null : (
-            <div className="validation-banner" role="alert">{issues[0]?.message}</div>
+            <div className="validation-banner" role="alert">{settingsIssueMessage(issues[0], t)}</div>
           )}
           {status === null ? null : <div className="status-banner" role="status">{status}</div>}
           {content[section]}
@@ -448,7 +535,7 @@ export function SettingsPage() {
             disabled={!dirty || saving}
             onClick={cancel}
           >
-            取消
+            {t.cancel}
           </button>
           <button
             type="button"
@@ -456,7 +543,7 @@ export function SettingsPage() {
             disabled={!dirty || issues.length > 0 || saving}
             onClick={() => void save()}
           >
-            {saving ? '保存中…' : '保存'}
+            {saving ? t.saving : t.save}
           </button>
         </footer>
       </section>
@@ -479,44 +566,58 @@ export function SettingsPage() {
         )}
       </div>
       {dialog === 'close' ? (
-        <div className="dialog-backdrop unsaved-close-backdrop" role="presentation">
-          <div className="decision-dialog unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="close-dialog-title">
-            <h2 id="close-dialog-title">保存更改后关闭？</h2>
-            <p>未保存的设置不会生效。</p>
+        <ModalDialog
+          titleId="close-dialog-title"
+          descriptionId="close-dialog-description"
+          backdropClassName="unsaved-close-backdrop"
+          dialogClassName="unsaved-close-dialog"
+          initialFocusRef={continueEditingRef}
+          dismissible={!saving}
+          onDismiss={() => setDialog('none')}
+        >
+            <h2 id="close-dialog-title">{t.closeAfterSavingTitle}</h2>
+            <p id="close-dialog-description">{t.closeAfterSavingBody}</p>
             <div>
               <button
                 type="button"
                 className="primary-button"
                 disabled={saving}
-                onClick={() => void save().then((savedNow) => savedNow && hide())}
+                onClick={() => void save().then((savedNow) => {
+                  if (!savedNow) return
+                  setDialog('none')
+                  hide()
+                })}
               >
-                保存并关闭
+                {t.saveAndClose}
               </button>
               <button type="button" className="secondary-button" disabled={saving} onClick={() => { restoreDraft(); hide() }}>
-                放弃更改
+                {t.discardChanges}
               </button>
-              <button type="button" className="text-button" disabled={saving} onClick={() => setDialog('none')}>
-                继续编辑
+              <button ref={continueEditingRef} type="button" className="text-button" disabled={saving} onClick={() => setDialog('none')}>
+                {t.continueEditing}
               </button>
             </div>
-          </div>
-        </div>
+        </ModalDialog>
       ) : null}
       {dialog === 'import' && pendingImport !== null ? (
-        <div className="dialog-backdrop" role="presentation">
-          <div className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="import-dialog-title">
-            <h2 id="import-dialog-title">覆盖当前未保存内容？</h2>
-            <p>导入会替换当前编辑中的设置，但仍需点击保存才会应用。</p>
+        <ModalDialog
+          titleId="import-dialog-title"
+          descriptionId="import-dialog-description"
+          initialFocusRef={cancelImportRef}
+          dismissible={!saving}
+          onDismiss={() => { setPendingImport(null); setDialog('none') }}
+        >
+            <h2 id="import-dialog-title">{t.importOverwriteTitle}</h2>
+            <p id="import-dialog-description">{t.importOverwriteBody}</p>
             <div>
               <button type="button" className="primary-button" disabled={saving} onClick={() => applyImport(pendingImport)}>
-                继续导入
+                {t.continueImport}
               </button>
-              <button type="button" className="text-button" disabled={saving} onClick={() => { setPendingImport(null); setDialog('none') }}>
-                取消
+              <button ref={cancelImportRef} type="button" className="text-button" disabled={saving} onClick={() => { setPendingImport(null); setDialog('none') }}>
+                {t.cancel}
               </button>
             </div>
-          </div>
-        </div>
+        </ModalDialog>
       ) : null}
     </main>
   )

@@ -7,6 +7,7 @@ import { OptimizerPage } from '../features/prompt-optimizer/optimizer-page'
 import { SettingsPage } from '../features/settings/settings-page'
 import { TranslatorPage } from '../features/translator/translator-page'
 import { ExternalLinkBridge } from './external-link-bridge'
+import { VisionRouteBoundary, VisionRouteLoading } from './vision-route-state'
 
 const ReferenceVision = lazy(() => import('../features/vision/reference-vision'))
 
@@ -68,9 +69,11 @@ function RouteContent() {
   if (route === 'translator') return <TranslatorPage key={`translator-${generation}`} />
   if (route === 'prompt-optimizer') return <OptimizerPage key={`optimizer-${generation}`} />
   return (
-    <Suspense fallback={null}>
-      <ReferenceVision key={`vision-${generation}`} />
-    </Suspense>
+    <VisionRouteBoundary resetKey={generation}>
+      <Suspense fallback={<VisionRouteLoading />}>
+        <ReferenceVision key={`vision-${generation}`} />
+      </Suspense>
+    </VisionRouteBoundary>
   )
 }
 

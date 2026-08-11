@@ -78,6 +78,7 @@ pub struct PermissionStatus {
 }
 
 const VISION_READY_BAR_HEIGHT: f64 = 56.0;
+const VISION_IMAGE_CLEANUP_GRACE: Duration = Duration::from_secs(30);
 const VISION_FLOATING_GAP: f64 = 8.0;
 const VISION_DIALOG_MIN_HEIGHT: f64 = 220.0;
 const VISION_DIALOG_MAX_HEIGHT: f64 = 480.0;
@@ -404,11 +405,54 @@ fn request_native_freeze_close() {
 #[cfg(not(target_os = "windows"))]
 fn request_native_freeze_close() {}
 
-pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
+fn ensure_vision_enabled(settings: &AppSettings) -> Result<(), String> {
+    if settings.vision.enabled {
+        Ok(())
+    } else {
+        Err("Vision is disabled in settings".into())
+    }
+}
+
+fn ensure_screenshot_translation_enabled(settings: &AppSettings) -> Result<(), String> {
+    if settings.screenshot_translation.enabled {
+        Ok(())
+    } else {
+        Err("Screenshot translation is disabled in settings".into())
+    }
+}
+
+fn ensure_capture_enabled(settings: &AppSettings) -> Result<(), String> {
+    if settings.vision.enabled || settings.screenshot_translation.enabled {
+        Ok(())
+    } else {
+        Err("Vision and screenshot translation are disabled in settings".into())
+    }
+}
+
+fn ensure_optimizer_enabled(settings: &AppSettings) -> Result<(), String> {
+    if settings.prompt_optimizer.enabled {
+        Ok(())
+    } else {
+        Err("Prompt optimizer is disabled in settings".into())
+    }
+}
+
+pub(crate) fn ensure_reference_mode_enabled(
+    settings: &AppSettings,
+    mode: &str,
+) -> Result<(), String> {
+    if mode == "translate" {
+        ensure_screenshot_translation_enabled(settings)
+    } else {
+        ensure_vision_enabled(settings)
+    }
+}
+
+pub(crate) fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
-    let state = app.state::<AppState>();
     let existing_vision_visible = app
         .get_webview_window("vision")
         .and_then(|window| window.is_visible().ok())
@@ -439,6 +483,7 @@ pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> 
             .map_err(|error| error.to_string())?;
         apply_vision_window_region(&window, None)?;
         show_native_freeze(&window, screen)?;
+        state.begin_reference_vision_image_session()?;
         let mode = if mode == "translate" {
             "translate"
         } else {
@@ -463,6 +508,7 @@ pub fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> 
     })();
     if result.is_err() {
         close_native_freeze(app);
+        schedule_reference_vision_image_cleanup(app, &state);
         state.release_vision();
     }
     result
@@ -498,30 +544,44 @@ fn ensure_reference_vision_window(app: &AppHandle, mode: &str) -> Result<Webview
 
 #[tauri::command]
 pub fn vision_request(app: AppHandle) -> Result<(), String> {
-    open_reference_vision(&app, "chat")
+    crate::application::lifecycle::request_vision(&app, "chat")
 }
 
 #[tauri::command]
 pub fn vision_request_translate(app: AppHandle) -> Result<(), String> {
-    open_reference_vision(&app, "translate")
+    crate::application::lifecycle::request_vision(&app, "translate")
 }
 
 #[tauri::command]
-pub fn vision_cursor_position(app: AppHandle) -> Option<Value> {
-    let cursor = app.cursor_position().ok()?;
+pub fn vision_cursor_position(app: AppHandle) -> Result<Option<Value>, String> {
+    let settings = app.state::<AppState>().current()?;
+    ensure_capture_enabled(&settings)?;
+    let Some(cursor) = app.cursor_position().ok() else {
+        return Ok(None);
+    };
     let scale = current_screen_space(&app)
         .map(|screen| screen.scale)
         .unwrap_or(1.0);
-    Some(json!({ "x": cursor.x / scale, "y": cursor.y / scale }))
+    Ok(Some(
+        json!({ "x": cursor.x / scale, "y": cursor.y / scale }),
+    ))
 }
 
 #[tauri::command]
-pub fn vision_list_windows(app: AppHandle) -> Vec<crate::vision::WindowInfo> {
-    crate::vision::list_windows(current_screen_space(&app))
+pub fn vision_list_windows(app: AppHandle) -> Result<Vec<crate::vision::WindowInfo>, String> {
+    let settings = app.state::<AppState>().current()?;
+    ensure_capture_enabled(&settings)?;
+    Ok(crate::vision::list_windows(current_screen_space(&app)))
 }
 
 #[tauri::command]
-pub fn vision_capture_window(window_id: u32) -> Value {
+pub fn vision_capture_window(state: State<'_, AppState>, window_id: u32) -> Value {
+    if let Err(error) = state
+        .current()
+        .and_then(|settings| ensure_capture_enabled(&settings))
+    {
+        return json!({ "success": false, "error": error });
+    }
     match crate::vision::capture_window(window_id) {
         Ok(_) => {
             json!({ "success": false, "error": "Window capture must use the frozen region on Windows" })
@@ -543,6 +603,16 @@ pub fn vision_capture_region(
     height: u32,
     scale_factor: f64,
 ) -> Value {
+    if let Err(error) = state
+        .current()
+        .and_then(|settings| ensure_capture_enabled(&settings))
+    {
+        return json!({ "success": false, "error": error });
+    }
+    let session_generation = match state.reference_vision_image_session() {
+        Ok(generation) => generation,
+        Err(error) => return json!({ "success": false, "error": error }),
+    };
     let result = match crate::native_freeze::capture_active_region_to_png(
         absolute_x, absolute_y, width, height,
     ) {
@@ -564,18 +634,56 @@ pub fn vision_capture_region(
             )
         }
     };
-    match result.and_then(|path| register_capture_path(&state, &path)) {
-        Ok(image_id) => json!({ "success": true, "imageId": image_id }),
+    match result.and_then(|path| register_capture_path(&state, &path, session_generation)) {
+        Ok(capture) => capture_registration_response(capture),
         Err(error) => json!({ "success": false, "error": error }),
     }
 }
 
-fn register_capture_path(state: &AppState, path: &Path) -> Result<String, String> {
+#[derive(Debug, Eq, PartialEq)]
+struct RegisteredCapture {
+    image_id: String,
+    archive_warning: Option<String>,
+}
+
+fn capture_registration_response(capture: RegisteredCapture) -> Value {
+    let mut response = json!({ "success": true, "imageId": capture.image_id });
+    if let Some(warning) = capture.archive_warning {
+        response["archiveWarning"] = Value::String(warning);
+    }
+    response
+}
+
+fn register_capture_path(
+    state: &AppState,
+    path: &Path,
+    session_generation: u64,
+) -> Result<RegisteredCapture, String> {
     let image = image::open(path)
         .map(image::DynamicImage::into_rgba8)
         .map_err(|error| error.to_string());
     crate::screenshot::cleanup_temp_file(path);
-    state.images.save_temporary(&image?)
+    let image = image?;
+    let settings = state.current()?;
+    let image_id = state.images.save_temporary(&image)?;
+    state.register_reference_vision_temporary_image(session_generation, &image_id)?;
+    let archive_warning = if settings.general.image_archive_enabled {
+        let archive_directory = Path::new(settings.general.image_archive_path.trim());
+        match state.images.archive(&image, archive_directory) {
+            Ok(_) => None,
+            Err(error) => {
+                let warning = format!("Screenshot archive failed: {error}");
+                eprintln!("{warning}; the captured image was retained for the active workflow");
+                Some(warning)
+            }
+        }
+    } else {
+        None
+    };
+    Ok(RegisteredCapture {
+        image_id,
+        archive_warning,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -663,6 +771,12 @@ fn capture_region_image(
 
 #[tauri::command]
 pub fn explain_read_image(state: State<'_, AppState>, image_id: String) -> Value {
+    if let Err(error) = state
+        .current()
+        .and_then(|settings| ensure_capture_enabled(&settings))
+    {
+        return json!({ "success": false, "error": error });
+    }
     match state.images.read_data_url(&image_id) {
         Ok(data) => json!({ "success": true, "data": data }),
         Err(error) => json!({ "success": false, "error": error }),
@@ -671,11 +785,27 @@ pub fn explain_read_image(state: State<'_, AppState>, image_id: String) -> Value
 
 #[tauri::command]
 pub fn vision_register_annotated_image(state: State<'_, AppState>, base64_png: String) -> Value {
-    let result = STANDARD
-        .decode(base64_png)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| image::load_from_memory(&bytes).map_err(|error| error.to_string()))
-        .and_then(|image| state.images.save_temporary(&image.into_rgba8()));
+    if let Err(error) = state
+        .current()
+        .and_then(|settings| ensure_capture_enabled(&settings))
+    {
+        return json!({ "success": false, "error": error });
+    }
+    let result = state
+        .reference_vision_image_session()
+        .and_then(|generation| {
+            STANDARD
+                .decode(base64_png)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    image::load_from_memory(&bytes).map_err(|error| error.to_string())
+                })
+                .and_then(|image| state.images.save_temporary(&image.into_rgba8()))
+                .and_then(|image_id| {
+                    state.register_reference_vision_temporary_image(generation, &image_id)?;
+                    Ok(image_id)
+                })
+        });
     match result {
         Ok(image_id) => json!({ "success": true, "imageId": image_id }),
         Err(error) => json!({ "success": false, "error": error }),
@@ -687,7 +817,7 @@ pub fn vision_commit_image_to_history(
     state: State<'_, AppState>,
     image_id: String,
 ) -> Result<(), String> {
-    state.images.commit(&image_id)
+    state.commit_reference_vision_image(&image_id)
 }
 
 #[tauri::command]
@@ -699,12 +829,32 @@ pub fn vision_delete_history_image(
 }
 
 #[tauri::command]
+pub fn vision_delete_temporary_image(
+    state: State<'_, AppState>,
+    image_id: String,
+) -> Result<(), String> {
+    state.delete_reference_vision_temporary_image(&image_id)
+}
+
+#[tauri::command]
 pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.begin_surface_action();
-    let result = close_reference_vision_surface(&app);
-    state.cancel_reference_vision_stream();
-    state.release_vision();
-    result
+    let generation = state.begin_surface_action();
+    state
+        .with_current_surface_action(generation, || close_reference_vision_surface(&app))
+        .map(|_| ())
+}
+
+const VISION_CLOSING_EVENT: &str = "screenpilot:vision-closing";
+
+fn notify_vision_closing<E>(emit: impl FnOnce(&'static str) -> Result<(), E>)
+where
+    E: std::fmt::Display,
+{
+    if let Err(error) = emit(VISION_CLOSING_EVENT) {
+        eprintln!(
+            "[vision-close] unable to emit {VISION_CLOSING_EVENT}; continuing close cleanup: {error}"
+        );
+    }
 }
 
 pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
@@ -713,8 +863,14 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
     let mut failures = Vec::new();
+    let state = app.state::<AppState>();
+    let vision_window = app.get_webview_window("vision");
+    if let Some(window) = vision_window.as_ref() {
+        notify_vision_closing(|event| window.emit(event, ()));
+    }
+    schedule_reference_vision_image_cleanup(app, &state);
     close_native_freeze(app);
-    if let Some(window) = app.get_webview_window("vision") {
+    if let Some(window) = vision_window {
         if let Err(error) = window.set_ignore_cursor_events(false) {
             failures.push(error.to_string());
         }
@@ -732,7 +888,6 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
         }
     }
     close_native_freeze(app);
-    let state = app.state::<AppState>();
     state.cancel_reference_vision_stream();
     state.release_vision();
     if failures.is_empty() {
@@ -740,6 +895,29 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     } else {
         Err(failures.join("; "))
     }
+}
+
+fn schedule_reference_vision_image_cleanup(app: &AppHandle, state: &AppState) {
+    let image_ids = match state.close_reference_vision_image_session() {
+        Ok(image_ids) => image_ids,
+        Err(error) => {
+            eprintln!("{error}; cleanup will be retried by a later targeted close or delete");
+            return;
+        }
+    };
+    if image_ids.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(VISION_IMAGE_CLEANUP_GRACE).await;
+        if let Err(error) = app
+            .state::<AppState>()
+            .cleanup_reference_vision_temporary_images(&image_ids)
+        {
+            eprintln!("{error}; cleanup can be retried by a targeted delete");
+        }
+    });
 }
 
 fn apply_floating_rect(window: &WebviewWindow, rect: &FloatingRect) -> Result<(), String> {
@@ -1349,7 +1527,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
             Ok(json!({
                 "id": provider.id,
                 "name": provider.name,
-                "apiKeys": CredentialVault::provider_keys(&provider.id)?,
+                "keyCount": CredentialVault::provider_key_count(&provider.id)?,
                 "baseUrl": provider.base_url,
                 "availableModels": provider.available_models,
                 "enabledModels": provider.enabled_models,
@@ -1395,18 +1573,18 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
             "translateProviderId": translate_provider,
             "translateModel": translate_model,
             "baiduOcr": {
-                "apiKey": secret_at(&ocr_keys, 0),
-                "secretKey": secret_at(&ocr_keys, 1)
+                "apiKeyConfigured": configured_at(&ocr_keys, 0),
+                "secretKeyConfigured": configured_at(&ocr_keys, 1)
             },
             "baiduTranslate": {
-                "appId": secret_at(&baidu_keys, 0),
-                "appKey": secret_at(&baidu_keys, 1)
+                "appIdConfigured": configured_at(&baidu_keys, 0),
+                "appKeyConfigured": configured_at(&baidu_keys, 1)
             },
             "tencentTranslate": {
-                "secretId": secret_at(&tencent_keys, 0),
-                "secretKey": secret_at(&tencent_keys, 1)
+                "secretIdConfigured": configured_at(&tencent_keys, 0),
+                "secretKeyConfigured": configured_at(&tencent_keys, 1)
             },
-            "caiyunTranslate": { "token": secret_at(&caiyun_keys, 0) },
+            "caiyunTranslate": { "tokenConfigured": configured_at(&caiyun_keys, 0) },
             "directTranslate": !settings.screenshot_translation.show_source,
             "thinkingEnabled": settings.screenshot_translation.thinking,
             "thinkingEffort": settings.screenshot_translation.thinking_effort,
@@ -1455,8 +1633,10 @@ fn model_parts(selection: &Option<ModelSelection>) -> (&str, &str) {
         .unwrap_or(("", ""))
 }
 
-fn secret_at(values: &[String], index: usize) -> &str {
-    values.get(index).map(String::as_str).unwrap_or("")
+fn configured_at(values: &[String], index: usize) -> bool {
+    values
+        .get(index)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 #[tauri::command]
@@ -1530,6 +1710,9 @@ fn parse_ocr_method(value: &str) -> Result<OcrMethod, String> {
         "ai" => Ok(OcrMethod::Ai),
         "baidu" => Ok(OcrMethod::Baidu),
         "chaoxing" => Ok(OcrMethod::Chaoxing),
+        "system" if cfg!(target_os = "windows") => {
+            Err("System OCR is not available on Windows".into())
+        }
         "system" => Ok(OcrMethod::System),
         _ => Err("Unsupported OCR method".into()),
     }
@@ -1583,6 +1766,7 @@ async fn run_vision_request(
     request_id: &str,
 ) -> Result<Option<String>, String> {
     let settings = state.current()?;
+    ensure_vision_enabled(&settings)?;
     let selection = settings
         .vision
         .model
@@ -2180,7 +2364,7 @@ pub async fn vision_translate(
     state: State<'_, AppState>,
     image_id: String,
 ) -> Result<Value, String> {
-    let generation = state.begin_reference_vision_stream();
+    let generation = begin_screenshot_translation_stream(&state)?;
     let result = match recognize_screenshot(&state, &image_id).await {
         Ok(source) => async_translation(&state, source).await,
         Err(error) => Err(error),
@@ -2218,6 +2402,12 @@ pub async fn vision_translate(
     })
 }
 
+fn begin_screenshot_translation_stream(state: &AppState) -> Result<u64, String> {
+    let settings = state.current()?;
+    ensure_screenshot_translation_enabled(&settings)?;
+    Ok(state.begin_reference_vision_stream())
+}
+
 async fn async_translation(state: &AppState, source: String) -> Result<(String, String), String> {
     let translated = translate_source(state, &source, None, None).await?;
     Ok((source, translated))
@@ -2248,6 +2438,7 @@ pub async fn vision_translate_text(
 async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String, String> {
     let mut settings = state.current()?;
     settings.normalize_ai_options();
+    ensure_screenshot_translation_enabled(&settings)?;
     match settings.screenshot_translation.ocr_method {
         OcrMethod::Ai => {
             let selection = settings
@@ -2294,6 +2485,7 @@ async fn translate_source(
 ) -> Result<String, String> {
     let mut settings = state.current()?;
     settings.normalize_ai_options();
+    ensure_screenshot_translation_enabled(&settings)?;
     let requested_source_language =
         requested_source_language.unwrap_or(&settings.screenshot_translation.source_language);
     validate_screenshot_source_language(requested_source_language)?;
@@ -2441,6 +2633,7 @@ fn translation_method_name(method: TranslationMethod) -> &'static str {
 #[tauri::command]
 pub async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result<String, String> {
     let settings = state.current()?;
+    ensure_optimizer_enabled(&settings)?;
     let selection = settings
         .prompt_optimizer
         .model
@@ -2482,6 +2675,13 @@ fn optimizer_response_language_name(language: &str, text: &str) -> &'static str 
 
 #[tauri::command]
 pub async fn synthesize_speech(app: AppHandle, text: String) -> Value {
+    if let Err(error) = app
+        .state::<AppState>()
+        .current()
+        .and_then(|settings| ensure_capture_enabled(&settings))
+    {
+        return json!({ "success": false, "error": error });
+    }
     match synthesize_speech_data(app, text).await {
         Ok(data) => json!({ "success": true, "data": data }),
         Err(error) => json!({ "success": false, "error": error }),
@@ -2544,6 +2744,22 @@ pub fn permissions_status() -> PermissionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn vision_closing_notification_is_stable_and_emit_failures_do_not_block_cleanup() {
+        let observed_event = Cell::new(None);
+        notify_vision_closing(|event| {
+            observed_event.set(Some(event));
+            Ok::<(), &str>(())
+        });
+        assert_eq!(observed_event.get(), Some(VISION_CLOSING_EVENT));
+
+        let cleanup_continued = Cell::new(false);
+        notify_vision_closing(|_| Err::<(), _>("synthetic emit failure"));
+        cleanup_continued.set(true);
+        assert!(cleanup_continued.get());
+    }
 
     #[test]
     fn renders_safe_citation_markdown_for_the_answer_stream() {
@@ -2818,6 +3034,316 @@ mod tests {
                 provider_id: "custom".into(),
                 model: "model-a".into(),
             })
+        );
+    }
+
+    #[test]
+    fn credential_status_helpers_return_only_presence() {
+        let values = vec!["super-secret-api-key".into(), String::new()];
+        let status = json!({
+            "firstConfigured": configured_at(&values, 0),
+            "secondConfigured": configured_at(&values, 1),
+            "missingConfigured": configured_at(&values, 2),
+        });
+        assert_eq!(status["firstConfigured"], true);
+        assert_eq!(status["secondConfigured"], false);
+        assert_eq!(status["missingConfigured"], false);
+        assert!(!status.to_string().contains("super-secret-api-key"));
+    }
+
+    #[test]
+    fn feature_enablement_guards_reference_and_direct_commands() {
+        let mut settings = AppSettings::default();
+        settings.vision.enabled = false;
+        settings.screenshot_translation.enabled = false;
+        settings.prompt_optimizer.enabled = false;
+
+        assert_eq!(
+            ensure_reference_mode_enabled(&settings, "chat"),
+            Err("Vision is disabled in settings".into())
+        );
+        assert_eq!(
+            ensure_reference_mode_enabled(&settings, "translate"),
+            Err("Screenshot translation is disabled in settings".into())
+        );
+        assert!(ensure_capture_enabled(&settings).is_err());
+        assert!(ensure_optimizer_enabled(&settings).is_err());
+    }
+
+    #[test]
+    fn disabled_screenshot_translation_does_not_cancel_the_current_vision_stream() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut settings = AppSettings::default();
+        settings.screenshot_translation.enabled = false;
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            settings,
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        let current_generation = state.begin_reference_vision_stream();
+
+        assert_eq!(
+            begin_screenshot_translation_stream(&state),
+            Err("Screenshot translation is disabled in settings".into())
+        );
+        assert!(state.reference_vision_stream_current(current_generation));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_system_ocr_in_vendor_settings_patch_on_windows() {
+        let mut settings = AppSettings::default();
+        let before = settings.clone();
+        let payload = json!({
+            "screenshotTranslation": {
+                "ocrMethod": "system"
+            }
+        });
+        assert_eq!(
+            apply_screenshot_settings_patch(&mut settings, &payload),
+            Err("System OCR is not available on Windows".into())
+        );
+        assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn capture_registration_archives_the_original_image() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let archive = root.path().join("archive");
+        let mut settings = AppSettings::default();
+        settings.general.image_archive_enabled = true;
+        settings.general.image_archive_path = archive.to_string_lossy().into_owned();
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            settings,
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        state
+            .begin_reference_vision_image_session()
+            .expect("begin image session");
+        let capture = root.path().join("capture.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&capture, image::ImageFormat::Png)
+            .expect("write capture");
+
+        let session_generation = state
+            .reference_vision_image_session()
+            .expect("active image session");
+        let registered =
+            register_capture_path(&state, &capture, session_generation).expect("register capture");
+        assert!(!capture.exists());
+        assert!(registered.archive_warning.is_none());
+        assert!(state.images.read_data_url(&registered.image_id).is_ok());
+        assert_eq!(
+            std::fs::read_dir(&archive)
+                .expect("read archive")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|value| value == "png"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn close_after_capture_registration_keeps_the_returned_image_commit_capable() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            AppSettings::default(),
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        let session_generation = state
+            .begin_reference_vision_image_session()
+            .expect("begin image session");
+        let capture = root.path().join("capture.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&capture, image::ImageFormat::Png)
+            .expect("write capture");
+        let registered =
+            register_capture_path(&state, &capture, session_generation).expect("register capture");
+
+        let cleanup = state
+            .close_reference_vision_image_session()
+            .expect("close image session");
+        let response = capture_registration_response(RegisteredCapture {
+            image_id: registered.image_id.clone(),
+            archive_warning: registered.archive_warning.clone(),
+        });
+        assert_eq!(response["success"], true);
+        assert!(state.images.read_data_url(&registered.image_id).is_ok());
+        state
+            .commit_reference_vision_image(&registered.image_id)
+            .expect("commit returned image during grace period");
+        state
+            .cleanup_reference_vision_temporary_images(&cleanup)
+            .expect("cleanup skips committed image");
+        assert!(state.images.read_data_url(&registered.image_id).is_ok());
+    }
+
+    #[test]
+    fn archive_failure_keeps_capture_available_and_returns_a_warning() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let invalid_archive = root.path().join("not-a-directory");
+        std::fs::write(&invalid_archive, b"file").expect("write invalid archive target");
+        let mut settings = AppSettings::default();
+        settings.general.image_archive_enabled = true;
+        settings.general.image_archive_path = invalid_archive.to_string_lossy().into_owned();
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            settings,
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        state
+            .begin_reference_vision_image_session()
+            .expect("begin image session");
+        let capture = root.path().join("capture.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&capture, image::ImageFormat::Png)
+            .expect("write capture");
+
+        let session_generation = state
+            .reference_vision_image_session()
+            .expect("active image session");
+        let registered = register_capture_path(&state, &capture, session_generation)
+            .expect("capture remains usable");
+        assert!(registered
+            .archive_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("Screenshot archive failed")));
+        assert!(!capture.exists());
+        assert!(state.images.read_data_url(&registered.image_id).is_ok());
+        assert_eq!(
+            std::fs::read_dir(root.path().join("cache/screenpilot-captures"))
+                .expect("read temporary captures")
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+        let response = capture_registration_response(registered);
+        assert_eq!(response["success"], true);
+        assert!(response["archiveWarning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("Screenshot archive failed")));
+    }
+
+    #[test]
+    fn empty_archive_path_never_breaks_the_capture_workflow() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut settings = AppSettings::default();
+        settings.general.image_archive_enabled = true;
+        settings.general.image_archive_path = "   ".into();
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            settings,
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        state
+            .begin_reference_vision_image_session()
+            .expect("begin image session");
+        let capture = root.path().join("capture.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&capture, image::ImageFormat::Png)
+            .expect("write capture");
+
+        let session_generation = state
+            .reference_vision_image_session()
+            .expect("active image session");
+        let registered = register_capture_path(&state, &capture, session_generation)
+            .expect("capture remains usable");
+        assert!(state.images.read_data_url(&registered.image_id).is_ok());
+        assert!(registered
+            .archive_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("archive directory is empty")));
+    }
+
+    #[test]
+    fn capture_finishing_after_close_is_rejected_and_cleans_both_temp_layers() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let store =
+            crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
+        let images = crate::infrastructure::images::ImageStore::new(
+            &root.path().join("data"),
+            &root.path().join("cache"),
+        )
+        .expect("image store");
+        let state = AppState::new(
+            store,
+            images,
+            AppSettings::default(),
+            root.path().join("webview"),
+            root.path().join("cache"),
+        );
+        let stale_generation = state
+            .begin_reference_vision_image_session()
+            .expect("begin stale image session");
+        state
+            .close_reference_vision_image_session()
+            .expect("close stale image session");
+        state
+            .begin_reference_vision_image_session()
+            .expect("begin replacement image session");
+        let capture = root.path().join("capture.png");
+        image::RgbaImage::new(4, 4)
+            .save_with_format(&capture, image::ImageFormat::Png)
+            .expect("write capture");
+
+        assert_eq!(
+            register_capture_path(&state, &capture, stale_generation),
+            Err("Vision surface is no longer active".into())
+        );
+        assert!(!capture.exists());
+        assert_eq!(
+            std::fs::read_dir(root.path().join("cache/screenpilot-captures"))
+                .expect("read temporary captures")
+                .filter_map(Result::ok)
+                .count(),
+            0
         );
     }
 

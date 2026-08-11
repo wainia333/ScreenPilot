@@ -1,6 +1,8 @@
 import { createPortal } from 'react-dom'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Clock3, Trash2, X } from 'lucide-react'
+import { copyFor, formatCopy } from '../../shared/ui-copy'
+import type { InterfaceLanguage } from '../settings/types'
 
 export type HistoryMenuItem = {
   id: string
@@ -14,6 +16,7 @@ export type HistoryMenuProps<T extends HistoryMenuItem = HistoryMenuItem> = {
   items: readonly T[]
   title: string
   countAnnouncementId: string
+  language?: InterfaceLanguage
   showOutput?: boolean
   getMeta?: (item: T) => string | undefined
   onRestore: (item: T) => void
@@ -23,26 +26,30 @@ export type HistoryMenuProps<T extends HistoryMenuItem = HistoryMenuItem> = {
 
 const HISTORY_MENU_WIDTH = 340
 
-function formatRelativeTime(updatedAt: number): string {
+function formatRelativeTime(updatedAt: number, language: InterfaceLanguage): string {
+  const t = copyFor(language)
   const minutes = Math.floor((Date.now() - updatedAt) / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
+  if (minutes < 1) return t.justNow
+  if (minutes < 60) return formatCopy(t.minutesAgo, { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时前`
-  return `${Math.floor(hours / 24)} 天前`
+  if (hours < 24) return formatCopy(t.hoursAgo, { count: hours })
+  return formatCopy(t.daysAgo, { count: Math.floor(hours / 24) })
 }
 
 export function HistoryMenu<T extends HistoryMenuItem>({
   items,
   title,
   countAnnouncementId,
+  language = 'zh',
   showOutput = true,
   getMeta,
   onRestore,
   onRemove,
   onClear,
 }: HistoryMenuProps<T>) {
+  const t = copyFor(language)
   const [open, setOpen] = useState(false)
+  const popoverId = useId()
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -68,6 +75,10 @@ export function HistoryMenu<T extends HistoryMenuItem>({
 
   useEffect(() => {
     if (!open) return
+    queueMicrotask(() => {
+      const firstAction = popoverRef.current?.querySelector<HTMLElement>('.history-menu-restore, .history-menu-clear')
+      ;(firstAction ?? popoverRef.current)?.focus()
+    })
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node
       if (!rootRef.current?.contains(target) && !popoverRef.current?.contains(target)) setOpen(false)
@@ -76,8 +87,9 @@ export function HistoryMenu<T extends HistoryMenuItem>({
       if (event.key !== 'Escape') return
       event.preventDefault()
       event.stopPropagation()
+      event.stopImmediatePropagation()
       setOpen(false)
-      triggerRef.current?.blur()
+      queueMicrotask(() => triggerRef.current?.focus())
     }
     document.addEventListener('mousedown', onPointerDown)
     window.addEventListener('keydown', onKeyDown, true)
@@ -97,7 +109,14 @@ export function HistoryMenu<T extends HistoryMenuItem>({
         aria-label={title}
         aria-describedby={countAnnouncementId}
         aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls={popoverId}
         onClick={() => setOpen((value) => !value)}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowDown') return
+          event.preventDefault()
+          setOpen(true)
+        }}
         data-tauri-drag-region="false"
       >
         <Clock3 size={16} />
@@ -107,20 +126,27 @@ export function HistoryMenu<T extends HistoryMenuItem>({
           </span>
         ) : null}
         <span id={countAnnouncementId} className="history-count-announcement">
-          {items.length > 0 ? `历史记录：${items.length} 条` : '暂无历史记录'}
+          {items.length > 0 ? formatCopy(t.historyCount, { count: items.length }) : t.historyEmpty}
         </span>
       </button>
 
       {open ? createPortal(
         <div
           ref={popoverRef}
+          id={popoverId}
           className="history-menu-popover"
-          role="complementary"
+          role="dialog"
           aria-label={title}
+          tabIndex={-1}
           style={{ top: position.top, left: position.left }}
+          onBlur={(event) => {
+            const nextTarget = event.relatedTarget
+            if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+            setOpen(false)
+          }}
         >
           {items.length === 0 ? (
-            <div className="history-menu-empty">暂无历史记录</div>
+            <div className="history-menu-empty">{t.historyEmpty}</div>
           ) : (
             <>
               <div className="history-menu-list custom-scrollbar">
@@ -138,16 +164,16 @@ export function HistoryMenu<T extends HistoryMenuItem>({
                     >
                       <span className="history-menu-input">{item.input}</span>
                       {showOutput ? <span className="history-menu-output">{item.output}</span> : null}
-                      <span className="history-menu-meta" aria-hidden="true">
+                      <span className="history-menu-meta">
                         {(getMeta?.(item) ?? item.method) ? `${getMeta?.(item) ?? item.method} · ` : ''}
-                        {formatRelativeTime(item.updatedAt)}
+                        {formatRelativeTime(item.updatedAt, language)}
                       </span>
                     </button>
                     <button
                       type="button"
                       className="history-menu-delete"
-                      aria-label="删除历史"
-                      title="删除历史"
+                      aria-label={t.deleteHistory}
+                      title={t.deleteHistory}
                       onClick={() => onRemove(item.id)}
                       data-tauri-drag-region="false"
                     >
@@ -167,7 +193,7 @@ export function HistoryMenu<T extends HistoryMenuItem>({
                   data-tauri-drag-region="false"
                 >
                   <Trash2 size={11} />
-                  清空
+                  {t.clearHistory}
                 </button>
               </div>
             </>

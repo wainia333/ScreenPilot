@@ -3,6 +3,14 @@ import { DEFAULT_SETTINGS } from './defaults'
 import { sanitizeSettings, validateSettings } from './sanitize'
 
 describe('sanitizeSettings', () => {
+  it('migrates the unsupported Windows system OCR method to the default', () => {
+    const settings = sanitizeSettings({
+      screenshotTranslation: { ocrMethod: 'system' },
+    })
+
+    expect(settings.screenshotTranslation.ocrMethod).toBe(DEFAULT_SETTINGS.screenshotTranslation.ocrMethod)
+  })
+
   it('returns safe defaults for corrupted input', () => {
     expect(sanitizeSettings('{broken')).toEqual(DEFAULT_SETTINGS)
   })
@@ -185,5 +193,22 @@ describe('validateSettings', () => {
     })
     expect(validateSettings(safe)).toEqual([])
     expect(validateSettings(unsafe)).toContainEqual(expect.objectContaining({ code: 'unsafe' }))
+  })
+
+  it('requires a directory when screenshot auto-archive is enabled', () => {
+    const missing = sanitizeSettings({
+      general: { imageArchiveEnabled: true, imageArchivePath: '   ' },
+    })
+    const configured = sanitizeSettings({
+      general: { imageArchiveEnabled: true, imageArchivePath: 'C:\\Screenshots' },
+    })
+
+    expect(validateSettings(missing)).toContainEqual(expect.objectContaining({
+      path: 'general.imageArchivePath',
+      code: 'missing',
+    }))
+    expect(validateSettings(configured)).not.toContainEqual(expect.objectContaining({
+      path: 'general.imageArchivePath',
+    }))
   })
 })

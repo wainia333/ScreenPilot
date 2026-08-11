@@ -1,3 +1,4 @@
+use crate::infrastructure::provider_http::MAX_SSE_EVENT_BYTES;
 use serde_json::Value;
 use url::Url;
 
@@ -63,9 +64,18 @@ pub enum SseDelta {
     },
 }
 
-#[derive(Default)]
 pub struct SseDecoder {
     pending: Vec<u8>,
+    max_event_bytes: usize,
+}
+
+impl Default for SseDecoder {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            max_event_bytes: MAX_SSE_EVENT_BYTES,
+        }
+    }
 }
 
 impl SseDecoder {
@@ -73,11 +83,23 @@ impl SseDecoder {
         self.pending.extend_from_slice(bytes);
         let mut events = Vec::new();
         while let Some((end, delimiter)) = event_boundary(&self.pending) {
+            if end > self.max_event_bytes {
+                return Err(format!(
+                    "Provider stream event exceeds the {}-byte limit",
+                    self.max_event_bytes
+                ));
+            }
             let event = self.pending.drain(..end).collect::<Vec<_>>();
             self.pending.drain(..delimiter);
             if let Some(data) = decode_event(&event)? {
                 events.push(data);
             }
+        }
+        if self.pending.len() > self.max_event_bytes {
+            return Err(format!(
+                "Provider stream event exceeds the {}-byte limit",
+                self.max_event_bytes
+            ));
         }
         Ok(events)
     }
@@ -86,6 +108,12 @@ impl SseDecoder {
         if self.pending.iter().all(u8::is_ascii_whitespace) {
             self.pending.clear();
             return Ok(Vec::new());
+        }
+        if self.pending.len() > self.max_event_bytes {
+            return Err(format!(
+                "Provider stream event exceeds the {}-byte limit",
+                self.max_event_bytes
+            ));
         }
         let event = std::mem::take(&mut self.pending);
         Ok(decode_event(&event)?.into_iter().collect())
@@ -858,5 +886,26 @@ mod tests {
         let mut decoder = SseDecoder::default();
         decoder.push(b"data: [DONE]").unwrap();
         assert_eq!(decoder.finish().unwrap(), vec!["[DONE]"]);
+    }
+
+    #[test]
+    fn rejects_oversized_complete_and_unterminated_events() {
+        let mut complete = SseDecoder {
+            pending: Vec::new(),
+            max_event_bytes: 8,
+        };
+        assert_eq!(
+            complete.push(b"data: 123456789\n\n"),
+            Err("Provider stream event exceeds the 8-byte limit".into())
+        );
+
+        let mut pending = SseDecoder {
+            pending: Vec::new(),
+            max_event_bytes: 8,
+        };
+        assert_eq!(
+            pending.push(b"data: 123"),
+            Err("Provider stream event exceeds the 8-byte limit".into())
+        );
     }
 }

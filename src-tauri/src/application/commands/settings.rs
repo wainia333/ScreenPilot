@@ -2,15 +2,18 @@ use crate::application::lifecycle::{register_changed_shortcuts, update_tray};
 use crate::application::state::AppState;
 use crate::domain::settings::{
     save_transaction, AppSettings, ProviderSettings, SettingsEffects, SettingsExport,
-    TranslationMethod,
+    SettingsSecrets, TranslationMethod, SETTINGS_SECRETS_SCHEMA_VERSION,
 };
-use crate::infrastructure::credentials::CredentialVault;
+use crate::infrastructure::credentials::{
+    validate_adapter_key_batch_shape, validate_imported_provider_deletions,
+    validate_imported_provider_key_batch_shape, validate_provider_key_batch_shape, CredentialVault,
+};
 use crate::infrastructure::provider_http;
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -34,7 +37,31 @@ pub fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> 
 
 #[tauri::command]
 pub fn startup_notice_take(state: State<'_, AppState>) -> Option<String> {
-    state.take_startup_notice()
+    // Compatibility alias: startup notices are intentionally non-destructive
+    // until the visible surface explicitly acknowledges them.
+    state.startup_notice()
+}
+
+#[tauri::command]
+pub fn startup_notice_peek(state: State<'_, AppState>) -> Option<String> {
+    state.startup_notice()
+}
+
+#[tauri::command]
+pub fn startup_notice_acknowledge(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let main_visible = app
+        .get_webview_window("main")
+        .map(|window| window.is_visible().map_err(|error| error.to_string()))
+        .transpose()?
+        .unwrap_or(false);
+    if !main_visible {
+        return Ok(false);
+    }
+    state.acknowledge_startup_notice();
+    Ok(true)
 }
 
 #[tauri::command]
@@ -136,14 +163,18 @@ pub async fn settings_export(
 ) -> Result<bool, String> {
     let settings = state.current()?;
     let secrets = if include_secrets {
-        let mut values = HashMap::new();
+        let mut providers = HashMap::new();
         for provider in &settings.providers {
             let keys = CredentialVault::provider_keys(&provider.id)?;
             if !keys.is_empty() {
-                values.insert(provider.id.clone(), keys);
+                providers.insert(provider.id.clone(), keys);
             }
         }
-        Some(values)
+        validate_provider_key_batch_shape(&providers)?;
+        Some(SettingsSecrets::new(
+            providers,
+            CredentialVault::adapter_keys_for_export()?,
+        ))
     } else {
         None
     };
@@ -192,8 +223,39 @@ pub async fn settings_import(app: AppHandle) -> Result<Option<SettingsExport>, S
     }
     let raw_settings = raw_export.get("settings").cloned().unwrap_or_default();
     export.settings.migrate_missing_ai_toggles(&raw_settings);
+    export.settings.migrate_prompt_defaults();
+    export.settings.normalize_ai_options();
     export.settings.validate()?;
+    validate_imported_secrets(&mut export)?;
     Ok(Some(export))
+}
+
+fn validate_imported_secrets(export: &mut SettingsExport) -> Result<(), String> {
+    if !export.includes_secrets {
+        export.secrets = None;
+        return Ok(());
+    }
+    let Some(secrets) = export.secrets.as_ref() else {
+        return Ok(());
+    };
+    if secrets.schema_version != SETTINGS_SECRETS_SCHEMA_VERSION {
+        return Err("Settings secrets schema is unsupported".into());
+    }
+    validate_imported_provider_key_batch_shape(&secrets.providers)?;
+    let provider_ids = export
+        .settings
+        .providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if secrets
+        .providers
+        .keys()
+        .any(|provider_id| !provider_ids.contains(provider_id.as_str()))
+    {
+        return Err("Settings secrets contain a provider that is not present in settings".into());
+    }
+    validate_adapter_key_batch_shape(&secrets.adapters)
 }
 
 #[tauri::command]
@@ -222,6 +284,62 @@ pub fn credentials_set_provider_keys_batch(
     changes: HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
     CredentialVault::set_provider_keys_batch(&changes)
+}
+
+#[tauri::command]
+pub fn credentials_set_adapter_keys_batch(
+    changes: HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    CredentialVault::set_adapter_keys_batch(&changes)
+}
+
+#[tauri::command]
+pub fn credentials_set_imported_secrets(
+    state: State<'_, AppState>,
+    secrets: SettingsSecrets,
+    provider_deletion_ids: Vec<String>,
+) -> Result<(), String> {
+    let settings = state.current()?;
+    validate_imported_secret_save(&settings, &secrets, &provider_deletion_ids)?;
+    CredentialVault::set_imported_secrets_batch(
+        &secrets.providers,
+        &secrets.adapters,
+        &provider_deletion_ids,
+    )
+}
+
+fn validate_imported_secret_save(
+    settings: &AppSettings,
+    secrets: &SettingsSecrets,
+    provider_deletion_ids: &[String],
+) -> Result<(), String> {
+    if secrets.schema_version != SETTINGS_SECRETS_SCHEMA_VERSION {
+        return Err("Settings secrets schema is unsupported".into());
+    }
+    validate_imported_provider_key_batch_shape(&secrets.providers)?;
+    validate_imported_provider_deletions(&secrets.providers, provider_deletion_ids)?;
+    validate_adapter_key_batch_shape(&secrets.adapters)?;
+    let provider_ids = settings
+        .providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if secrets
+        .providers
+        .keys()
+        .any(|provider_id| !provider_ids.contains(provider_id.as_str()))
+    {
+        return Err("Settings secrets contain a provider that is not present in settings".into());
+    }
+    if provider_deletion_ids
+        .iter()
+        .any(|provider_id| provider_ids.contains(provider_id.as_str()))
+    {
+        return Err(
+            "Provider credentials cannot be deleted while the provider is in settings".into(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -364,8 +482,8 @@ impl SettingsEffects for RuntimeSettingsEffects<'_> {
         self.state.store.save(settings)
     }
 
-    fn update_tray(&mut self, _settings: &AppSettings) -> Result<(), String> {
-        update_tray(self.app)
+    fn update_tray(&mut self, settings: &AppSettings) -> Result<(), String> {
+        update_tray(self.app, settings)
     }
 }
 
@@ -508,5 +626,106 @@ mod tests {
             redact_provider_error("request failed".into(), None),
             "request failed"
         );
+    }
+
+    fn export_with_secrets(secrets: SettingsSecrets) -> SettingsExport {
+        let mut settings = AppSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "provider-a".into(),
+            name: "Provider A".into(),
+            base_url: "https://example.com/v1".into(),
+            key_count: 1,
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+        });
+        SettingsExport {
+            export_type: "screenpilot-settings-export".into(),
+            schema_version: 1,
+            app_version: "0.1.0".into(),
+            exported_at: "2026-08-10T00:00:00Z".into(),
+            includes_secrets: true,
+            settings,
+            secrets: Some(secrets),
+        }
+    }
+
+    #[test]
+    fn imported_secrets_reject_unknown_adapter_ids_and_provider_injection() {
+        let mut unknown_adapter = export_with_secrets(SettingsSecrets::new(
+            HashMap::new(),
+            HashMap::from([("adapter-unknown".into(), vec!["secret".into()])]),
+        ));
+        assert_eq!(
+            validate_imported_secrets(&mut unknown_adapter),
+            Err("Adapter credential id is unsupported".into())
+        );
+
+        let mut unknown_provider = export_with_secrets(SettingsSecrets::new(
+            HashMap::from([("provider-b".into(), vec!["secret".into()])]),
+            HashMap::new(),
+        ));
+        assert_eq!(
+            validate_imported_secrets(&mut unknown_provider),
+            Err("Settings secrets contain a provider that is not present in settings".into())
+        );
+    }
+
+    #[test]
+    fn imported_secrets_validate_adapter_cardinality_and_schema() {
+        let mut incomplete_adapter = export_with_secrets(SettingsSecrets::new(
+            HashMap::new(),
+            HashMap::from([("adapter-baidu-ocr".into(), vec!["api-key".into()])]),
+        ));
+        assert_eq!(
+            validate_imported_secrets(&mut incomplete_adapter),
+            Err("Adapter adapter-baidu-ocr requires exactly 2 non-empty credential fields".into())
+        );
+
+        let mut unsupported_schema = export_with_secrets(SettingsSecrets {
+            schema_version: SETTINGS_SECRETS_SCHEMA_VERSION + 1,
+            providers: HashMap::new(),
+            adapters: HashMap::new(),
+        });
+        assert_eq!(
+            validate_imported_secrets(&mut unsupported_schema),
+            Err("Settings secrets schema is unsupported".into())
+        );
+    }
+
+    #[test]
+    fn imported_secret_save_only_deletes_providers_absent_from_current_settings() {
+        let secrets = SettingsSecrets::new(HashMap::new(), HashMap::new());
+        let mut settings = AppSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "retained-provider".into(),
+            name: "Retained Provider".into(),
+            base_url: "https://example.com/v1".into(),
+            key_count: 1,
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+        });
+
+        assert_eq!(
+            validate_imported_secret_save(
+                &settings,
+                &secrets,
+                &[String::from("retained-provider")]
+            ),
+            Err("Provider credentials cannot be deleted while the provider is in settings".into())
+        );
+        validate_imported_secret_save(&settings, &secrets, &[String::from("removed-provider")])
+            .expect("a provider absent from current settings may be deleted");
+    }
+
+    #[test]
+    fn import_without_the_secrets_flag_discards_embedded_secret_material() {
+        let mut export = export_with_secrets(SettingsSecrets::new(
+            HashMap::from([("provider-a".into(), vec!["secret".into()])]),
+            HashMap::new(),
+        ));
+        export.includes_secrets = false;
+
+        validate_imported_secrets(&mut export).expect("ignore unadvertised secrets");
+        assert!(export.secrets.is_none());
     }
 }

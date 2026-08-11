@@ -5,7 +5,10 @@ use crate::domain::providers::{
 };
 use crate::domain::settings::ProviderSettings;
 use crate::domain::settings::ThinkingEffort;
-use crate::infrastructure::provider_http::client;
+use crate::infrastructure::provider_http::{
+    client, read_json_limited, read_text_limited, MAX_AI_JSON_RESPONSE_BYTES, MAX_AI_OUTPUT_BYTES,
+    MAX_ERROR_BODY_BYTES, MAX_SSE_STREAM_BYTES,
+};
 use crate::infrastructure::sse::{parse_openai_event, SseDecoder, SseDelta};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -114,7 +117,9 @@ macro_rules! notify_client_phase {
 
 #[cfg(not(test))]
 macro_rules! notify_client_phase {
-    ($signal:expr, $phase:expr) => {};
+    ($signal:expr, $phase:expr) => {{
+        let _ = &$signal;
+    }};
 }
 
 pub struct AiMessage<'a> {
@@ -211,6 +216,51 @@ struct KeyRuntime {
     cooling: HashMap<(String, [u8; 32]), Instant>,
 }
 
+struct StreamOutputBudget {
+    bytes: usize,
+    limit: usize,
+}
+
+impl Default for StreamOutputBudget {
+    fn default() -> Self {
+        Self {
+            bytes: 0,
+            limit: MAX_AI_OUTPUT_BYTES,
+        }
+    }
+}
+
+impl StreamOutputBudget {
+    fn observe(&mut self, delta: &SseDelta) -> Result<(), String> {
+        let additional = match delta {
+            SseDelta::TextDelta { text, .. }
+            | SseDelta::TextDone { text, .. }
+            | SseDelta::TextForItemDelta { text, .. }
+            | SseDelta::TextForItemDone { text, .. }
+            | SseDelta::RefusalDelta { text, .. }
+            | SseDelta::RefusalDone { text, .. }
+            | SseDelta::Reasoning { text, .. }
+            | SseDelta::ReasoningDone { text, .. } => text.len(),
+            SseDelta::Citation { title, url, .. } => title.len().saturating_add(url.len()),
+            SseDelta::ItemPhase { item_id, phase } => item_id.len().saturating_add(phase.len()),
+            SseDelta::Error(message) => message.len(),
+            SseDelta::ErrorWithReason { message, reason } => {
+                message.len().saturating_add(reason.len())
+            }
+            SseDelta::Done => 0,
+        };
+        self.bytes = self.bytes.saturating_add(additional);
+        if self.bytes > self.limit {
+            Err(format!(
+                "Provider output exceeds the {}-byte limit",
+                self.limit
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 static KEY_RUNTIME: OnceLock<Mutex<KeyRuntime>> = OnceLock::new();
 
 pub async fn complete_text(
@@ -220,6 +270,18 @@ pub async fn complete_text(
     system: &str,
     user: &str,
     policy: AiRequestPolicy,
+) -> Result<String, String> {
+    complete_text_cancelled(provider, model, keys, system, user, policy, None).await
+}
+
+pub async fn complete_text_cancelled(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    system: &str,
+    user: &str,
+    policy: AiRequestPolicy,
+    cancellation: Option<Arc<CancellationSignal>>,
 ) -> Result<String, String> {
     let endpoints = derive_endpoints(&provider.base_url)?;
     let body = match endpoints.protocol {
@@ -240,7 +302,7 @@ pub async fn complete_text(
             "stream": policy.stream
         }),
     };
-    send_completion_at(
+    send_completion_at_cancelled(
         provider,
         model,
         keys,
@@ -248,6 +310,7 @@ pub async fn complete_text(
         endpoints.protocol,
         policy,
         endpoints.request,
+        cancellation,
     )
     .await
 }
@@ -576,6 +639,8 @@ where
     };
     let mut stream = response.bytes_stream();
     let mut decoder = SseDecoder::default();
+    let mut stream_bytes = 0usize;
+    let mut output_budget = StreamOutputBudget::default();
     loop {
         let next = if let Some(signal) = cancellation.as_ref() {
             tokio::select! {
@@ -592,11 +657,18 @@ where
         if cancelled() {
             return Ok(AiStreamFinish::Cancelled);
         }
-        for event in decoder.push(&chunk.map_err(|error| error.to_string())?)? {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        stream_bytes = stream_bytes.saturating_add(chunk.len());
+        if stream_bytes > MAX_SSE_STREAM_BYTES {
+            return Err(format!(
+                "Provider stream exceeds the {MAX_SSE_STREAM_BYTES}-byte limit"
+            ));
+        }
+        for event in decoder.push(&chunk)? {
             if cancelled() {
                 return Ok(AiStreamFinish::Cancelled);
             }
-            if consume_sse_event(&event, &mut on_delta, input.keys)
+            if consume_sse_event(&event, &mut on_delta, input.keys, &mut output_budget)
                 .map_err(|error| redact_provider_message(&error, input.keys))?
             {
                 return Ok(AiStreamFinish::Done);
@@ -607,7 +679,7 @@ where
         if cancelled() {
             return Ok(AiStreamFinish::Cancelled);
         }
-        if consume_sse_event(&event, &mut on_delta, input.keys)
+        if consume_sse_event(&event, &mut on_delta, input.keys, &mut output_budget)
             .map_err(|error| redact_provider_message(&error, input.keys))?
         {
             return Ok(AiStreamFinish::Done);
@@ -629,12 +701,51 @@ async fn send_completion_at(
     policy: AiRequestPolicy,
     request_url: Url,
 ) -> Result<String, String> {
-    let response =
-        request_with_failover_at(provider, model, keys, &body, policy, request_url).await?;
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("Provider response is invalid: {error}"))?;
+    send_completion_at_cancelled(
+        provider,
+        model,
+        keys,
+        body,
+        protocol,
+        policy,
+        request_url,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_completion_at_cancelled(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    body: Value,
+    protocol: ApiProtocol,
+    policy: AiRequestPolicy,
+    request_url: Url,
+    cancellation: Option<Arc<CancellationSignal>>,
+) -> Result<String, String> {
+    let response = request_with_failover_at_cancelled(
+        provider,
+        model,
+        keys,
+        &body,
+        policy,
+        request_url,
+        cancellation.clone(),
+    )
+    .await
+    .map_err(|failure| failure.into_message(keys))?;
+    if let Some(signal) = cancellation.as_ref() {
+        notify_client_phase!(signal, TestClientPhase::ResponseJsonBody);
+    }
+    let value = read_json_limited::<Value>(
+        response,
+        MAX_AI_JSON_RESPONSE_BYTES,
+        "Provider response",
+        cancellation.as_deref(),
+    )
+    .await?;
     parse_completion(protocol, &value)
         .map(|result| result.text)
         .map_err(|error| redact_provider_message(&error, keys))
@@ -662,21 +773,16 @@ async fn send_completion_result_at(
     )
     .await
     .map_err(|failure| failure.into_message(keys))?;
-    let value = if let Some(signal) = cancellation {
-        tokio::select! {
-            result = async {
-                notify_client_phase!(&signal, TestClientPhase::ResponseJsonBody);
-                response.json::<Value>().await
-            } => result,
-            _ = signal.cancelled() => return Err("Request cancelled".into()),
-        }
-        .map_err(|error| format!("Provider response is invalid: {error}"))?
-    } else {
-        response
-            .json::<Value>()
-            .await
-            .map_err(|error| format!("Provider response is invalid: {error}"))?
-    };
+    if let Some(signal) = cancellation.as_ref() {
+        notify_client_phase!(signal, TestClientPhase::ResponseJsonBody);
+    }
+    let value = read_json_limited::<Value>(
+        response,
+        MAX_AI_JSON_RESPONSE_BYTES,
+        "Provider response",
+        cancellation.as_deref(),
+    )
+    .await?;
     let mut result = parse_completion_partial(protocol, &value)
         .map_err(|error| redact_provider_message(&error, keys))?;
     result.error = result
@@ -686,19 +792,6 @@ async fn send_completion_result_at(
         .incomplete_reason
         .map(|reason| redact_provider_message(&reason, keys));
     Ok(result)
-}
-
-async fn request_with_failover_at(
-    provider: &ProviderSettings,
-    model: &str,
-    keys: &[String],
-    body: &Value,
-    policy: AiRequestPolicy,
-    request_url: Url,
-) -> Result<reqwest::Response, String> {
-    request_with_failover_at_cancelled(provider, model, keys, body, policy, request_url, None)
-        .await
-        .map_err(|failure| failure.into_message(keys))
 }
 
 #[derive(Debug)]
@@ -779,16 +872,26 @@ async fn request_with_failover_at_cancelled(
                     .and_then(|value| value.to_str().ok()),
             );
             let status_code = status.as_u16();
-            let text = if let Some(signal) = cancellation.as_ref() {
-                tokio::select! {
-                    text = async {
-                        notify_client_phase!(signal, TestClientPhase::ErrorBody);
-                        response.text().await
-                    } => text.unwrap_or_default(),
-                    _ = signal.cancelled() => return Err(RequestFailure::Cancelled),
+            if let Some(signal) = cancellation.as_ref() {
+                notify_client_phase!(signal, TestClientPhase::ErrorBody);
+            }
+            let text = match read_text_limited(
+                response,
+                MAX_ERROR_BODY_BYTES,
+                "Provider error response",
+                cancellation.as_deref(),
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(_)
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(|signal| signal.is_cancelled()) =>
+                {
+                    return Err(RequestFailure::Cancelled);
                 }
-            } else {
-                response.text().await.unwrap_or_default()
+                Err(_) => String::new(),
             };
             let value = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
             last_error = value
@@ -836,11 +939,17 @@ async fn request_with_failover_at_cancelled(
     Err(RequestFailure::Error(last_error))
 }
 
-fn consume_sse_event<F>(event: &str, on_delta: &mut F, keys: &[String]) -> Result<bool, String>
+fn consume_sse_event<F>(
+    event: &str,
+    on_delta: &mut F,
+    keys: &[String],
+    output_budget: &mut StreamOutputBudget,
+) -> Result<bool, String>
 where
     F: FnMut(SseDelta) -> Result<(), String>,
 {
     for delta in parse_openai_event(event)? {
+        output_budget.observe(&delta)?;
         match delta {
             SseDelta::Done => return Ok(true),
             SseDelta::Error(error) => {
@@ -1521,6 +1630,7 @@ mod tests {
     fn redacts_all_configured_keys_before_terminal_stream_callbacks() {
         let keys = vec!["key-one".to_string(), "key-two".to_string()];
         let mut seen = Vec::new();
+        let mut output_budget = StreamOutputBudget::default();
         let error = consume_sse_event(
             r#"{"error":{"message":"bad key-one and key-two"}}"#,
             &mut |delta| {
@@ -1528,6 +1638,7 @@ mod tests {
                 Ok(())
             },
             &keys,
+            &mut output_budget,
         )
         .expect_err("provider event should fail");
         assert!(!error.contains("key-one"));
@@ -1536,6 +1647,26 @@ mod tests {
             seen.as_slice(),
             [SseDelta::Error(message)] if !message.contains("key-one") && !message.contains("key-two")
         ));
+    }
+
+    #[test]
+    fn rejects_stream_output_that_exceeds_the_accumulated_budget() {
+        let mut budget = StreamOutputBudget { bytes: 0, limit: 4 };
+        budget
+            .observe(&SseDelta::TextDelta {
+                item_id: None,
+                content_index: None,
+                text: "four".into(),
+            })
+            .expect("output at the limit");
+        assert_eq!(
+            budget.observe(&SseDelta::TextDelta {
+                item_id: None,
+                content_index: None,
+                text: "!".into(),
+            }),
+            Err("Provider output exceeds the 4-byte limit".into())
+        );
     }
 
     #[tokio::test]
@@ -2135,6 +2266,43 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         assert_eq!(
             result.expect_err("body read should cancel"),
+            "Request cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_completion_cancellation_wakes_an_idle_response_body() {
+        let (base_url, _accepted, _body_sent, stop) = spawn_partial_http_server(
+            "application/json",
+            br#"{"output":[{"content":[{"type":"output_text","text":"partial"}]}]}"#,
+        );
+        let signal = Arc::new(CancellationSignal::new());
+        let observer = new_test_client_phase_observer(&signal);
+        let test_provider = provider(format!("{base_url}/responses"));
+        let keys = vec!["text-cancel-secret".to_string()];
+        let task_signal = Arc::clone(&signal);
+        let worker = tokio::spawn(async move {
+            complete_text_cancelled(
+                &test_provider,
+                "model:text",
+                &keys,
+                "system",
+                "user",
+                AiRequestPolicy::new(false, 1, false),
+                Some(task_signal),
+            )
+            .await
+        });
+
+        wait_test_client_phase(&observer, TestClientPhase::ResponseJsonBody).await;
+        signal.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("text body cancellation should wake")
+            .expect("worker join");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(
+            result.expect_err("text response body should cancel"),
             "Request cancelled"
         );
     }

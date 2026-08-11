@@ -14,6 +14,7 @@ use application::lifecycle;
 use application::state::AppState;
 use infrastructure::images::ImageStore;
 use infrastructure::settings_store::SettingsStore;
+use std::time::Duration;
 use tauri::{Manager, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -41,18 +42,23 @@ pub fn run() {
             open_external,
             settings_load,
             startup_notice_take,
+            startup_notice_peek,
+            startup_notice_acknowledge,
             settings_save,
             translation_settings_update,
             settings_export,
             settings_import,
             directory_pick,
             credentials_set_provider_keys_batch,
+            credentials_set_adapter_keys_batch,
+            credentials_set_imported_secrets,
             credentials_set_provider_keys,
             credentials_provider_key_count,
             credentials_delete_provider_keys,
             providers_fetch_models,
             providers_test,
             translator_translate,
+            translator_cancel,
             optimizer_run,
             text_commit,
             window_hide,
@@ -67,6 +73,7 @@ pub fn run() {
             vision_register_annotated_image,
             vision_commit_image_to_history,
             vision_delete_history_image,
+            vision_delete_temporary_image,
             vision_close,
             vision_set_floating,
             vision_start_safe_drag,
@@ -103,9 +110,14 @@ pub fn run() {
             )
             .map_err(std::io::Error::other)?;
             let store = SettingsStore::new(&directories.configuration);
+            let (settings, recovery_notice) =
+                store.load_or_recover().map_err(std::io::Error::other)?;
             let images = ImageStore::new(&directories.data, &directories.cache)
                 .map_err(std::io::Error::other)?;
-            let settings = store.load().unwrap_or_default();
+            let mut startup_notices = recovery_notice.into_iter().collect::<Vec<_>>();
+            if let Err(error) = images.clear_stale_temporary(Duration::from_secs(24 * 60 * 60)) {
+                startup_notices.push(format!("过期临时截图清理未完全成功：{error}"));
+            }
             app.manage(AppState::new(
                 store,
                 images,
@@ -127,11 +139,15 @@ pub fn run() {
                     .build()?;
             }
             lifecycle::preload_translator_window(app.handle()).map_err(std::io::Error::other)?;
-            lifecycle::create_tray(app.handle()).map_err(std::io::Error::other)?;
+            lifecycle::create_tray(app.handle(), &settings).map_err(std::io::Error::other)?;
             if let Err(error) = lifecycle::register_shortcuts(app.handle(), &settings) {
-                app.state::<AppState>().set_startup_notice(format!(
+                startup_notices.push(format!(
                     "快捷键冲突：{error}。其他入口仍可通过托盘打开，请修改快捷键后保存。"
                 ));
+            }
+            if !startup_notices.is_empty() {
+                app.state::<AppState>()
+                    .set_startup_notice(startup_notices.join("\n\n"));
             }
             lifecycle::startup_window(app.handle()).map_err(std::io::Error::other)?;
             Ok(())

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "algorithm": "sha256",
+  "normalization": "utf8-lf",
+  "description": "Reviewed integrity baseline for vendored screenshot sources and their native support files. Update only with npm run vendor:lock -- --accept-reviewed-changes after reviewing the complete diff.",
+  "files": {
+    "src/vendor/kivio-screenshot/accessibility.ts": "D7217B6874AAEBEA26B78BB5735A10E8085F05160253D0ACF9165F6E09E6E1B7",
+    "src/vendor/kivio-screenshot/history.ts": "97A518F61C7D6CD99F0FE2B6B6D06379593ECC08A1812EA2307A9595358BA9C0",
+    "src/vendor/kivio-screenshot/Vision.tsx": "D17EB277BC5FC85B3134D8CA432AD5F97B1CCE58D7F5A953AB118838E0B81073",
+    "src/vendor/kivio-screenshot/api/tauri.ts": "DE2FD9071E41A7C02931F66EF3DD121401D1CE7EFF13CC6C56B6599EDE1132D6",
+    "src/vendor/kivio-screenshot/settings/i18n.ts": "7E34D24C10E7F622D42A4C1E808D1D61ACE1D5A9F7E6A81BBF46A2EA9BFA2ECE",
+    "src/vendor/kivio-screenshot/utils/clipboard.ts": "857520C66BD6ADF1F2E7AB3BD9FAC0E0E9037FB8BE4F877232EDDF83607296EA",
+    "src/vendor/kivio-screenshot/index.css": "A88745C3A01A960A3CB77E7F9DE35071D04BE7A25C00BB440F1E3C6D2A401029",
+    "public/emojione--leaf-fluttering-in-wind.svg": "90400CD289CAF414A671400371A93511AAEA82882C0CF7C3F7320E15816D623E",
+    "src-tauri/src/vision.rs": "8C1109E437693B927E3CD87CD2103EF740E3F311766F847D7661B7AE9B523717",
+    "src-tauri/src/native_freeze.rs": "CFDC421F36214D5340272C768A21A40DB738477753C5B83DB47AB686E6C2DB82",
+    "src-tauri/src/screenshot.rs": "A7768399F178D2FC5FA1361080E134358EEBC1C3B78551AA9F065F735184EA43",
+    "src-tauri/src/windows.rs": "F25A5100D024E40C4579B780BAEEA3FEA7EA47E17C9220601D83C19BB31EC1B6"
+  }
+}

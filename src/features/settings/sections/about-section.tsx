@@ -1,16 +1,21 @@
 import { Download, Upload } from 'lucide-react'
 import { useState } from 'react'
 import { SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
+import { copyFor } from '../../../shared/ui-copy'
+import type { InterfaceLanguage } from '../types'
 
 export function AboutSection({
   onExport,
   onImport,
+  language,
   disabled = false,
 }: {
   onExport: (includeSecrets: boolean) => void
   onImport: () => void
+  language: InterfaceLanguage
   disabled?: boolean
 }) {
+  const t = copyFor(language)
   const [includeSecrets, setIncludeSecrets] = useState(false)
   return (
     <>
@@ -21,20 +26,20 @@ export function AboutSection({
           <p>Version 0.1.0 · Wainia</p>
         </div>
       </div>
-      <SettingGroup title="配置管理">
-        <SettingRow label="导出时包含 API Key" description="默认关闭；开启后导出文件将包含敏感信息">
-          <Toggle checked={includeSecrets} label="导出包含 API Key" onChange={setIncludeSecrets} />
+      <SettingGroup title={t.configurationManagement}>
+        <SettingRow label={t.exportWithApiKeys} description={t.exportWithApiKeysDescription}>
+          <Toggle checked={includeSecrets} label={t.exportIncludesApiKeys} onChange={setIncludeSecrets} />
         </SettingRow>
         <div className="about-actions">
           <button type="button" className="secondary-button" disabled={disabled} onClick={() => onExport(includeSecrets)}>
-            <Download size={15} />导出配置
+            <Download size={15} />{t.exportConfiguration}
           </button>
           <button type="button" className="secondary-button" disabled={disabled} onClick={onImport}>
-            <Upload size={15} />导入配置
+            <Upload size={15} />{t.importConfiguration}
           </button>
         </div>
       </SettingGroup>
-      <div className="about-footnote">ScreenPilot 在本机处理设置与历史元数据，不提供账号或云端同步。</div>
+      <div className="about-footnote">{t.localOnlyFootnote}</div>
     </>
   )
 }

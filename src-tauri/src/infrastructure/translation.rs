@@ -1,4 +1,8 @@
-use crate::infrastructure::provider_http::client;
+use crate::application::state::CancellationSignal;
+use crate::infrastructure::provider_http::{
+    client, read_json_response_limited, read_text_response_limited, send_request,
+    MAX_JSON_RESPONSE_BYTES, MAX_TEXT_RESPONSE_BYTES,
+};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use md5::{Digest as Md5Digest, Md5};
@@ -23,18 +27,64 @@ pub async fn translate_with_source(
     requested_target_language: &str,
     credentials: &[String],
 ) -> Result<String, String> {
+    translate_with_source_cancelled(
+        method,
+        text,
+        requested_source_language,
+        requested_target_language,
+        credentials,
+        None,
+    )
+    .await
+}
+
+pub async fn translate_with_source_cancelled(
+    method: &str,
+    text: &str,
+    requested_source_language: &str,
+    requested_target_language: &str,
+    credentials: &[String],
+    cancellation: Option<&CancellationSignal>,
+) -> Result<String, String> {
     let source_language = resolve_source_language(text, requested_source_language);
     let target_language =
         resolve_target_language_for_source(text, requested_target_language, source_language);
     match method {
-        "google" => google(text, source_language, target_language).await,
+        "google" => google(text, source_language, target_language, cancellation).await,
         "bing" | "bing2" | "microsoft" => {
-            microsoft_edge(text, source_language, target_language).await
+            microsoft_edge(text, source_language, target_language, cancellation).await
         }
-        "yandex" => yandex(text, source_language, target_language).await,
-        "baidu" => baidu(text, source_language, target_language, credentials).await,
-        "tencent" => tencent(text, source_language, target_language, credentials).await,
-        "caiyun2" => caiyun(text, source_language, target_language, credentials).await,
+        "yandex" => yandex(text, source_language, target_language, cancellation).await,
+        "baidu" => {
+            baidu(
+                text,
+                source_language,
+                target_language,
+                credentials,
+                cancellation,
+            )
+            .await
+        }
+        "tencent" => {
+            tencent(
+                text,
+                source_language,
+                target_language,
+                credentials,
+                cancellation,
+            )
+            .await
+        }
+        "caiyun2" => {
+            caiyun(
+                text,
+                source_language,
+                target_language,
+                credentials,
+                cancellation,
+            )
+            .await
+        }
         _ => Err("The selected translation method is not supported".into()),
     }
 }
@@ -46,7 +96,11 @@ pub fn resolve_source_language<'a>(text: &str, requested: &'a str) -> &'a str {
     if text.trim().is_empty() {
         return "auto";
     }
-    if text.chars().any(is_chinese_character) {
+    if text.chars().any(is_japanese_kana) {
+        "ja"
+    } else if text.chars().any(is_hangul_character) {
+        "ko"
+    } else if text.chars().any(is_chinese_character) {
         "zh-CN"
     } else if text
         .chars()
@@ -81,11 +135,34 @@ pub fn resolve_target_language<'a>(text: &str, requested: &'a str) -> &'a str {
     if requested != "auto" {
         return requested;
     }
-    if text.chars().any(is_chinese_character) {
-        "en"
-    } else {
-        "zh-CN"
+    match resolve_source_language(text, "auto") {
+        "zh-CN" => "en",
+        _ => "zh-CN",
     }
+}
+
+fn is_japanese_kana(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3041}'..='\u{3096}'
+            | '\u{309D}'..='\u{309F}'
+            | '\u{30A1}'..='\u{30FA}'
+            | '\u{30FD}'..='\u{30FF}'
+            | '\u{31F0}'..='\u{31FF}'
+            | '\u{FF66}'..='\u{FF9F}'
+            | '\u{1B000}'..='\u{1B16F}'
+    )
+}
+
+fn is_hangul_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{D7B0}'..='\u{D7FF}'
+    )
 }
 
 fn is_chinese_character(character: char) -> bool {
@@ -103,30 +180,34 @@ async fn baidu(
     source_language: &str,
     target_language: &str,
     credentials: &[String],
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
     let [app_id, secret, ..] = credentials else {
         return Err("Baidu translation App ID and secret are required".into());
     };
     let salt = Uuid::new_v4().simple().to_string();
     let sign = format!("{:x}", Md5::digest(format!("{app_id}{text}{salt}{secret}")));
-    let value = client()?
-        .post("https://fanyi-api.baidu.com/api/trans/vip/translate")
-        .form(&[
-            ("q", text),
-            ("from", provider_language(source_language)),
-            ("to", provider_language(target_language)),
-            ("appid", app_id),
-            ("salt", &salt),
-            ("sign", &sign),
-        ])
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = send_request(
+        client()?
+            .post("https://fanyi-api.baidu.com/api/trans/vip/translate")
+            .form(&[
+                ("q", text),
+                ("from", provider_language(source_language)),
+                ("to", provider_language(target_language)),
+                ("appid", app_id),
+                ("salt", &salt),
+                ("sign", &sign),
+            ]),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Baidu translation response",
+        cancellation,
+    )
+    .await?;
     if let Some(error) = value.get("error_msg").and_then(Value::as_str) {
         return Err(format!("Baidu translation failed: {error}"));
     }
@@ -146,6 +227,7 @@ async fn tencent(
     source_language: &str,
     target_language: &str,
     credentials: &[String],
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
     let [secret_id, secret_key, ..] = credentials else {
         return Err("Tencent translation Secret ID and Secret Key are required".into());
@@ -177,24 +259,27 @@ async fn tencent(
     let authorization = format!(
         "TC3-HMAC-SHA256 Credential={secret_id}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
-    let value = client()?
-        .post("https://tmt.tencentcloudapi.com")
-        .header("content-type", "application/json; charset=utf-8")
-        .header("host", "tmt.tencentcloudapi.com")
-        .header("x-tc-action", "TextTranslate")
-        .header("x-tc-version", "2018-03-21")
-        .header("x-tc-region", "ap-guangzhou")
-        .header("x-tc-timestamp", timestamp)
-        .header("authorization", authorization)
-        .body(payload)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = send_request(
+        client()?
+            .post("https://tmt.tencentcloudapi.com")
+            .header("content-type", "application/json; charset=utf-8")
+            .header("host", "tmt.tencentcloudapi.com")
+            .header("x-tc-action", "TextTranslate")
+            .header("x-tc-version", "2018-03-21")
+            .header("x-tc-region", "ap-guangzhou")
+            .header("x-tc-timestamp", timestamp)
+            .header("authorization", authorization)
+            .body(payload),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Tencent translation response",
+        cancellation,
+    )
+    .await?;
     if let Some(error) = value
         .pointer("/Response/Error/Message")
         .and_then(Value::as_str)
@@ -215,11 +300,13 @@ async fn caiyun(
     source_language: &str,
     target_language: &str,
     credentials: &[String],
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
     let Some(token) = credentials.first().filter(|value| !value.trim().is_empty()) else {
         return Err("Caiyun translation token is required".into());
     };
-    let value = client()?
+    let response = send_request(
+        client()?
         .post("https://api.interpreter.caiyunai.com/v1/translator")
         .header("x-authorization", format!("token {token}"))
         .json(&json!({
@@ -228,15 +315,17 @@ async fn caiyun(
             "request_id": Uuid::new_v4().to_string(),
             "detect": true,
             "media": "text"
-        }))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+        })),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Caiyun translation response",
+        cancellation,
+    )
+    .await?;
     let result = match value.get("target") {
         Some(Value::Array(items)) => items
             .iter()
@@ -253,27 +342,31 @@ async fn google(
     text: &str,
     source_language: &str,
     target_language: &str,
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
     let target = language_code(target_language);
-    let value = client()?
-        .get("https://translate.googleapis.com/translate_a/single")
-        .query(&[
-            ("client", "gtx"),
-            ("sl", language_code(source_language)),
-            ("tl", target),
-            ("dt", "t"),
-            ("dj", "1"),
-            ("source", "input"),
-            ("q", text),
-        ])
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = send_request(
+        client()?
+            .get("https://translate.googleapis.com/translate_a/single")
+            .query(&[
+                ("client", "gtx"),
+                ("sl", language_code(source_language)),
+                ("tl", target),
+                ("dt", "t"),
+                ("dj", "1"),
+                ("source", "input"),
+                ("q", text),
+            ]),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Google translation response",
+        cancellation,
+    )
+    .await?;
     let result = value
         .get("sentences")
         .and_then(Value::as_array)
@@ -288,33 +381,39 @@ async fn microsoft_edge(
     text: &str,
     source_language: &str,
     target_language: &str,
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
-    let token = client()?
-        .get("https://edge.microsoft.com/translate/auth")
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .text()
-        .await
-        .map_err(|error| error.to_string())?;
-    let value = client()?
-        .post("https://api-edge.cognitive.microsofttranslator.com/translate")
-        .query(&microsoft_translation_query(
-            source_language,
-            target_language,
-        ))
-        .bearer_auth(token.trim())
-        .json(&json!([{"Text": text}]))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let token_response = send_request(
+        client()?.get("https://edge.microsoft.com/translate/auth"),
+        cancellation,
+    )
+    .await?;
+    let token = read_text_response_limited(
+        token_response,
+        MAX_TEXT_RESPONSE_BYTES,
+        "Microsoft translation auth response",
+        cancellation,
+    )
+    .await?;
+    let response = send_request(
+        client()?
+            .post("https://api-edge.cognitive.microsofttranslator.com/translate")
+            .query(&microsoft_translation_query(
+                source_language,
+                target_language,
+            ))
+            .bearer_auth(token.trim())
+            .json(&json!([{"Text": text}])),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Microsoft translation response",
+        cancellation,
+    )
+    .await?;
     let result = value
         .pointer("/0/translations/0/text")
         .and_then(Value::as_str)
@@ -327,20 +426,24 @@ async fn yandex(
     text: &str,
     source_language: &str,
     target_language: &str,
+    cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
     let language_pair = yandex_language_pair(source_language, target_language);
-    let value = client()?
-        .post("https://translate.yandex.net/api/v1/tr.json/translate")
-        .query(&[("srv", "android"), ("format", "text")])
-        .form(&[("text", text), ("lang", language_pair.as_str())])
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = send_request(
+        client()?
+            .post("https://translate.yandex.net/api/v1/tr.json/translate")
+            .query(&[("srv", "android"), ("format", "text")])
+            .form(&[("text", text), ("lang", language_pair.as_str())]),
+        cancellation,
+    )
+    .await?;
+    let value = read_json_response_limited::<Value>(
+        response,
+        MAX_JSON_RESPONSE_BYTES,
+        "Yandex translation response",
+        cancellation,
+    )
+    .await?;
     let result = value
         .get("text")
         .and_then(Value::as_array)
@@ -431,8 +534,10 @@ fn non_empty(value: String) -> Result<String, String> {
 mod tests {
     use super::{
         microsoft_translation_query, provider_language, resolve_source_language,
-        resolve_target_language, resolve_target_language_for_source, yandex_language_pair,
+        resolve_target_language, resolve_target_language_for_source,
+        translate_with_source_cancelled, yandex_language_pair,
     };
+    use crate::application::state::CancellationSignal;
 
     #[test]
     fn automatic_target_translates_chinese_to_english_and_other_text_to_chinese() {
@@ -446,13 +551,17 @@ mod tests {
     }
 
     #[test]
-    fn automatic_source_identifies_english_and_han_text() {
+    fn automatic_source_identifies_supported_scripts() {
         assert_eq!(resolve_source_language("Hello, ScreenPilot!", "auto"), "en");
         assert_eq!(
             resolve_source_language("你好，ScreenPilot", "auto"),
             "zh-CN"
         );
-        assert_eq!(resolve_source_language("こんにちは", "auto"), "auto");
+        assert_eq!(resolve_source_language("こんにちは", "auto"), "ja");
+        assert_eq!(resolve_source_language("今日は良い天気です", "auto"), "ja");
+        assert_eq!(resolve_source_language("日本語を翻訳する", "auto"), "ja");
+        assert_eq!(resolve_source_language("한국어를 번역합니다", "auto"), "ko");
+        assert_eq!(resolve_source_language("中文・测试", "auto"), "zh-CN");
         assert_eq!(resolve_source_language("12345", "auto"), "auto");
         assert_eq!(resolve_source_language("", "auto"), "auto");
         assert_eq!(resolve_source_language("hello", "ja"), "ja");
@@ -484,6 +593,11 @@ mod tests {
             resolve_target_language_for_source("한국어", "auto", "ko"),
             "zh-CN"
         );
+        assert_eq!(
+            resolve_target_language("今日は良い天気です", "auto"),
+            "zh-CN"
+        );
+        assert_eq!(resolve_target_language("한국어", "auto"), "zh-CN");
     }
 
     #[test]
@@ -503,5 +617,17 @@ mod tests {
         let explicit = microsoft_translation_query("en", "zh-CN");
         assert!(explicit.contains(&("from", "en")));
         assert!(explicit.contains(&("to", "zh-Hans")));
+    }
+
+    #[tokio::test]
+    async fn cancelled_translation_returns_before_starting_remote_work() {
+        let signal = CancellationSignal::new();
+        signal.cancel();
+
+        assert_eq!(
+            translate_with_source_cancelled("google", "hello", "en", "zh-CN", &[], Some(&signal),)
+                .await,
+            Err("Request cancelled".into())
+        );
     }
 }

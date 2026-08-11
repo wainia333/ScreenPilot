@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSettings, SettingsExport } from '../features/settings/types'
+import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from '../features/settings/types'
 
 export type WindowRoute = 'settings' | 'translator' | 'prompt-optimizer' | 'vision'
 
@@ -53,18 +53,21 @@ export type Unlisten = () => void
 export type DesktopPort = {
   loadSettings(): Promise<AppSettings>
   takeStartupNotice(): Promise<string | null>
+  acknowledgeStartupNotice(): Promise<boolean>
   saveSettings(settings: AppSettings): Promise<SettingsSaveResult>
   updateTranslationSettings(patch: TranslationSettingsPatch): Promise<void>
   exportSettings(includeSecrets: boolean): Promise<boolean>
   importSettings(): Promise<SettingsExport | null>
   pickDirectory(): Promise<string | null>
   saveProviderKeyChanges(changes: ProviderKeyChanges): Promise<void>
+  saveImportedSecrets(secrets: SettingsSecrets, providerDeletionIds: string[]): Promise<void>
   setProviderKeys(providerId: string, keys: string[]): Promise<void>
   providerKeyCount(providerId: string): Promise<number>
   deleteProviderKeys(providerId: string): Promise<void>
   fetchProviderModels(provider: ProviderSettings, keys?: string[]): Promise<string[]>
   testProvider(provider: ProviderSettings, keys?: string[]): Promise<ProviderConnectionResult>
   translate(request: TranslationRequest): Promise<TranslationResult>
+  cancelTranslation(generation: number): Promise<boolean>
   optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult>
   commitText(text: string, autoPaste: boolean): Promise<void>
   takeTranslatorSelection(): Promise<string>
