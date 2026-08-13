@@ -3521,7 +3521,7 @@ test('Vision markdown links open externally without navigating the app webview',
 })
 
 test('screenshot translation keeps editable source and nonblank thumbnail history', async ({ page }) => {
-  await installVisionTauriMock(page)
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'google')
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto('/?window=vision#vision?mode=translate')
   await waitForVisionSelection(page)
@@ -3624,6 +3624,78 @@ test('screenshot translation keeps editable source and nonblank thumbnail histor
     expect(style.height).toBeCloseTo(24, 0)
     await expectNeutralSelectFocus(select)
   }
+  await expect(translationEngine).toHaveValue('google')
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationSettingsDelayMs: number }
+    }).__SCREENPILOT_TEST__
+    state.translationSettingsDelayMs = 500
+  })
+  await translationEngine.click()
+  await page.keyboard.press('m')
+  await page.keyboard.press('Enter')
+  await expect(translationEngine).toHaveValue('microsoft', { timeout: 500 })
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationMethodUpdates: string[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationMethodUpdates
+  })).toEqual(['microsoft'])
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: { method: string }[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.at(-1)?.method
+  })).toBe('microsoft')
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        translationSettingsDelayMs: number
+        translationSettingsFailuresRemaining: number
+      }
+    }).__SCREENPILOT_TEST__
+    state.translationSettingsDelayMs = 0
+    state.translationSettingsFailuresRemaining = 1
+  })
+  await translationEngine.selectOption('yandex')
+  await expect(translationEngine).toHaveValue('microsoft')
+  await expect(page.getByRole('alert')).toContainText('synthetic translation settings failure')
+  await expect(translationEngine).toBeEnabled()
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationResponseDelayMs: number }
+    }).__SCREENPILOT_TEST__
+    state.translationResponseDelayMs = 1_500
+  })
+  await translationEngine.selectOption('bing')
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationMethodUpdates: string[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationMethodUpdates.at(-1)
+  })).toBe('bing')
+  await expect(translationEngine).toBeEnabled({ timeout: 500 })
+  await translationEngine.selectOption('microsoft')
+  await expect(translationEngine).toHaveValue('microsoft')
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationMethodUpdates: string[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationMethodUpdates.at(-1)
+  })).toBe('microsoft')
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationRequests: { method: string }[] }
+    }).__SCREENPILOT_TEST__
+    return state.translationRequests.at(-1)?.method
+  })).toBe('microsoft')
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('vision:reset')))
+  await waitForVisionSelection(page)
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.locator('select[data-screenpilot-translation-method="true"]')).toHaveValue('microsoft')
   await sourceLanguage.selectOption('en')
   await expect(page.getByText(/编辑后译文\(auto\)：ScreenPilot Visual Test/)).toBeVisible()
   const sourceLanguageRequest = await page.evaluate(() => {

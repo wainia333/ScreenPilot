@@ -4,5 +4,6 @@ pub mod images;
 pub mod ocr;
 pub mod provider_http;
 pub mod settings_store;
+pub mod speech;
 pub mod sse;
 pub mod translation;

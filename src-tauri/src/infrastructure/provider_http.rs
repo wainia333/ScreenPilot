@@ -11,7 +11,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
-pub const MAX_TEXT_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AI_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
@@ -140,29 +139,6 @@ pub async fn read_json_response_limited<T: DeserializeOwned>(
         return Err(format!("{label} returned HTTP {}", status.as_u16()));
     }
     read_json_limited(response, limit, label, cancellation).await
-}
-
-pub async fn read_text_response_limited(
-    response: reqwest::Response,
-    limit: usize,
-    label: &str,
-    cancellation: Option<&CancellationSignal>,
-) -> Result<String, String> {
-    let status = response.status();
-    if !status.is_success() {
-        let _ = read_response_bytes_limited(
-            response,
-            MAX_ERROR_BODY_BYTES,
-            "Remote error response",
-            cancellation,
-        )
-        .await;
-        if cancellation.is_some_and(CancellationSignal::is_cancelled) {
-            return Err("Request cancelled".into());
-        }
-        return Err(format!("{label} returned HTTP {}", status.as_u16()));
-    }
-    read_text_limited(response, limit, label, cancellation).await
 }
 
 pub async fn fetch_models(

@@ -8,7 +8,7 @@ use crate::infrastructure::ai_http::{
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::sse::SseDelta;
-use crate::infrastructure::{ocr, translation};
+use crate::infrastructure::{ocr, speech, translation};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -2697,93 +2697,8 @@ pub async fn synthesize_speech(app: AppHandle, text: String) -> Value {
     }
 }
 
-async fn synthesize_speech_data(app: AppHandle, text: String) -> Result<String, String> {
-    if text.trim().is_empty() {
-        return Err("Speech text is empty".into());
-    }
-    let path = app
-        .state::<AppState>()
-        .cache_directory
-        .clone()
-        .join(format!("screenpilot-speech-{}.wav", Uuid::new_v4()));
-    std::fs::create_dir_all(&app.state::<AppState>().cache_directory)
-        .map_err(|error| error.to_string())?;
-    let spoken = text.chars().take(10_000).collect::<String>();
-    let generated = tokio::task::spawn_blocking(move || {
-        generate_speech_wave(path, |generated| {
-            use std::os::windows::process::CommandExt;
-            let script = "$ErrorActionPreference='Stop';$voice=$null;try{$voice=New-Object System.Speech.Synthesis.SpeechSynthesizer;$voice.SetOutputToWaveFile($env:SCREENPILOT_SPEECH_PATH);$voice.Speak($env:SCREENPILOT_SPEECH_TEXT)}finally{if($null -ne $voice){$voice.Dispose()}}";
-            let status = std::process::Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-Command",
-                    script,
-                ])
-                .env("SCREENPILOT_SPEECH_PATH", generated)
-                .env("SCREENPILOT_SPEECH_TEXT", spoken)
-                .creation_flags(0x08000000)
-                .status()
-                .map_err(|error| error.to_string())?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Speech synthesis exited with code {:?}",
-                    status.code()
-                ))
-            }
-        })
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    encode_speech_wave(generated, |path| std::fs::read(path))
-}
-
-struct TemporarySpeechWave {
-    path: PathBuf,
-}
-
-impl TemporarySpeechWave {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TemporarySpeechWave {
-    fn drop(&mut self) {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!(
-                "Failed to clean up temporary speech wave file {}: {error}",
-                self.path.display()
-            ),
-        }
-    }
-}
-
-fn generate_speech_wave(
-    path: PathBuf,
-    generate: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<TemporarySpeechWave, String> {
-    let generated = TemporarySpeechWave::new(path);
-    generate(generated.path())?;
-    Ok(generated)
-}
-
-fn encode_speech_wave(
-    generated: TemporarySpeechWave,
-    read: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
-) -> Result<String, String> {
-    let bytes = read(generated.path()).map_err(|error| error.to_string())?;
-    Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(bytes)))
+async fn synthesize_speech_data(_app: AppHandle, text: String) -> Result<String, String> {
+    speech::synthesize_data_url(&text).await
 }
 
 #[tauri::command]
@@ -2800,102 +2715,6 @@ pub fn permissions_status() -> PermissionStatus {
 mod tests {
     use super::*;
     use std::cell::Cell;
-
-    #[test]
-    fn temporary_speech_wave_is_removed_after_successful_encoding() {
-        let root = tempfile::tempdir().expect("temporary speech root");
-        let path = root.path().join("success.wav");
-        let generated = generate_speech_wave(path.clone(), |generated| {
-            std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())
-        })
-        .expect("generate speech wave");
-        assert!(path.exists());
-
-        assert_eq!(
-            encode_speech_wave(generated, |generated| std::fs::read(generated))
-                .expect("encode speech wave"),
-            "data:audio/wav;base64,UklGRg=="
-        );
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn temporary_speech_wave_is_removed_when_generation_fails_after_writing() {
-        let root = tempfile::tempdir().expect("temporary speech root");
-        let path = root.path().join("generation-failure.wav");
-
-        assert_eq!(
-            generate_speech_wave(path.clone(), |generated| {
-                std::fs::write(generated, b"partial").map_err(|error| error.to_string())?;
-                Err("synthetic synthesis failure".into())
-            })
-            .err(),
-            Some("synthetic synthesis failure".into())
-        );
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn temporary_speech_wave_is_removed_when_reading_fails() {
-        let root = tempfile::tempdir().expect("temporary speech root");
-        let path = root.path().join("read-failure.wav");
-        let generated = generate_speech_wave(path.clone(), |generated| {
-            std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())
-        })
-        .expect("generate speech wave");
-
-        let error = encode_speech_wave(generated, |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "synthetic read failure",
-            ))
-        })
-        .expect_err("reading must fail");
-        assert!(error.contains("synthetic read failure"));
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn detached_speech_generation_cleans_up_after_the_caller_is_cancelled() {
-        use std::sync::mpsc;
-
-        let root = tempfile::tempdir().expect("temporary speech root");
-        let path = root.path().join("cancelled.wav");
-        let task_path = path.clone();
-        let (created_sender, created_receiver) = mpsc::channel();
-        let (release_sender, release_receiver) = mpsc::channel();
-        let (generated_sender, generated_receiver) = mpsc::channel();
-        let task = tokio::task::spawn_blocking(move || {
-            generate_speech_wave(task_path, |generated| {
-                std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())?;
-                created_sender.send(()).map_err(|error| error.to_string())?;
-                release_receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .map_err(|error| error.to_string())?;
-                generated_sender
-                    .send(())
-                    .map_err(|error| error.to_string())?;
-                Ok(())
-            })
-        });
-        created_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("speech task did not create its wave file");
-        assert!(path.exists());
-
-        // Dropping the join handle models cancellation of the command future.
-        // spawn_blocking keeps running, so the cleanup guard must stay with it.
-        drop(task);
-        release_sender.send(()).expect("release speech task");
-        generated_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("detached speech task did not finish generation");
-        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
-        while path.exists() && Instant::now() < cleanup_deadline {
-            std::thread::yield_now();
-        }
-        assert!(!path.exists());
-    }
 
     #[test]
     fn vision_closing_notification_is_stable_and_emit_failures_do_not_block_cleanup() {

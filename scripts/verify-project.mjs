@@ -89,6 +89,11 @@ for (const call of ['crate::native_freeze::show', 'crate::native_freeze::capture
 const lifecycleSource = readFileSync(resolve(root, 'src-tauri/src/application/lifecycle.rs'), 'utf8')
 const visionSource = readFileSync(resolve(root, 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
 const visionAdapterSource = readFileSync(resolve(root, 'src/features/vision/reference-vision.tsx'), 'utf8')
+const tauriConfig = JSON.parse(readFileSync(resolve(root, 'src-tauri/tauri.conf.json'), 'utf8'))
+const contentSecurityPolicy = tauriConfig?.app?.security?.csp
+if (typeof contentSecurityPolicy !== 'string' || !contentSecurityPolicy.includes("media-src 'self' data: blob:")) {
+  failures.push('Tauri CSP 未允许 OCR 朗读使用 data/blob 音频源')
+}
 const promptBarStart = visionSource.indexOf('{showBar &&')
 const promptBarEnd = visionSource.indexOf('{showTranslateCard &&', promptBarStart)
 const promptBarBody = promptBarStart >= 0 && promptBarEnd > promptBarStart

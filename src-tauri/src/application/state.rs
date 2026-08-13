@@ -51,7 +51,6 @@ pub struct AppState {
     pub store: SettingsStore,
     pub images: ImageStore,
     pub webview_data_directory: PathBuf,
-    pub cache_directory: PathBuf,
     pub vision_busy: AtomicBool,
     reference_vision: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
@@ -89,14 +88,13 @@ impl AppState {
         images: ImageStore,
         settings: AppSettings,
         webview_data_directory: PathBuf,
-        cache_directory: PathBuf,
+        _cache_directory: PathBuf,
     ) -> Self {
         Self {
             settings: RwLock::new(settings),
             store,
             images,
             webview_data_directory,
-            cache_directory,
             vision_busy: AtomicBool::new(false),
             reference_vision: Mutex::new(ReferenceVisionState {
                 generation: 0,

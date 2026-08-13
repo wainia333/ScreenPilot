@@ -15,8 +15,9 @@ export async function installVisionTauriMock(
   archiveWarning = '',
   directTranslate = false,
   listenerFailures: Partial<Record<'vision-stream' | 'vision-translate-stream', number>> = {},
+  initialTranslationMethod: 'ai' | 'google' | 'baidu' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft' = 'microsoft',
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
@@ -37,7 +38,11 @@ export async function installVisionTauriMock(
     const floatingInset = floatingPadding * 2
     const visionTestState = {
       showCount: 0,
-      translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string }[],
+      translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string; method: string }[],
+      translationMethodUpdates: [] as string[],
+      translationSettingsDelayMs: 0,
+      translationSettingsFailuresRemaining: 0,
+      translationResponseDelayMs: 0,
       externalUrls: [] as string[],
       answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
       activeVisionImageId: '',
@@ -114,7 +119,7 @@ export async function installVisionTauriMock(
         model: 'test-model',
         ocrAiEnabled: true,
         ocrMethod: 'chaoxing',
-        translationMethod: 'microsoft',
+        translationMethod: initialMethod,
         translationAiEnabled: true,
         translateProviderId: 'test-provider',
         translateModel: 'test-model',
@@ -269,7 +274,18 @@ export async function installVisionTauriMock(
         return structuredClone(settings)
       }
       if (command === 'screenshot_translation_settings_update') {
-        Object.assign(settings.screenshotTranslation, args.patch)
+        const patch = args.patch as Partial<typeof settings.screenshotTranslation>
+        if (typeof patch.translationMethod === 'string') {
+          visionTestState.translationMethodUpdates.push(patch.translationMethod)
+        }
+        if (visionTestState.translationSettingsDelayMs > 0) {
+          await new Promise(resolve => window.setTimeout(resolve, visionTestState.translationSettingsDelayMs))
+        }
+        if (visionTestState.translationSettingsFailuresRemaining > 0) {
+          visionTestState.translationSettingsFailuresRemaining -= 1
+          throw new Error('synthetic translation settings failure')
+        }
+        Object.assign(settings.screenshotTranslation, patch)
         return structuredClone(settings)
       }
       if (command === 'take_vision_selection') return ''
@@ -347,7 +363,15 @@ export async function installVisionTauriMock(
         const sourceLanguage = requestedSource || settings.screenshotTranslation.sourceLanguage
         const targetLanguage = requestedTarget || settings.screenshotTranslation.targetLanguage
         const text = String(args.text)
-        visionTestState.translationRequests.push({ text, sourceLanguage, targetLanguage })
+        visionTestState.translationRequests.push({
+          text,
+          sourceLanguage,
+          targetLanguage,
+          method: settings.screenshotTranslation.translationMethod,
+        })
+        if (visionTestState.translationResponseDelayMs > 0) {
+          await new Promise(resolve => window.setTimeout(resolve, visionTestState.translationResponseDelayMs))
+        }
         return { success: true, translated: `编辑后译文(${targetLanguage})：${text}` }
       }
       if (command === 'vision_optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
@@ -555,5 +579,6 @@ export async function installVisionTauriMock(
     archiveWarningText: archiveWarning,
     directTranslateEnabled: directTranslate,
     initialListenerFailures: listenerFailures,
+    initialMethod: initialTranslationMethod,
   })
 }

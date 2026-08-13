@@ -1,7 +1,6 @@
 use crate::application::state::CancellationSignal;
 use crate::infrastructure::provider_http::{
-    client, read_json_response_limited, read_text_response_limited, send_request,
-    MAX_JSON_RESPONSE_BYTES, MAX_TEXT_RESPONSE_BYTES,
+    client, read_json_response_limited, send_request, MAX_JSON_RESPONSE_BYTES,
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -383,27 +382,31 @@ async fn microsoft_edge(
     target_language: &str,
     cancellation: Option<&CancellationSignal>,
 ) -> Result<String, String> {
-    let token_response = send_request(
-        client()?.get("https://edge.microsoft.com/translate/auth"),
+    microsoft_edge_at(
+        "https://edge.microsoft.com/translate/translatetext",
+        text,
+        source_language,
+        target_language,
         cancellation,
     )
-    .await?;
-    let token = read_text_response_limited(
-        token_response,
-        MAX_TEXT_RESPONSE_BYTES,
-        "Microsoft translation auth response",
-        cancellation,
-    )
-    .await?;
+    .await
+}
+
+async fn microsoft_edge_at(
+    endpoint: &str,
+    text: &str,
+    source_language: &str,
+    target_language: &str,
+    cancellation: Option<&CancellationSignal>,
+) -> Result<String, String> {
     let response = send_request(
         client()?
-            .post("https://api-edge.cognitive.microsofttranslator.com/translate")
+            .post(endpoint)
             .query(&microsoft_translation_query(
                 source_language,
                 target_language,
             ))
-            .bearer_auth(token.trim())
-            .json(&json!([{"Text": text}])),
+            .json(&json!([text])),
         cancellation,
     )
     .await?;
@@ -415,10 +418,12 @@ async fn microsoft_edge(
     )
     .await?;
     let result = value
-        .pointer("/0/translations/0/text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.pointer("/translations/0/text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
     non_empty(result)
 }
 
@@ -468,15 +473,18 @@ fn microsoft_translation_query<'a>(
     source_language: &'a str,
     target_language: &'a str,
 ) -> Vec<(&'static str, &'a str)> {
-    let mut query = vec![
-        ("api-version", "3.0"),
+    vec![
+        (
+            "from",
+            if source_language == "auto" {
+                ""
+            } else {
+                language_code(source_language)
+            },
+        ),
         ("to", language_code(target_language)),
-        ("includeSentenceLength", "true"),
-    ];
-    if source_language != "auto" {
-        query.push(("from", language_code(source_language)));
-    }
-    query
+        ("isEnterpriseClient", "false"),
+    ]
 }
 
 fn yandex_language_pair(source_language: &str, target_language: &str) -> String {
@@ -533,11 +541,14 @@ fn non_empty(value: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        microsoft_translation_query, provider_language, resolve_source_language,
+        microsoft_edge_at, microsoft_translation_query, provider_language, resolve_source_language,
         resolve_target_language, resolve_target_language_for_source,
         translate_with_source_cancelled, yandex_language_pair,
     };
     use crate::application::state::CancellationSignal;
+    use serde_json::json;
+    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn automatic_target_translates_chinese_to_english_and_other_text_to_chinese() {
@@ -610,13 +621,52 @@ mod tests {
     }
 
     #[test]
-    fn microsoft_omits_automatic_source_and_preserves_explicit_source() {
+    fn microsoft_sends_empty_automatic_source_and_preserves_explicit_source() {
         let automatic = microsoft_translation_query("auto", "zh-CN");
-        assert!(!automatic.iter().any(|(name, _)| *name == "from"));
+        assert!(automatic.contains(&("from", "")));
         assert!(automatic.contains(&("to", "zh-Hans")));
+        assert!(automatic.contains(&("isEnterpriseClient", "false")));
         let explicit = microsoft_translation_query("en", "zh-CN");
         assert!(explicit.contains(&("from", "en")));
         assert!(explicit.contains(&("to", "zh-Hans")));
+    }
+
+    #[tokio::test]
+    async fn microsoft_uses_the_unauthenticated_edge_contract_and_joins_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/translate/translatetext"))
+            .and(query_param("from", ""))
+            .and(query_param("to", "zh-Hans"))
+            .and(query_param("isEnterpriseClient", "false"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!(["Hello world\nGood morning"])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"translations": [{"text": "你好，世界", "to": "zh-Hans"}]},
+                {"translations": [{"text": "早上好", "to": "zh-Hans"}]}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            microsoft_edge_at(
+                &format!("{}/translate/translatetext", server.uri()),
+                "Hello world\nGood morning",
+                "auto",
+                "zh-CN",
+                None,
+            )
+            .await
+            .expect("Microsoft translation"),
+            "你好，世界\n早上好"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded Microsoft request");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("authorization").is_none());
     }
 
     #[tokio::test]

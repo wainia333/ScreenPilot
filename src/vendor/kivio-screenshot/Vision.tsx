@@ -1265,6 +1265,9 @@ export default function Vision() {
   const [translateMethod, setTranslateMethod] = useState<ScreenshotTranslationMethod>('ai')
   const [ocrMethodSwitching, setOcrMethodSwitching] = useState(false)
   const [translationMethodSwitching, setTranslationMethodSwitching] = useState(false)
+  // Keep an immediate lock because native select interaction can emit both
+  // `input` and `change` for one choice before React commits a rerender.
+  const translationMethodSwitchingRef = useRef(false)
   const [translateNow, setTranslateNow] = useState(() => Date.now())
   const translateStartRef = useRef<number | null>(null)
   const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -2985,7 +2988,7 @@ export default function Vision() {
   const handleOcrMethodSelect = useCallback(async (value: string) => {
     const method = value as ScreenshotOcrMethod
     if (method === translateOcrMethod) return
-    if (ocrMethodSwitching || translationMethodSwitching) return
+    if (ocrMethodSwitching || translationMethodSwitching || translationMethodSwitchingRef.current) return
     stopSpeechPlayback()
     setOcrMethodSwitching(true)
     try {
@@ -3056,49 +3059,55 @@ export default function Vision() {
   const handleTranslationMethodSelect = useCallback(async (value: string) => {
     const method = value as ScreenshotTranslationMethod
     if (method === translateMethod) return
-    if (ocrMethodSwitching || translationMethodSwitching) return
+    if (ocrMethodSwitching || translationMethodSwitching || translationMethodSwitchingRef.current) return
+    const previousMethod = translateMethod
     stopSpeechPlayback()
+    setTranslateMethod(method)
+    translationMethodSwitchingRef.current = true
     setTranslationMethodSwitching(true)
+    let settings: Settings
     try {
       await api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
       ignoreTranslateStreamRef.current = true
-      const settings = await saveScreenshotTranslationSettings({ translationMethod: method })
-      setTranslateMethod(method)
-
-      if (translateEditDebounceRef.current) {
-        clearTimeout(translateEditDebounceRef.current)
-        translateEditDebounceRef.current = null
-      }
-      translateEditSeqRef.current++
-      translateStartRef.current = null
-      setTranslateText('')
-      setTranslateError('')
-      setTranslateDurationMs(null)
-      setTranslateRetranslating(false)
-
-      const configError = translationConfigError(settings, method, lang)
-      if (configError) {
-        setTranslateError(configError)
-        setStage('translated')
-        return
-      }
-
-      const source = translateOriginalRef.current
-      if (source.trim()) {
-        await runTranslateTextNow(source)
-      } else if (imageIdRef.current && !translateOriginalError) {
-        await runTranslate(imageIdRef.current)
-      } else {
-        setStage('translated')
-      }
+      settings = await saveScreenshotTranslationSettings({ translationMethod: method })
     } catch (err) {
+      setTranslateMethod(previousMethod)
       setTranslateError(err instanceof Error ? err.message : String(err))
       setTranslateText('')
       setTranslateRetranslating(false)
       translateStartRef.current = null
       setStage('translated')
+      return
     } finally {
+      translationMethodSwitchingRef.current = false
       setTranslationMethodSwitching(false)
+    }
+
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    translateEditSeqRef.current++
+    translateStartRef.current = null
+    setTranslateText('')
+    setTranslateError('')
+    setTranslateDurationMs(null)
+    setTranslateRetranslating(false)
+
+    const configError = translationConfigError(settings, method, lang)
+    if (configError) {
+      setTranslateError(configError)
+      setStage('translated')
+      return
+    }
+
+    const source = translateOriginalRef.current
+    if (source.trim()) {
+      await runTranslateTextNow(source)
+    } else if (imageIdRef.current && !translateOriginalError) {
+      await runTranslate(imageIdRef.current)
+    } else {
+      setStage('translated')
     }
   }, [
     lang,
@@ -5606,6 +5615,7 @@ export default function Vision() {
                   data-screenpilot-translation-method="true"
                   value={translateMethod}
                   disabled={methodSwitching}
+                  onInput={(e) => void handleTranslationMethodSelect(e.currentTarget.value)}
                   onChange={(e) => void handleTranslationMethodSelect(e.target.value)}
                   title={t.screenshotTranslationMethod}
                   aria-label={t.screenshotTranslationMethod}
