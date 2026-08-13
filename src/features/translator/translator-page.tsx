@@ -59,7 +59,7 @@ function translatorRecoveryCopy(language: AppSettings['language']) {
 }
 
 const historyKey = 'screenpilot:translator-history'
-export const TRANSLATOR_INPUT_DEBOUNCE_MS = 700
+export const TRANSLATOR_INPUT_DEBOUNCE_MS = 1500
 const goldenSectionRatio = (3 - Math.sqrt(5)) / 2
 function translationRequestKey(input: string, settings: AppSettings): string {
   return JSON.stringify([
@@ -88,6 +88,7 @@ export function TranslatorPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
+  const [outputInput, setOutputInput] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -235,6 +236,7 @@ export function TranslatorPage() {
       roundId.current = crypto.randomUUID()
       setInput(selected)
       setOutput('')
+      setOutputInput(null)
       setError(null)
       setLoading(false)
       copyRequest.current += 1
@@ -285,6 +287,7 @@ export function TranslatorPage() {
       roundId.current = crypto.randomUUID()
       setInput('')
       setOutput('')
+      setOutputInput(null)
       setError(null)
       setLoading(false)
       copyRequest.current += 1
@@ -400,6 +403,7 @@ export function TranslatorPage() {
       }).then((result) => {
         if (result.generation !== activeGeneration.current) return
         setOutput(result.text)
+        setOutputInput(input)
         copyRequest.current += 1
         setCopied(false)
         setCopyError(null)
@@ -429,6 +433,7 @@ export function TranslatorPage() {
     immediateRequest.current = translationRequestKey(input, next)
     cancelTranslation()
     setOutput('')
+    setOutputInput(null)
     setLoading(false)
     setError(null)
     copyRequest.current += 1
@@ -445,7 +450,10 @@ export function TranslatorPage() {
     immediateRequest.current = null
     skipNextInputRequest.current = null
     setInput(value)
-    setOutput('')
+    if (value.trim().length === 0) {
+      setOutput('')
+    }
+    setOutputInput(null)
     setLoading(false)
     setError(null)
     copyRequest.current += 1
@@ -456,7 +464,7 @@ export function TranslatorPage() {
     }
   }
   const commit = async () => {
-    const text = output.trim().length > 0 ? output : input
+    const text = outputInput === input && output.trim().length > 0 ? output : input
     if (text.trim().length === 0) return
     cancelTranslation()
     setError(null)
@@ -474,6 +482,7 @@ export function TranslatorPage() {
     skipNextInputRequest.current = item.input === input ? null : item.input
     setInput(item.input)
     setOutput(item.output)
+    setOutputInput(item.input)
     setError(null)
     setLoading(false)
     copyRequest.current += 1
@@ -619,7 +628,7 @@ export function TranslatorPage() {
               type="button"
               className="ocr-section-button"
               aria-label={t.copyTranslation}
-              disabled={output.length === 0}
+              disabled={output.length === 0 || outputInput !== input}
               onClick={() => void copyOutput()}
             >
               {copied ? <Check size={15} /> : <Clipboard size={15} />}
@@ -649,9 +658,9 @@ export function TranslatorPage() {
               {availableMethods.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
             </select>
           </div>
-          {loading ? <div className="ocr-result-skeleton"><span /><span /><span /></div> : null}
+          {loading && output.length === 0 ? <div className="ocr-result-skeleton"><span /><span /><span /></div> : null}
           {!loading && error !== null ? <div className="ocr-result-error" role="alert">{error}</div> : null}
-          {!loading && error === null ? (
+          {error === null && (!loading || output.length > 0) ? (
             <textarea
               id="translator-output"
               aria-label={t.translatedText}
@@ -660,6 +669,7 @@ export function TranslatorPage() {
               onChange={(event) => {
                 copyRequest.current += 1
                 setOutput(event.target.value)
+                setOutputInput(input)
                 setCopied(false)
                 setCopyError(null)
               }}

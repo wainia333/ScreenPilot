@@ -233,8 +233,9 @@ describe('TranslatorPage', () => {
     expect(document.documentElement).toHaveAttribute('lang', 'en')
   })
 
-  it('waits 700ms, ignores IME submit and commits after composition ends', async () => {
+  it('waits 1500ms, ignores IME submit and commits after composition ends', async () => {
     vi.useFakeTimers()
+    expect(TRANSLATOR_INPUT_DEBOUNCE_MS).toBe(1500)
     const desktop = new RecordingDesktop()
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
@@ -411,7 +412,45 @@ describe('TranslatorPage', () => {
     expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('latest result')
   })
 
-  it('invalidates a translated result as soon as the source changes', async () => {
+  it('keeps the previous translation visible through debounce and request latency', async () => {
+    vi.useFakeTimers()
+    const desktop = new DeferredTranslationDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const input = screen.getByLabelText('原文')
+
+    fireEvent.change(input, { target: { value: 'first source' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.pending).toHaveLength(1)
+    await act(async () => {
+      desktop.pending[0]?.resolve({ generation: desktop.pending[0].request.generation, text: 'first result' })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('first result')
+
+    fireEvent.change(input, { target: { value: 'latest source' } })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('first result')
+    await act(() => vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS - 1))
+    expect(desktop.pending).toHaveLength(1)
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('first result')
+
+    await act(async () => {
+      vi.advanceTimersByTime(1)
+      await Promise.resolve()
+    })
+    expect(desktop.pending).toHaveLength(2)
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('first result')
+    await act(async () => {
+      desktop.pending[1]?.resolve({ generation: desktop.pending[1].request.generation, text: 'latest result' })
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('latest result')
+  })
+
+  it('uses the latest source when committing during a pending retranslation', async () => {
     vi.useFakeTimers()
     const desktop = new RecordingDesktop()
     render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
@@ -425,7 +464,7 @@ describe('TranslatorPage', () => {
     expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('translated:first source')
 
     fireEvent.change(input, { target: { value: 'latest source' } })
-    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('')
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('translated:first source')
     expect(screen.getByRole('button', { name: '复制译文' })).toBeDisabled()
     await act(async () => {
       fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })

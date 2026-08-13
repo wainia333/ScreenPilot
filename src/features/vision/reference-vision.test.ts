@@ -20,6 +20,13 @@ describe('Vision citation links', () => {
   })
 })
 
+describe('Vision translation edit debounce', () => {
+  it('keeps the fixed 1500ms edit debounce in the vendored surface', () => {
+    expect(visionSource).toContain('scheduleVisionTranslationEdit')
+    expect(visionSource).toContain("from '../../features/vision/translation-edit-debounce'")
+  })
+})
+
 describe('Vision prompt input layout', () => {
   it.each([
     ['Chinese', '这是一段很长的中文输入内容，用于验证光标继续输入时不会被右侧操作按钮遮挡。'],

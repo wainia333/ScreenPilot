@@ -37,9 +37,14 @@ import {
   visionSpeechControlLabel,
   type VisionSpeechTarget as SpeechTarget,
 } from '../../features/vision/speech-feedback'
+import {
+  scheduleVisionTranslationEdit,
+} from '../../features/vision/translation-edit-debounce'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
+
+export { VISION_TRANSLATE_EDIT_DEBOUNCE_MS } from '../../features/vision/translation-edit-debounce'
 type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMethod']>
 type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
 
@@ -2843,7 +2848,7 @@ export default function Vision() {
     }
     setTranslateOriginal(normalizedValue)
     setTranslateOriginalError('')
-    setTranslateText('')
+    if (!normalizedValue.trim()) setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
     setTranslateRetranslating(!!normalizedValue.trim())
@@ -2876,7 +2881,7 @@ export default function Vision() {
     }
 
     const seq = ++translateEditSeqRef.current
-    const timer = window.setTimeout(() => {
+    const timer = scheduleVisionTranslationEdit(() => {
       translateEditDebounceRef.current = null
       if (seq !== translateEditSeqRef.current) return
       if (translateStartRef.current === null) {
@@ -2911,7 +2916,7 @@ export default function Vision() {
           }
         }
       })()
-    }, 1000)
+    })
     translateEditDebounceRef.current = timer
 
     return () => {
