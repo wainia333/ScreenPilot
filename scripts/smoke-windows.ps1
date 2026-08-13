@@ -3,7 +3,8 @@ param(
     [string]$ExecutablePath = (Join-Path $PSScriptRoot '..\src-tauri\target\release\screenpilot.exe'),
     [ValidateRange(1, 60)]
     [int]$StartupTimeoutSeconds = 20,
-    [switch]$AllowUnsupportedPlatformSkip
+    [switch]$AllowUnsupportedPlatformSkip,
+    [switch]$AllowExistingInstanceSkip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +35,83 @@ try {
 }
 finally {
     $stream.Dispose()
+}
+
+function Get-RunningScreenPilotInstance {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetExecutable
+    )
+
+    $targetItem = Get-Item -LiteralPath $TargetExecutable
+    $targetProductName = $targetItem.VersionInfo.ProductName
+    if ([string]::IsNullOrWhiteSpace($targetProductName)) {
+        $targetProductName = 'ScreenPilot'
+    }
+
+    try {
+        $processSnapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    }
+    catch {
+        throw "SMOKE_PRECONDITION_FAILED: 无法枚举现有 Windows 进程，不能确认 ScreenPilot 单实例测试环境：$($_.Exception.Message)"
+    }
+
+    $matches = foreach ($candidate in $processSnapshot) {
+        $candidateName = [string]$candidate.Name
+        $candidatePath = [string]$candidate.ExecutablePath
+        $sameExecutable = -not [string]::IsNullOrWhiteSpace($candidatePath) -and
+            [string]::Equals($candidatePath, $TargetExecutable, [System.StringComparison]::OrdinalIgnoreCase)
+        $knownScreenPilotName = $candidateName -match '(?i)^screenpilot(?:[_-][^\\/]*)?\.exe$'
+        $sameProduct = $false
+
+        if (-not [string]::IsNullOrWhiteSpace($candidatePath) -and
+            (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            try {
+                $candidateProductName = (Get-Item -LiteralPath $candidatePath -ErrorAction Stop).VersionInfo.ProductName
+                $sameProduct = -not [string]::IsNullOrWhiteSpace($candidateProductName) -and
+                    [string]::Equals(
+                        $candidateProductName,
+                        $targetProductName,
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )
+            }
+            catch {
+                # Protected processes can deny metadata reads. The exact executable path and
+                # well-known ScreenPilot file names remain sufficient detection signals.
+            }
+        }
+
+        if ($sameExecutable -or $knownScreenPilotName -or $sameProduct) {
+            [pscustomobject]@{
+                ProcessId = [int]$candidate.ProcessId
+                Name = $candidateName
+                ExecutablePath = $candidatePath
+            }
+        }
+    }
+
+    return @($matches | Sort-Object -Property ProcessId -Unique)
+}
+
+$existingInstances = @(Get-RunningScreenPilotInstance -TargetExecutable $resolvedExecutable)
+if ($existingInstances.Count -gt 0) {
+    $instanceDetails = $existingInstances | ForEach-Object {
+        $displayPath = if ([string]::IsNullOrWhiteSpace($_.ExecutablePath)) {
+            '<路径不可读取>'
+        }
+        else {
+            $_.ExecutablePath
+        }
+        "PID $($_.ProcessId), $($_.Name), $displayPath"
+    }
+    $message = '检测到已运行的 ScreenPilot 实例。真实应用 smoke 必须在没有同产品实例时运行，' +
+        '否则单实例转交会让测试观测到错误的进程树。请先正常退出这些实例后重试。检测结果：' +
+        ($instanceDetails -join '; ')
+    if ($AllowExistingInstanceSkip) {
+        Write-Warning "SMOKE_SKIPPED: $message"
+        exit 0
+    }
+    throw "SMOKE_PRECONDITION_FAILED: $message 如调用方明确接受未执行测试，可使用 -AllowExistingInstanceSkip。"
 }
 
 $process = $null

@@ -1,4 +1,4 @@
-import { createContext, isValidElement, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { createContext, isValidElement, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
 import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X, Sparkles, MessageSquare } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -23,7 +23,6 @@ import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import 'katex/dist/katex.min.css'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
 import {
@@ -33,15 +32,26 @@ import {
   VISION_FLOATING_PADDING,
 } from '../../features/vision/dialog-sizing'
 import { appendVisionError, mergeVisionResponse, VisionRequestLifecycle } from '../../features/vision/request-lifecycle'
+import {
+  resolveVisionSpeechFailure,
+  visionSpeechControlLabel,
+  type VisionSpeechTarget as SpeechTarget,
+} from '../../features/vision/speech-feedback'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
-type SpeechTarget = 'original' | 'translated'
 type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMethod']>
 type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
 
 const APPLE_INTELLIGENCE_BASE_URL = 'applefoundation://local'
 const VisionLanguageContext = createContext<Lang>('zh')
+type VisionCopyFeedback = {
+  begin: () => number
+  isCurrent: (sequence: number) => boolean
+  clearFailure: () => void
+  reportFailure: (message: string) => void
+}
+const VisionCopyFeedbackContext = createContext<VisionCopyFeedback | null>(null)
 
 type FloatingRectRequest = Parameters<typeof api.visionSetFloating>[0]
 
@@ -399,25 +409,55 @@ function reactNodeToText(node: ReactNode): string {
 function MarkdownCodeCopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copySequenceRef = useRef(0)
   const lang = useContext(VisionLanguageContext)
+  const copyFeedback = useContext(VisionCopyFeedbackContext)
   const label = copied
     ? (lang === 'zh' ? '已复制' : 'Copied')
     : (lang === 'zh' ? '复制代码' : 'Copy code')
 
   useEffect(() => () => {
-    if (timerRef.current) clearTimeout(timerRef.current)
+    copySequenceRef.current += 1
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
   }, [])
+
+  useEffect(() => {
+    copySequenceRef.current += 1
+    setCopied(false)
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }, [text])
 
   const handleCopy = useCallback(async (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault()
     event.stopPropagation()
     if (!text.trim()) return
+    const sequence = ++copySequenceRef.current
+    const feedbackSequence = copyFeedback?.begin()
+    setCopied(false)
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
     const ok = await copyToClipboard(text)
-    if (!ok) return
+    if (sequence !== copySequenceRef.current) return
+    if (feedbackSequence !== undefined && !copyFeedback?.isCurrent(feedbackSequence)) return
+    if (!ok) {
+      copyFeedback?.reportFailure(lang === 'zh' ? '复制失败，请检查剪贴板权限' : 'Copy failed. Check clipboard permissions.')
+      return
+    }
+    copyFeedback?.clearFailure()
     setCopied(true)
-    if (timerRef.current) clearTimeout(timerRef.current)
-    timerRef.current = window.setTimeout(() => setCopied(false), 1400)
-  }, [text])
+    timerRef.current = window.setTimeout(() => {
+      if (sequence === copySequenceRef.current) setCopied(false)
+      timerRef.current = null
+    }, 1400)
+  }, [copyFeedback, lang, text])
 
   return (
     <button
@@ -427,6 +467,8 @@ function MarkdownCodeCopyButton({ text }: { text: string }) {
       disabled={!text.trim()}
       title={label}
       aria-label={label}
+      data-screenpilot-copy-target="code"
+      data-screenpilot-copy-state={copied ? 'copied' : 'idle'}
       className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
     >
       {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.1} />}
@@ -570,7 +612,10 @@ function StreamingMarkdownText({ text, active }: { text: string; active: boolean
 
 function ReadonlyOcrMarkdownText({ text }: { text: string }) {
   return (
-    <div className={`ocr-markdown vision-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 select-text`}>
+    <div
+      data-screenpilot-ocr-source-content="true"
+      className={`ocr-markdown vision-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 select-text`}
+    >
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
         {text}
       </ReactMarkdown>
@@ -645,6 +690,7 @@ function EditableOcrText({
   return (
     <div
       ref={rootRef}
+      data-screenpilot-ocr-source-content="true"
       contentEditable
       suppressContentEditableWarning
       spellCheck={false}
@@ -1040,6 +1086,7 @@ function ThinkingBlock({
   const [open, setOpen] = useState(false)
   const [finalDurationMs, setFinalDurationMs] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const bodyId = useId()
   const startRef = useRef<number | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
 
@@ -1077,6 +1124,8 @@ function ThinkingBlock({
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-controls={bodyId}
         className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[11.5px] text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"
       >
         {active
@@ -1089,14 +1138,14 @@ function ThinkingBlock({
         </span>
         <ChevronDown size={11} strokeWidth={2} className={`ml-auto transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
-        <div
-          ref={bodyRef}
-          className="px-2.5 pb-2 max-h-[160px] overflow-y-auto custom-scrollbar text-[11.5px] leading-5 text-neutral-500 dark:text-neutral-400 italic whitespace-pre-wrap break-words"
-        >
-          {reasoning}
-        </div>
-      )}
+      <div
+        id={bodyId}
+        ref={bodyRef}
+        hidden={!open}
+        className="px-2.5 pb-2 max-h-[160px] overflow-y-auto custom-scrollbar text-[11.5px] leading-5 text-neutral-500 dark:text-neutral-400 italic whitespace-pre-wrap break-words"
+      >
+        {reasoning}
+      </div>
     </div>
   )
 }
@@ -1191,8 +1240,11 @@ export default function Vision() {
   const [promptPreviewText, setPromptPreviewText] = useState('')
   const [promptPreviewCardHeight, setPromptPreviewCardHeight] = useState<number | null>(null)
   const [copiedTarget, setCopiedTarget] = useState<CopyTarget | null>(null)
+  const [copyErrorAnnouncement, setCopyErrorAnnouncement] = useState('')
   const [speechLoadingTarget, setSpeechLoadingTarget] = useState<SpeechTarget | null>(null)
   const [speakingTarget, setSpeakingTarget] = useState<SpeechTarget | null>(null)
+  const [speechErrorTarget, setSpeechErrorTarget] = useState<SpeechTarget | null>(null)
+  const [speechErrorAnnouncement, setSpeechErrorAnnouncement] = useState('')
   const [lang, setLang] = useState<Lang>('zh')
   const [activeVisionModel, setActiveVisionModel] = useState('AI')
   const [messageOrder, setMessageOrder] = useState<'asc' | 'desc'>('asc')
@@ -1205,6 +1257,8 @@ export default function Vision() {
   const [translateError, setTranslateError] = useState('')
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
   const [captureWarning, setCaptureWarning] = useState('')
+  const [streamListenerError, setStreamListenerError] = useState<'answer' | 'translate' | null>(null)
+  const [closeFailed, setCloseFailed] = useState(false)
   const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
   const [translateOcrMethod, setTranslateOcrMethod] = useState<ScreenshotOcrMethod>('ai')
@@ -1296,6 +1350,10 @@ export default function Vision() {
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copySequenceRef = useRef(0)
+  const copiedTextRef = useRef<{ target: CopyTarget; text: string } | null>(null)
+  const messagesRef = useRef<ExplainMessage[]>([])
   const captureWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyPersistenceRef = useRef<Set<Promise<void>>>(new Set())
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -1307,6 +1365,12 @@ export default function Vision() {
   const prevStreamingRef = useRef(false)
   const visionStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const visionStreamBufferRef = useRef({ content: '', reasoning: '' })
+  const visionStreamListenerReadyRef = useRef(false)
+  const translateStreamListenerReadyRef = useRef(false)
+  const retryVisionStreamListenerRef = useRef<() => Promise<boolean>>(async () => false)
+  const retryTranslateStreamListenerRef = useRef<() => Promise<boolean>>(async () => false)
+  const visionStreamEnabledRef = useRef(true)
+  const closePendingRef = useRef(false)
   const preparingSendRef = useRef(false)
   const visionRequestLifecycleRef = useRef(new VisionRequestLifecycle())
   const visionTerminalErrorRef = useRef<{ requestId: string; error: string; incompleteReason?: string } | null>(null)
@@ -1346,6 +1410,84 @@ export default function Vision() {
   showTranslateOriginalRef.current = showTranslateOriginal
   translateOriginalRef.current = translateOriginal
   translateTextRef.current = translateText
+  messagesRef.current = messages
+
+  const ensureVisionStreamListener = useCallback(async () => {
+    if (!visionStreamEnabledRef.current || visionStreamListenerReadyRef.current) return true
+    const ready = await retryVisionStreamListenerRef.current()
+    if (!ready) setStreamListenerError('answer')
+    return ready
+  }, [])
+
+  const ensureTranslateStreamListener = useCallback(async () => {
+    if (translateStreamListenerReadyRef.current) return true
+    const ready = await retryTranslateStreamListenerRef.current()
+    if (!ready) setStreamListenerError('translate')
+    return ready
+  }, [])
+
+  const clearCopyFailure = useCallback(() => {
+    if (copyErrorTimeoutRef.current) clearTimeout(copyErrorTimeoutRef.current)
+    copyErrorTimeoutRef.current = null
+    setCopyErrorAnnouncement('')
+  }, [])
+
+  const reportCopyFailure = useCallback((message: string) => {
+    clearCopyFailure()
+    setCopyErrorAnnouncement(message)
+    copyErrorTimeoutRef.current = window.setTimeout(() => {
+      setCopyErrorAnnouncement('')
+      copyErrorTimeoutRef.current = null
+    }, 2500)
+  }, [clearCopyFailure])
+
+  const beginCopyOperation = useCallback(() => {
+    copySequenceRef.current += 1
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current)
+      copyTimeoutRef.current = null
+    }
+    setCopiedTarget(null)
+    copiedTextRef.current = null
+    clearCopyFailure()
+    return copySequenceRef.current
+  }, [clearCopyFailure])
+
+  const copyOperationIsCurrent = useCallback((sequence: number) => (
+    sequence === copySequenceRef.current
+  ), [])
+
+  const copyFeedback = useMemo<VisionCopyFeedback>(() => ({
+    begin: beginCopyOperation,
+    isCurrent: copyOperationIsCurrent,
+    clearFailure: clearCopyFailure,
+    reportFailure: reportCopyFailure,
+  }), [beginCopyOperation, clearCopyFailure, copyOperationIsCurrent, reportCopyFailure])
+
+  const latestAssistantText = useMemo(() => (
+    [...messages].reverse().find(message => message.role === 'assistant' && message.content)?.content ?? ''
+  ), [messages])
+  useEffect(() => {
+    if (
+      copiedTarget !== 'answer'
+      || copiedTextRef.current?.target !== 'answer'
+    ) return
+    if (copiedTextRef.current.text !== latestAssistantText) beginCopyOperation()
+  }, [beginCopyOperation, copiedTarget, latestAssistantText])
+  useEffect(() => {
+    if (
+      copiedTarget !== 'original'
+      || copiedTextRef.current?.target !== 'original'
+    ) return
+    if (copiedTextRef.current.text !== translateOriginal) beginCopyOperation()
+  }, [beginCopyOperation, copiedTarget, translateOriginal])
+  useEffect(() => {
+    if (
+      copiedTarget !== 'translated'
+      || copiedTextRef.current?.target !== 'translated'
+    ) return
+    if (copiedTextRef.current.text !== translateText) beginCopyOperation()
+  }, [beginCopyOperation, copiedTarget, translateText])
 
   const invalidateVisionRequest = useCallback(() => {
     const sequence = visionRequestLifecycleRef.current.invalidate()
@@ -1429,6 +1571,8 @@ export default function Vision() {
     speechAudioRef.current = null
     setSpeechLoadingTarget(null)
     setSpeakingTarget(null)
+    setSpeechErrorTarget(null)
+    setSpeechErrorAnnouncement('')
   }, [])
 
   const setVisionCursorPassthrough = useCallback((ignore: boolean) => {
@@ -1496,6 +1640,7 @@ export default function Vision() {
         const settings = await api.getSettings()
         setLang((settings.settingsLanguage as Lang) || 'zh')
         setActiveVisionModel(resolveVisionModelLabel(settings))
+        visionStreamEnabledRef.current = settings.vision?.streamEnabled !== false
         setMessageOrder(settings.vision?.messageOrder === 'desc' ? 'desc' : 'asc')
         const curMode = readModeFromHash()
         const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.vision
@@ -1577,6 +1722,7 @@ export default function Vision() {
   }, [])
 
   const enterSelect = useCallback(async () => {
+    window.dispatchEvent(new Event('screenpilot:vision-session-reset'))
     const previousImageId = imageIdRef.current
     invalidateVisionSurface()
     const surfaceEpoch = visionSurfaceEpochRef.current
@@ -1611,6 +1757,15 @@ export default function Vision() {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
     }
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current)
+      copyTimeoutRef.current = null
+    }
+    if (copyErrorTimeoutRef.current) {
+      clearTimeout(copyErrorTimeoutRef.current)
+      copyErrorTimeoutRef.current = null
+    }
+    copySequenceRef.current += 1
     translateEditSeqRef.current++
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
@@ -1657,6 +1812,8 @@ export default function Vision() {
       setMessages([])
       setStreaming(false)
       setCopiedTarget(null)
+      setCopyErrorAnnouncement('')
+      setCloseFailed(false)
       setTranslateOriginal('')
       setTranslateOriginalError('')
       setTranslateText('')
@@ -1680,6 +1837,7 @@ export default function Vision() {
       const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.vision
       setLang(settings.settingsLanguage === 'en' ? 'en' : 'zh')
       setActiveVisionModel(resolveVisionModelLabel(settings))
+      visionStreamEnabledRef.current = settings.vision?.streamEnabled !== false
       setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
       if (curMode === 'translate') {
         setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
@@ -1778,8 +1936,13 @@ export default function Vision() {
   }, [cancelPromptOptimization, focusVisionInput, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
-    void enterSelect()
-    const handleReset = () => { void enterSelect() }
+    const startSelection = () => {
+      void enterSelect().catch(err => {
+        console.error('[vision-capture] enter selection failed:', err)
+      })
+    }
+    startSelection()
+    const handleReset = () => { startSelection() }
     window.addEventListener('vision:reset', handleReset)
     return () => window.removeEventListener('vision:reset', handleReset)
   }, [enterSelect])
@@ -1788,6 +1951,10 @@ export default function Vision() {
     let cancelled = false
     let unlisten: (() => void) | undefined
     void api.onVisionClosing(() => {
+      // UI-initiated close may still fail after Rust emits its best-effort
+      // closing notification. Keep the live session valid until visionClose
+      // itself confirms success; external/native closes still invalidate it.
+      if (closePendingRef.current) return
       invalidateVisionSurface()
     }).then((dispose) => {
       if (cancelled) dispose()
@@ -1946,9 +2113,15 @@ export default function Vision() {
       })
     })()
     historyPersistenceRef.current.add(persistence)
-    void persistence.finally(() => {
-      historyPersistenceRef.current.delete(persistence)
-    })
+    void persistence.then(
+      () => {
+        historyPersistenceRef.current.delete(persistence)
+      },
+      (error: unknown) => {
+        historyPersistenceRef.current.delete(persistence)
+        console.error('[vision-history] persistence failed:', error)
+      },
+    )
     return () => { cancelled = true }
   }, [mode, streaming, messages, imagePreview, appLabel, capturedFrame])
 
@@ -1970,7 +2143,11 @@ export default function Vision() {
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined
-    api.onVisionStream((payload: VisionStreamPayload) => {
+    let pending: Promise<boolean> | null = null
+    const install = async () => {
+      if (visionStreamListenerReadyRef.current) return true
+      if (pending) return pending
+      pending = api.onVisionStream((payload: VisionStreamPayload) => {
       if (!visionRequestLifecycleRef.current.matchesStream(imageIdRef.current, payload)) return
       if (payload.error) {
         const previous = visionTerminalErrorRef.current
@@ -2007,12 +2184,35 @@ export default function Vision() {
         setStreaming(false)
         return
       }
-    }).then((dispose) => {
-      if (cancelled) dispose()
-      else unlisten = dispose
-    }).catch(err => console.error(err))
+      }).then((dispose) => {
+        if (cancelled) {
+          dispose()
+          return false
+        }
+        unlisten = dispose
+        visionStreamListenerReadyRef.current = true
+        setStreamListenerError(current => current === 'answer' ? null : current)
+        return true
+      }).catch(err => {
+        if (!cancelled) {
+          visionStreamListenerReadyRef.current = false
+          setStreamListenerError('answer')
+          console.error('[vision-stream] listener registration failed:', err)
+        }
+        return false
+      }).finally(() => {
+        pending = null
+      })
+      return pending
+    }
+    retryVisionStreamListenerRef.current = install
+    void install()
     return () => {
       cancelled = true
+      visionStreamListenerReadyRef.current = false
+      if (retryVisionStreamListenerRef.current === install) {
+        retryVisionStreamListenerRef.current = async () => false
+      }
       clearVisionStreamFlushTimer()
       unlisten?.()
     }
@@ -2069,6 +2269,15 @@ export default function Vision() {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
     }
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current)
+      copyTimeoutRef.current = null
+    }
+    if (copyErrorTimeoutRef.current) {
+      clearTimeout(copyErrorTimeoutRef.current)
+      copyErrorTimeoutRef.current = null
+    }
+    copySequenceRef.current += 1
     translateEditSeqRef.current++
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
@@ -2107,6 +2316,8 @@ export default function Vision() {
       setMessages([])
       setStreaming(false)
       setCopiedTarget(null)
+      setCopyErrorAnnouncement('')
+      setCloseFailed(false)
       setTranslateOriginal('')
       setTranslateOriginalError('')
       setTranslateText('')
@@ -2134,21 +2345,33 @@ export default function Vision() {
   }, [resetBeforeHide])
 
   const closeLikeEscape = useCallback(async () => {
-    invalidateVisionSurface()
-    invalidateVisionRequest()
-    if (stageRef.current === 'answering' && streaming) {
-      closingStreamRef.current = true
-      try { await api.visionCancelStream() } catch (err) { console.error(err) }
-      clearVisionStreamFlushTimer()
-      flushVisionStreamBuffer(true)
-      setStreaming(false)
-    }
+    if (closePendingRef.current) return
+    closePendingRef.current = true
+    setCloseFailed(false)
     setVisionCursorPassthrough(false)
-    if (historyPersistenceRef.current.size > 0) {
-      await Promise.allSettled([...historyPersistenceRef.current])
+    try {
+      if (stageRef.current === 'answering' && streaming) {
+        closingStreamRef.current = true
+        try { await api.visionCancelStream() } catch (err) { console.error(err) }
+        clearVisionStreamFlushTimer()
+        flushVisionStreamBuffer(true)
+        setStreaming(false)
+      }
+      if (historyPersistenceRef.current.size > 0) {
+        await Promise.allSettled([...historyPersistenceRef.current])
+      }
+      await api.visionClose()
+      invalidateVisionSurface()
+      invalidateVisionRequest()
+      setVisionCursorPassthrough(false)
+      resetAfterClose()
+    } catch (err) {
+      closingStreamRef.current = false
+      setCloseFailed(true)
+      console.error('[vision-close] failed:', err)
+    } finally {
+      closePendingRef.current = false
     }
-    try { await api.visionClose() } catch (err) { console.error(err) }
-    resetAfterClose()
   }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, invalidateVisionRequest, invalidateVisionSurface, resetAfterClose, setVisionCursorPassthrough, streaming])
 
   useEffect(() => {
@@ -2214,16 +2437,12 @@ export default function Vision() {
       if (!captureSurfaceActiveRef.current) return
       if (capturingRef.current) return
       if (stageRef.current === 'select') {
-        invalidateVisionSurface()
-        void (async () => {
-          try { await api.visionClose() } catch (err) { console.error(err) }
-          resetAfterClose()
-        })()
+        void closeLikeEscape()
       }
     }
     window.addEventListener('blur', handleBlur)
     return () => window.removeEventListener('blur', handleBlur)
-  }, [invalidateVisionSurface, resetAfterClose])
+  }, [closeLikeEscape])
 
   const clientToGlobal = (p: Point): Point => ({
     x: winOrigin.x + p.x,
@@ -2553,6 +2772,13 @@ export default function Vision() {
   }
 
   const runTranslate = useCallback(async (id: string) => {
+    if (!await ensureTranslateStreamListener()) {
+      translateStartRef.current = null
+      setTranslateRetranslating(false)
+      setTranslateError(i18n[lang].visionStreamListenerFailed)
+      setStage('translated')
+      return
+    }
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
@@ -2597,7 +2823,7 @@ export default function Vision() {
       }
       setStage('translated')
     }
-  }, [])
+  }, [ensureTranslateStreamListener, lang])
 
   const handleTranslateOriginalChange = useCallback((value: string) => {
     const normalizedValue = normalizeEnglishPunctuationSpacing(value)
@@ -2696,16 +2922,7 @@ export default function Vision() {
   const saveScreenshotTranslationSettings = useCallback(async (
     updates: Partial<Settings['screenshotTranslation']>,
   ): Promise<Settings> => {
-    const current = await api.getSettings()
-    const next = {
-      ...current,
-      screenshotTranslation: {
-        ...current.screenshotTranslation,
-        ...updates,
-      },
-    }
-    await api.saveSettings(next)
-    return next
+    return api.updateScreenshotTranslationSettings(updates)
   }, [])
 
   const runTranslateTextNow = useCallback(async (sourceText = translateOriginal) => {
@@ -2898,7 +3115,11 @@ export default function Vision() {
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined
-    api.onVisionTranslateStream((payload: VisionTranslateStreamPayload) => {
+    let pending: Promise<boolean> | null = null
+    const install = async () => {
+      if (translateStreamListenerReadyRef.current) return true
+      if (pending) return pending
+      pending = api.onVisionTranslateStream((payload: VisionTranslateStreamPayload) => {
       if (payload.imageId !== imageIdRef.current) return
       if (ignoreTranslateStreamRef.current) return
       if (payload.done) {
@@ -2923,12 +3144,35 @@ export default function Vision() {
       } else if (payload.kind === 'translated') {
         setTranslateText(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       }
-    }).then((dispose) => {
-      if (cancelled) dispose()
-      else unlisten = dispose
-    }).catch(err => console.error(err))
+      }).then((dispose) => {
+        if (cancelled) {
+          dispose()
+          return false
+        }
+        unlisten = dispose
+        translateStreamListenerReadyRef.current = true
+        setStreamListenerError(current => current === 'translate' ? null : current)
+        return true
+      }).catch(err => {
+        if (!cancelled) {
+          translateStreamListenerReadyRef.current = false
+          setStreamListenerError('translate')
+          console.error('[vision-translate] listener registration failed:', err)
+        }
+        return false
+      }).finally(() => {
+        pending = null
+      })
+      return pending
+    }
+    retryTranslateStreamListenerRef.current = install
+    void install()
     return () => {
       cancelled = true
+      translateStreamListenerReadyRef.current = false
+      if (retryTranslateStreamListenerRef.current === install) {
+        retryTranslateStreamListenerRef.current = async () => false
+      }
       unlisten?.()
     }
   }, [])
@@ -2961,7 +3205,7 @@ export default function Vision() {
         if (fallbackRect.width >= 10 && fallbackRect.height >= 10) {
           await handleCaptureRegion(fallbackRect, info.owner, captureSequence)
         } else {
-          void enterSelect()
+          await enterSelect()
         }
         return
       }
@@ -2994,10 +3238,20 @@ export default function Vision() {
         return
       }
       if (mode === 'translate') void runTranslate(newId)
+    } catch (err) {
+      if (captureSequence === captureSequenceRef.current) {
+        console.error('[vision-capture] window capture failed:', err)
+      }
     } finally {
       if (captureSequence === captureSequenceRef.current) capturingRef.current = false
     }
   }
+
+  const startCaptureWindow = useCallback((info: VisionWindowInfo) => {
+    void handleCaptureWindow(info).catch(err => {
+      console.error('[vision-capture] window capture handler failed:', err)
+    })
+  }, [handleCaptureWindow])
 
   const handleCaptureRegion = async (
     rect: Rect,
@@ -3026,7 +3280,7 @@ export default function Vision() {
       showArchiveWarning(result.archiveWarning)
       if (!result.success || !result.imageId) {
         console.error('visionCaptureRegion failed:', result.error)
-        void enterSelect()
+        await enterSelect()
         return
       }
       const newId = result.imageId
@@ -3055,10 +3309,20 @@ export default function Vision() {
         return
       }
       if (mode === 'translate') void runTranslate(newId)
+    } catch (err) {
+      if (captureSequence === captureSequenceRef.current) {
+        console.error('[vision-capture] region capture failed:', err)
+      }
     } finally {
       if (captureSequence === captureSequenceRef.current) capturingRef.current = false
     }
   }
+
+  const startCaptureRegion = useCallback((rect: Rect) => {
+    void handleCaptureRegion(rect).catch(err => {
+      console.error('[vision-capture] region capture handler failed:', err)
+    })
+  }, [handleCaptureRegion])
 
   const handleMouseUp = async (e: React.MouseEvent) => {
     if (stage !== 'select') return
@@ -3147,11 +3411,11 @@ export default function Vision() {
         if (keyboardSelectionMode === 'window' && hovered !== null) {
           event.preventDefault()
           event.stopPropagation()
-          void handleCaptureWindow(hovered)
+          startCaptureWindow(hovered)
         } else if (keyboardSelectionMode === 'region' && keyboardRegion !== null) {
           event.preventDefault()
           event.stopPropagation()
-          void handleCaptureRegion(keyboardRegion)
+          startCaptureRegion(keyboardRegion)
         }
         return
       }
@@ -3180,12 +3444,12 @@ export default function Vision() {
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [
-    handleCaptureRegion,
-    handleCaptureWindow,
     hovered,
     keyboardRegion,
     keyboardSelectionMode,
     lang,
+    startCaptureRegion,
+    startCaptureWindow,
     stage,
     viewport,
     winOrigin,
@@ -3394,6 +3658,7 @@ export default function Vision() {
       && !!imageIdRef.current
     )
     if (!question && !allowBlankImageAnalysis) return
+    if (!await ensureVisionStreamListener()) return
     const requestId = visionRequestLifecycleRef.current.begin()
     visionTerminalErrorRef.current = null
     const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
@@ -3541,11 +3806,25 @@ export default function Vision() {
 
   const copyTextWithFeedback = async (text: string, target: CopyTarget) => {
     if (!text.trim()) return
+    const sequence = beginCopyOperation()
     const ok = await copyToClipboard(text)
-    if (!ok) return
+    if (!copyOperationIsCurrent(sequence)) return
+    const currentText = target === 'answer'
+      ? [...messagesRef.current].reverse().find(message => message.role === 'assistant' && message.content)?.content ?? ''
+      : target === 'original'
+        ? translateOriginalRef.current
+        : translateTextRef.current
+    if (currentText !== text) return
+    if (!ok) {
+      reportCopyFailure(t.visionCopyFailed)
+      return
+    }
+    copiedTextRef.current = { target, text }
     setCopiedTarget(target)
-    if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
-    copyTimeoutRef.current = setTimeout(() => setCopiedTarget(null), 2000)
+    copyTimeoutRef.current = setTimeout(() => {
+      if (copyOperationIsCurrent(sequence)) setCopiedTarget(null)
+      copyTimeoutRef.current = null
+    }, 2000)
   }
 
   const playSpeechDataUrl = useCallback((dataUrl: string, seq: number) => {
@@ -3580,6 +3859,8 @@ export default function Vision() {
     const seq = speechSeqRef.current
     const chunks = splitSpeechText(text)
     if (!chunks.length) return
+    setSpeechErrorTarget(null)
+    setSpeechErrorAnnouncement('')
     setSpeechLoadingTarget(target)
 
     try {
@@ -3596,6 +3877,11 @@ export default function Vision() {
       }
     } catch (err) {
       console.error('Speech playback failed:', err)
+      const failure = resolveVisionSpeechFailure(seq, speechSeqRef.current, target, t.visionSpeechFailed)
+      if (failure) {
+        setSpeechErrorTarget(failure.target)
+        setSpeechErrorAnnouncement(failure.announcement)
+      }
     } finally {
       if (speechSeqRef.current === seq) {
         speechAudioRef.current = null
@@ -3603,7 +3889,7 @@ export default function Vision() {
         setSpeakingTarget(null)
       }
     }
-  }, [playSpeechDataUrl, speakingTarget, speechLoadingTarget, stopSpeechPlayback])
+  }, [playSpeechDataUrl, speakingTarget, speechLoadingTarget, stopSpeechPlayback, t.visionSpeechFailed])
 
   const handleCopy = async () => {
     const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && m.content)
@@ -3615,6 +3901,7 @@ export default function Vision() {
   // 取消任何正在跑的流，避免后端继续 emit delta 灌入新恢复的 messages（如果新旧 imageId 巧合相同会污染）
   const restoreHistory = async (item: HistoryItem) => {
     invalidateVisionRequest()
+    beginCopyOperation()
     setHistoryOpen(false)
     cancelPromptOptimization()
     stopSpeechPlayback()
@@ -3741,7 +4028,9 @@ export default function Vision() {
   }
 
   useEffect(() => () => {
+    copySequenceRef.current += 1
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
+    if (copyErrorTimeoutRef.current) clearTimeout(copyErrorTimeoutRef.current)
     if (captureWarningTimeoutRef.current) clearTimeout(captureWarningTimeoutRef.current)
     invalidateVisionSurface()
     invalidateVisionRequest()
@@ -4344,10 +4633,16 @@ export default function Vision() {
     setVisionCursorPassthrough,
   ])
 
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event('screenpilot:vision-contract-change'))
+  })
+
   return (
     <VisionLanguageContext.Provider value={lang}>
+    <VisionCopyFeedbackContext.Provider value={copyFeedback}>
     <div
       className="fixed inset-0 select-none"
+      data-screenpilot-vision-root="true"
       data-screenpilot-floating-layout={isFloatingLayout ? 'true' : undefined}
       data-screenpilot-floating-width={isFloatingLayout
         ? String(Math.max(1, Math.round(barRect.width + FLOATING_PADDING * 2)))
@@ -4369,6 +4664,38 @@ export default function Vision() {
           className="pointer-events-none absolute left-1/2 top-3 z-[90] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-amber-300/70 bg-amber-50/95 px-3 py-2 text-[12px] leading-5 text-amber-900 shadow-lg backdrop-blur dark:border-amber-700/70 dark:bg-amber-950/90 dark:text-amber-100"
         >
           {captureWarning}
+        </div>
+      ) : null}
+      {streamListenerError ? (
+        <div
+          role="alert"
+          data-screenpilot-stream-listener-error={streamListenerError}
+          className="pointer-events-none absolute left-1/2 top-3 z-[92] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
+        >
+          {t.visionStreamListenerFailed}
+        </div>
+      ) : null}
+      {closeFailed ? (
+        <div
+          role="alert"
+          data-screenpilot-close-error="true"
+          className="pointer-events-none absolute left-1/2 top-3 z-[93] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
+        >
+          {t.visionCloseFailed}
+        </div>
+      ) : null}
+      {speechErrorAnnouncement ? (
+        <span role="alert" className="sr-only">
+          {speechErrorAnnouncement}
+        </span>
+      ) : null}
+      {copyErrorAnnouncement ? (
+        <div
+          role="alert"
+          data-screenpilot-copy-error="true"
+          className="pointer-events-none absolute left-1/2 top-14 z-[91] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
+        >
+          {copyErrorAnnouncement}
         </div>
       ) : null}
       {historyRejectedCount > 0 ? (
@@ -4603,11 +4930,12 @@ export default function Vision() {
       )}
 
       {showBar && (
-        <div
-          ref={barPanelRef}
+          <div
+            ref={barPanelRef}
           data-screenpilot-prompt-panel="true"
           data-screenpilot-ready-prompt-panel={stage !== 'select' || hasScreenshot ? 'true' : 'false'}
-          data-screenpilot-captured-prompt-panel={hasScreenshot ? 'true' : 'false'}
+            data-screenpilot-captured-prompt-panel={hasScreenshot ? 'true' : 'false'}
+            data-screenpilot-answer-visible={stage === 'answering' ? 'true' : 'false'}
           className="absolute ease-out"
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
@@ -4643,7 +4971,13 @@ export default function Vision() {
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center shadow-sm">
                     {imagePreview ? (
-                      <img src={imagePreview} alt="snap" className="w-full h-full object-cover" draggable={false} />
+                      <img
+                        src={imagePreview}
+                        alt={t.visionScreenshotPreview}
+                        data-screenpilot-screenshot-preview="true"
+                        className="w-full h-full object-cover"
+                        draggable={false}
+                      />
                     ) : (
                       <ImageIcon size={14} className="text-neutral-400" />
                     )}
@@ -4871,7 +5205,7 @@ export default function Vision() {
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="px-3.5 pt-3 pb-2.5">
+              <div data-screenpilot-prompt-preview-source="true" className="px-3.5 pt-3 pb-2.5">
                 <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.09em] text-neutral-400 dark:text-neutral-500">
                   {t.shotOriginal}
                 </div>
@@ -4880,7 +5214,7 @@ export default function Vision() {
                 </div>
               </div>
 
-              <div className="border-t border-black/[0.05] px-3.5 pt-2.5 pb-3 dark:border-white/[0.06]">
+              <div data-screenpilot-prompt-preview-body="true" className="border-t border-black/[0.05] px-3.5 pt-2.5 pb-3 dark:border-white/[0.06]">
                 <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.09em] text-[var(--kv-accent-text)]">
                   {t.visionPromptOptimized}
                 </div>
@@ -4899,6 +5233,7 @@ export default function Vision() {
                 ) : (
                   <textarea
                     ref={promptPreviewEditorRef}
+                    data-screenpilot-prompt-preview-editor="true"
                     value={promptPreviewText}
                     onChange={(e) => setPromptPreviewText(e.target.value)}
                     spellCheck={false}
@@ -4909,7 +5244,7 @@ export default function Vision() {
                   />
                 )}
 
-                <div className="mt-2.5 flex items-center justify-end gap-1.5">
+                <div data-screenpilot-prompt-preview-actions="true" className="mt-2.5 flex items-center justify-end gap-1.5">
                   <button
                     type="button"
                     onClick={discardOptimizedPrompt}
@@ -4963,7 +5298,10 @@ export default function Vision() {
               const Actions = (
                 <div className="flex items-center gap-1" data-screenpilot-answer-actions="true">
                   <button
+                    type="button"
                     onClick={() => void handleCopy()}
+                    data-screenpilot-copy-target="answer"
+                    data-screenpilot-copy-state={copiedTarget === 'answer' ? 'copied' : 'idle'}
                     className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
                   >
                     {copiedTarget === 'answer' ? <Check size={11} /> : <Copy size={11} />}
@@ -5037,6 +5375,7 @@ export default function Vision() {
         <div
           ref={translateCardRef}
           data-screenpilot-translation-card="true"
+          data-screenpilot-native-flight-active={barNoTransition || (jellyActive && isFloatingLayout) ? 'true' : 'false'}
           aria-busy={stage === 'translating' || methodSwitching || translateRetranslating}
           className={`absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text ${jellyActive && isFloatingLayout ? 'vision-ocr-jelly-pop' : ''}`}
           onMouseDown={(e) => e.stopPropagation()}
@@ -5064,13 +5403,20 @@ export default function Vision() {
           data-tauri-drag-region="false"
         >
           <div
+            data-screenpilot-translation-header="true"
             className="flex items-center gap-2.5 px-3.5 py-2.5 border-b border-black/[0.05] dark:border-white/[0.06] cursor-move"
             onMouseDown={beginFloatingPanelDrag}
             data-tauri-drag-region="false"
           >
             <div className="shrink-0 w-8 h-8 rounded-lg overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center">
               {imagePreview ? (
-                <img src={imagePreview} alt="snap" className="w-full h-full object-cover" draggable={false} />
+                <img
+                  src={imagePreview}
+                  alt={t.visionScreenshotPreview}
+                  data-screenpilot-screenshot-preview="true"
+                  className="w-full h-full object-cover"
+                  draggable={false}
+                />
               ) : (
                 <ImageIcon size={12} className="text-neutral-400" />
               )}
@@ -5102,7 +5448,9 @@ export default function Vision() {
             </button>
           </div>
 
-          <div className="px-3.5 py-3 overflow-y-auto custom-scrollbar"
+          <div
+            data-screenpilot-translation-body="true"
+            className="px-3.5 py-3 overflow-y-auto custom-scrollbar"
             style={{
               maxHeight: isFloatingLayout || !keepFullscreen
                 ? stableAnswerHeight
@@ -5110,8 +5458,8 @@ export default function Vision() {
             }}>
             <>
               {showTranslateOriginal && (
-                <div>
-                  <div className="mb-1.5 flex items-center gap-1.5">
+                <div data-screenpilot-ocr-container="true">
+                  <div data-screenpilot-original-heading="true" className="mb-1.5 flex items-center gap-1.5">
                     <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                       {t.shotOriginal}
                     </span>
@@ -5126,6 +5474,8 @@ export default function Vision() {
                         <button
                           type="button"
                           onClick={() => void copyTextWithFeedback(translateOriginal, 'original')}
+                          data-screenpilot-copy-target="original"
+                          data-screenpilot-copy-state={copiedTarget === 'original' ? 'copied' : 'idle'}
                           title={copiedTarget === 'original' ? t.visionCopied : t.visionCopy}
                           aria-label={copiedTarget === 'original' ? t.visionCopied : t.visionCopy}
                           className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
@@ -5136,21 +5486,32 @@ export default function Vision() {
                           <button
                             type="button"
                             onClick={() => void speakText(translateOriginal, 'original')}
-                            title={speakingTarget === 'original' ? t.visionStop : t.visionSpeak}
-                            aria-label={speakingTarget === 'original' ? t.visionStop : t.visionSpeak}
+                            title={visionSpeechControlLabel('original', speakingTarget, speechErrorTarget, {
+                              speak: t.visionSpeak,
+                              stop: t.visionStop,
+                              retry: t.visionSpeechRetry,
+                            })}
+                            aria-label={visionSpeechControlLabel('original', speakingTarget, speechErrorTarget, {
+                              speak: t.visionSpeak,
+                              stop: t.visionStop,
+                              retry: t.visionSpeechRetry,
+                            })}
                             className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
-                              speakingTarget === 'original'
+                              speechErrorTarget === 'original'
+                                ? 'text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300'
+                                : speakingTarget === 'original'
                                 ? 'text-neutral-700 dark:text-neutral-100'
                                 : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
                             }`}
                           >
                             {speechLoadingTarget === 'original'
                               ? <Loader2 size={12} className="animate-spin" />
-                              : <Play size={12} fill="currentColor" strokeWidth={0} />}
+                              : <Play size={12} fill="currentColor" strokeWidth={speechErrorTarget === 'original' ? 2 : 0} />}
                           </button>
                         )}
                       </>
                     )}
+                    <span data-screenpilot-source-language-slot="true" className="contents" />
                     <select
                       data-screenpilot-ocr-method="true"
                       value={translateOcrMethod}
@@ -5187,10 +5548,10 @@ export default function Vision() {
               )}
 
               {showTranslateOriginal && (
-                <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
+                <div data-screenpilot-translation-divider="true" className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
               )}
 
-              <div className="mb-1.5 flex items-center gap-1.5">
+              <div data-screenpilot-translated-heading="true" className="mb-1.5 flex items-center gap-1.5">
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                   {t.shotTranslated}
                 </span>
@@ -5205,6 +5566,8 @@ export default function Vision() {
                     <button
                       type="button"
                       onClick={() => void copyTextWithFeedback(translateText, 'translated')}
+                      data-screenpilot-copy-target="translated"
+                      data-screenpilot-copy-state={copiedTarget === 'translated' ? 'copied' : 'idle'}
                       title={copiedTarget === 'translated' ? t.visionCopied : t.visionCopy}
                       aria-label={copiedTarget === 'translated' ? t.visionCopied : t.visionCopy}
                       className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
@@ -5214,20 +5577,31 @@ export default function Vision() {
                     <button
                       type="button"
                       onClick={() => void speakText(translateText, 'translated')}
-                      title={speakingTarget === 'translated' ? t.visionStop : t.visionSpeak}
-                      aria-label={speakingTarget === 'translated' ? t.visionStop : t.visionSpeak}
+                      title={visionSpeechControlLabel('translated', speakingTarget, speechErrorTarget, {
+                        speak: t.visionSpeak,
+                        stop: t.visionStop,
+                        retry: t.visionSpeechRetry,
+                      })}
+                      aria-label={visionSpeechControlLabel('translated', speakingTarget, speechErrorTarget, {
+                        speak: t.visionSpeak,
+                        stop: t.visionStop,
+                        retry: t.visionSpeechRetry,
+                      })}
                       className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
-                        speakingTarget === 'translated'
+                        speechErrorTarget === 'translated'
+                          ? 'text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300'
+                          : speakingTarget === 'translated'
                           ? 'text-neutral-700 dark:text-neutral-100'
                           : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
                       }`}
                     >
                       {speechLoadingTarget === 'translated'
                         ? <Loader2 size={12} className="animate-spin" />
-                        : <Play size={12} fill="currentColor" strokeWidth={0} />}
+                        : <Play size={12} fill="currentColor" strokeWidth={speechErrorTarget === 'translated' ? 2 : 0} />}
                     </button>
                   </>
                 )}
+                <span data-screenpilot-target-language-slot="true" className="contents" />
                 <select
                   data-screenpilot-translation-method="true"
                   value={translateMethod}
@@ -5242,11 +5616,14 @@ export default function Vision() {
                   ))}
                 </select>
               </div>
+              <div data-screenpilot-target-result-slot="true" data-screenpilot-target-result="true" />
               {translateText && (
                 readonlyAiOcrOriginal ? (
-                  <ReadableMarkdownText text={translateText} />
+                  <div data-screenpilot-native-translation-result="true">
+                    <ReadableMarkdownText text={translateText} />
+                  </div>
                 ) : (
-                  <div className="vision-readable-text text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 whitespace-pre-wrap break-words select-text">
+                  <div data-screenpilot-native-translation-result="true" className="vision-readable-text text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 whitespace-pre-wrap break-words select-text">
                     {translateText}
                   </div>
                 )
@@ -5269,6 +5646,7 @@ export default function Vision() {
         </div>
       )}
     </div>
+    </VisionCopyFeedbackContext.Provider>
     </VisionLanguageContext.Provider>
   )
 }

@@ -4,18 +4,25 @@ function tryLegacyCopy(text: string): boolean {
   textarea.setAttribute('readonly', '')
   textarea.style.position = 'absolute'
   textarea.style.left = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const result = document.execCommand('copy')
-  document.body.removeChild(textarea)
-  return result
+  try {
+    document.body.appendChild(textarea)
+    textarea.select()
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    textarea.remove()
+  }
 }
 
-export function copyToClipboard(text: string): Promise<boolean> {
-  if (!navigator.clipboard) {
-    return Promise.resolve(tryLegacyCopy(text))
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // Fall back for WebViews where the async clipboard API exists but is denied.
+    }
   }
-  return navigator.clipboard.writeText(text)
-    .then(() => true)
-    .catch(() => tryLegacyCopy(text))
+  return tryLegacyCopy(text)
 }

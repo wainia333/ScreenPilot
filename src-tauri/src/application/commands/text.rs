@@ -1,6 +1,6 @@
 use crate::application::state::AppState;
 use crate::infrastructure::ai_http::{
-    complete_text_cancelled, complete_text_with_effort, AiRequestPolicy,
+    complete_text_cancelled, complete_text_with_effort_cancelled, AiRequestPolicy,
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::translation;
@@ -254,6 +254,9 @@ pub async fn optimizer_run(
     state: State<'_, AppState>,
     request: PromptOptimizationRequest,
 ) -> Result<PromptOptimizationResult, String> {
+    let signal = state
+        .begin_optimizer_request(request.generation)
+        .ok_or("Request cancelled")?;
     let settings = state.current()?;
     if !settings.prompt_optimizer.enabled {
         return Err("Prompt optimizer is disabled in settings".into());
@@ -273,7 +276,7 @@ pub async fn optimizer_run(
         &settings.prompt_optimizer.response_language,
         &request.text,
     );
-    let text = complete_text_with_effort(
+    let text = complete_text_with_effort_cancelled(
         provider,
         &selection.model,
         &keys,
@@ -285,12 +288,21 @@ pub async fn optimizer_run(
         ),
         AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
         settings.prompt_optimizer.thinking_effort,
+        Some(signal),
     )
     .await?;
+    if !state.optimizer_request_current(request.generation) {
+        return Err("Request cancelled".into());
+    }
     Ok(PromptOptimizationResult {
         generation: request.generation,
         text,
     })
+}
+
+#[tauri::command]
+pub fn optimizer_cancel(state: State<'_, AppState>, generation: u64) -> bool {
+    state.cancel_optimizer_request(generation)
 }
 
 #[tauri::command]
@@ -328,6 +340,8 @@ pub fn window_hide(window: WebviewWindow, state: State<'_, AppState>) -> Result<
     if window.label() == "translator" {
         state.begin_surface_action();
         state.cancel_active_translator_request();
+    } else if window.label() == "main" {
+        state.cancel_active_optimizer_request();
     }
     window.hide().map_err(|error| error.to_string())
 }

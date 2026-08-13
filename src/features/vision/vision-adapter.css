@@ -7,8 +7,8 @@ main[data-screenpilot-vision-adapter="true"] .sharex-selection-dash {
   to { stroke-dashoffset: -10; }
 }
 
-[data-screenpilot-prompt-bar="true"] > input:focus,
-[data-screenpilot-prompt-bar="true"] > input:focus-visible {
+[data-screenpilot-vision-prompt="true"]:focus,
+[data-screenpilot-vision-prompt="true"]:focus-visible {
   box-shadow: none !important;
   outline: none !important;
 }
@@ -18,9 +18,9 @@ main[data-screenpilot-vision-adapter="true"] .sharex-selection-dash {
    the app-wide textarea:focus-visible rule has higher paint priority once the
    adapter stylesheet is loaded. Keep this override on the adapter-marked
    preview card only, and make the focused and unfocused border models match. */
-[data-screenpilot-vision-prompt-preview="true"] textarea,
-[data-screenpilot-vision-prompt-preview="true"] textarea:focus,
-[data-screenpilot-vision-prompt-preview="true"] textarea:focus-visible {
+[data-screenpilot-prompt-preview-editor="true"],
+[data-screenpilot-prompt-preview-editor="true"]:focus,
+[data-screenpilot-prompt-preview-editor="true"]:focus-visible {
   outline: none !important;
   outline-width: 0 !important;
   outline-offset: 0 !important;
@@ -46,14 +46,14 @@ main[data-screenpilot-vision-adapter="true"] .sharex-selection-dash {
    variable-height scroll port and the action row stays at the frame's bottom
    as the user expands it. The vendor's inline textarea height is content-fit
    only; the adapter intentionally makes it the flexible middle region. */
-[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) {
+[data-screenpilot-prompt-preview-body="true"] {
   display: flex;
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
 }
 
-[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) > textarea {
+[data-screenpilot-prompt-preview-editor="true"] {
   min-height: 0 !important;
   height: auto !important;
   max-height: none !important;
@@ -61,7 +61,7 @@ main[data-screenpilot-vision-adapter="true"] .sharex-selection-dash {
   overflow-y: auto !important;
 }
 
-[data-screenpilot-vision-prompt-preview="true"] > :nth-child(2) > :last-child {
+[data-screenpilot-prompt-preview-actions="true"] {
   flex-shrink: 0;
   margin-top: auto;
 }
@@ -78,11 +78,11 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   opacity: 1 !important;
 }
 
-[data-screenpilot-prompt-bar="true"] > input:not([aria-disabled="true"]) {
+[data-screenpilot-vision-prompt="true"]:not([aria-disabled="true"]) {
   opacity: 1 !important;
 }
 
-[data-screenpilot-prompt-bar="true"] > input {
+[data-screenpilot-vision-prompt="true"] {
   width: 0 !important;
   min-width: 0 !important;
   max-width: 100%;
@@ -346,12 +346,12 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   width: 100px;
 }
 
-[data-screenpilot-target-language="true"] + select[data-screenpilot-translation-method="true"] {
+[data-screenpilot-target-language-slot="true"] + select[data-screenpilot-translation-method="true"] {
   margin-left: 6px !important;
   margin-right: 0 !important;
 }
 
-[data-screenpilot-source-language="true"] + select {
+[data-screenpilot-source-language-slot="true"] + select[data-screenpilot-ocr-method="true"] {
   margin-left: 6px !important;
   margin-right: 0 !important;
 }

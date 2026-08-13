@@ -36,6 +36,22 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
+    rollupOptions: {
+      output: {
+        onlyExplicitManualChunks: true,
+        manualChunks(id) {
+          const normalized = id.replaceAll('\\', '/')
+          if (
+            normalized.includes('/node_modules/react-markdown/')
+            || normalized.includes('/node_modules/remark-gfm/')
+            || normalized.includes('/node_modules/remark-math/')
+            || normalized.includes('/node_modules/rehype-katex/')
+            || normalized.includes('/node_modules/katex/')
+          ) return 'markdown-renderer'
+          return undefined
+        },
+      },
+    },
   },
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
@@ -53,9 +69,22 @@ export default defineConfig({
         functions: 58,
         statements: 55,
         branches: 48,
+        'src/desktop/tauri-adapter.ts': {
+          lines: 100,
+          functions: 100,
+          statements: 100,
+          branches: 100,
+        },
+        'src/features/vision/reference-vision.tsx': {
+          lines: 68,
+          functions: 68,
+          statements: 64,
+          branches: 42,
+        },
       },
       include: [
         'src/app/external-link-bridge.tsx',
+        'src/app/window-listener-recovery.tsx',
         'src/desktop/**/*.{ts,tsx}',
         'src/features/history/**/*.{ts,tsx}',
         'src/features/prompt-optimizer/**/*.{ts,tsx}',

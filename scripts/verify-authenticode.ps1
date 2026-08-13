@@ -2,7 +2,8 @@
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Path,
-    [bool]$RequireTimestamp = $true
+    [bool]$RequireTimestamp = $true,
+    [string]$ApprovedThumbprint = $env:SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +11,22 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) {
     throw 'SIGNATURE_VERIFICATION_FAILED: Authenticode 验证仅支持 Windows，不能跳过正式发布签名验证。'
 }
+
+function ConvertTo-NormalizedThumbprint {
+    param(
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $normalized = [regex]::Replace($Value, '[\s:]', '').ToUpperInvariant()
+    if ($normalized -notmatch '^[0-9A-F]{40}$') {
+        throw 'SIGNATURE_VERIFICATION_FAILED: 批准的 Authenticode 证书指纹必须是 40 位十六进制 SHA-1 指纹（可包含空白或冒号分隔符）。'
+    }
+    return $normalized
+}
+
+$normalizedApprovedThumbprint = ConvertTo-NormalizedThumbprint -Value $ApprovedThumbprint
 
 if ($null -eq $Path -or $Path.Count -eq 0) {
     $releaseRoot = Join-Path $PSScriptRoot '..\src-tauri\target\release'
@@ -39,10 +56,14 @@ foreach ($artifact in $artifacts) {
     if ($null -eq $signature.SignerCertificate) {
         throw "SIGNATURE_VERIFICATION_FAILED: $($artifact.FullName) 缺少签名证书。"
     }
-    if ($null -eq $signerThumbprint) {
-        $signerThumbprint = $signature.SignerCertificate.Thumbprint
+    $artifactThumbprint = ConvertTo-NormalizedThumbprint -Value $signature.SignerCertificate.Thumbprint
+    if ($null -ne $normalizedApprovedThumbprint -and $artifactThumbprint -ne $normalizedApprovedThumbprint) {
+        throw "SIGNATURE_VERIFICATION_FAILED: $($artifact.FullName) 的签名证书不在组织批准的证书指纹门禁内。"
     }
-    elseif ($signature.SignerCertificate.Thumbprint -ne $signerThumbprint) {
+    if ($null -eq $signerThumbprint) {
+        $signerThumbprint = $artifactThumbprint
+    }
+    elseif ($artifactThumbprint -ne $signerThumbprint) {
         throw "SIGNATURE_VERIFICATION_FAILED: $($artifact.FullName) 与其他发布物使用了不同的签名证书。"
     }
     if ($RequireTimestamp -and $null -eq $signature.TimeStamperCertificate) {

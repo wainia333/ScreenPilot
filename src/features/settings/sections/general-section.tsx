@@ -8,10 +8,14 @@ export function GeneralSection({
   settings,
   onChange,
   onPickDirectory,
+  pickDirectoryDisabled = false,
+  pickingDirectory = false,
 }: {
   settings: AppSettings
   onChange: (settings: AppSettings) => void
   onPickDirectory: () => void
+  pickDirectoryDisabled?: boolean
+  pickingDirectory?: boolean
 }) {
   const t = copyFor(settings.language)
   const updateGeneral = (patch: Partial<AppSettings['general']>) =>
@@ -95,7 +99,13 @@ export function GeneralSection({
         </SettingRow>
         {settings.general.imageArchiveEnabled ? (
           <SettingRow label={t.archiveDirectory}>
-            <button type="button" className="path-button" onClick={onPickDirectory}>
+            <button
+              type="button"
+              className="path-button"
+              disabled={pickDirectoryDisabled}
+              aria-busy={pickingDirectory}
+              onClick={onPickDirectory}
+            >
               <FolderOpen size={15} />
               <span>{settings.general.imageArchivePath || t.chooseDirectory}</span>
             </button>

@@ -34,6 +34,7 @@
     "scan": "node scripts/verify-project.mjs",
     "vendor:lock": "node scripts/update-vendor-integrity.mjs",
     "audit:dependencies": "npm audit",
+    "audit:rust": "cargo audit --file src-tauri/Cargo.lock",
     "smoke:windows": "pwsh -NoProfile -File scripts/smoke-windows.ps1",
     "release:signed:windows": "pwsh -NoProfile -File scripts/build-signed-windows-release.ps1",
     "verify:signatures:windows": "pwsh -NoProfile -File scripts/verify-authenticode.ps1",

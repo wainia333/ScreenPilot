@@ -60,6 +60,7 @@ pub fn run() {
             translator_translate,
             translator_cancel,
             optimizer_run,
+            optimizer_cancel,
             text_commit,
             window_hide,
             translator_take_selection,
@@ -87,9 +88,9 @@ pub fn run() {
             vision_translate_text,
             synthesize_speech,
             take_vision_selection,
-            get_settings,
-            save_settings,
-            optimize_prompt,
+            vision_runtime_settings_load,
+            screenshot_translation_settings_update,
+            vision_optimize_prompt,
             permissions_status
         ])
         .setup(|app| {

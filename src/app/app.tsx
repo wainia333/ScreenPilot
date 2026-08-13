@@ -1,13 +1,13 @@
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useState } from 'react'
 import { DesktopProvider } from '../desktop/context'
 import type { WindowRoute } from '../desktop/contract'
-import { useDesktop } from '../desktop/use-desktop'
 import { OptimizerPage } from '../features/prompt-optimizer/optimizer-page'
 import { SettingsPage } from '../features/settings/settings-page'
 import { TranslatorPage } from '../features/translator/translator-page'
 import { ExternalLinkBridge } from './external-link-bridge'
 import { VisionRouteBoundary, VisionRouteLoading } from './vision-route-state'
+import { WindowListenerRecovery } from './window-listener-recovery'
 
 const ReferenceVision = lazy(() => import('../features/vision/reference-vision'))
 
@@ -24,7 +24,6 @@ function routeAllowedInWindow(
 }
 
 function RouteContent() {
-  const desktop = useDesktop()
   const parameters = new URLSearchParams(window.location.search)
   const tauriRuntime = '__TAURI_INTERNALS__' in window
   const visionWindow = parameters.get('window') === 'vision'
@@ -39,41 +38,34 @@ function RouteContent() {
       : 'settings'
   const [route, setRoute] = useState<WindowRoute>(initialRoute)
   const [generation, setGeneration] = useState(0)
-  useEffect(() => {
-    let routeUnlisten: (() => void) | undefined
-    let resetUnlisten: (() => void) | undefined
-    let active = true
-    void desktop.onRoute((nextRoute) => {
-      if (routeAllowedInWindow(nextRoute, tauriRuntime, visionWindow, translatorWindow)) {
-        setRoute(nextRoute)
-      }
-    }).then((unlisten) => {
-      if (active) routeUnlisten = unlisten
-      else unlisten()
-    })
-    void desktop.onWindowReset((nextRoute) => {
-      if (!routeAllowedInWindow(nextRoute, tauriRuntime, visionWindow, translatorWindow)) return
+  const handleRoute = useCallback((nextRoute: WindowRoute) => {
+    if (routeAllowedInWindow(nextRoute, tauriRuntime, visionWindow, translatorWindow)) {
       setRoute(nextRoute)
-      setGeneration((value) => value + 1)
-    }).then((unlisten) => {
-      if (active) resetUnlisten = unlisten
-      else unlisten()
-    })
-    return () => {
-      active = false
-      routeUnlisten?.()
-      resetUnlisten?.()
     }
-  }, [desktop, tauriRuntime, translatorWindow, visionWindow])
-  if (route === 'settings') return <SettingsPage key={`settings-${generation}`} />
-  if (route === 'translator') return <TranslatorPage key={`translator-${generation}`} />
-  if (route === 'prompt-optimizer') return <OptimizerPage key={`optimizer-${generation}`} />
+  }, [tauriRuntime, translatorWindow, visionWindow])
+  const handleWindowReset = useCallback((nextRoute: WindowRoute) => {
+    if (!routeAllowedInWindow(nextRoute, tauriRuntime, visionWindow, translatorWindow)) return
+    setRoute(nextRoute)
+    setGeneration((value) => value + 1)
+  }, [tauriRuntime, translatorWindow, visionWindow])
+  const content = route === 'settings'
+    ? <SettingsPage key={`settings-${generation}`} />
+    : route === 'translator'
+      ? <TranslatorPage key={`translator-${generation}`} />
+      : route === 'prompt-optimizer'
+        ? <OptimizerPage key={`optimizer-${generation}`} />
+        : (
+            <VisionRouteBoundary resetKey={generation}>
+              <Suspense fallback={<VisionRouteLoading />}>
+                <ReferenceVision key={`vision-${generation}`} />
+              </Suspense>
+            </VisionRouteBoundary>
+          )
   return (
-    <VisionRouteBoundary resetKey={generation}>
-      <Suspense fallback={<VisionRouteLoading />}>
-        <ReferenceVision key={`vision-${generation}`} />
-      </Suspense>
-    </VisionRouteBoundary>
+    <>
+      {content}
+      <WindowListenerRecovery onRoute={handleRoute} onWindowReset={handleWindowReset} />
+    </>
   )
 }
 

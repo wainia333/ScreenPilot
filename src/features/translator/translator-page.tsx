@@ -7,7 +7,7 @@ import { translationMethodOptions } from '../settings/translation-methods'
 import type { AppSettings, TranslationLanguage, TranslationMethod } from '../settings/types'
 import { isValidModelSelection, normalizeAiAvailability } from '../settings/sanitize'
 import { DEFAULT_SETTINGS } from '../settings/defaults'
-import type { TranslationSettingsPatch } from '../../desktop/contract'
+import type { TranslationSettingsPatch, Unlisten } from '../../desktop/contract'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
 import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 import { HistoryMenu } from '../history/history-menu'
@@ -23,6 +23,39 @@ type TranslationHistory = {
   output: string
   method: TranslationMethod
   updatedAt: number
+}
+
+type TranslatorListenerKind = 'prepare' | 'selection'
+type TranslatorListenerErrors = Partial<Record<TranslatorListenerKind, string>>
+type TranslatorListenerState = Record<TranslatorListenerKind, boolean>
+
+const translationSettingKeys = ['method', 'sourceLanguage', 'targetLanguage'] as const
+
+function translationSettingsDiff(
+  confirmed: AppSettings,
+  desired: AppSettings,
+): TranslationSettingsPatch {
+  const patch: TranslationSettingsPatch = {}
+  translationSettingKeys.forEach((key) => {
+    if (confirmed.translation[key] !== desired.translation[key]) {
+      Object.assign(patch, { [key]: desired.translation[key] })
+    }
+  })
+  return patch
+}
+
+function translatorRecoveryCopy(language: AppSettings['language']) {
+  return language === 'en'
+    ? {
+        prepare: 'Window activation updates are unavailable.',
+        selection: 'Selected-text updates are unavailable.',
+        settings: 'The setting could not be saved. The last saved options were restored.',
+      }
+    : {
+        prepare: '窗口唤起同步暂不可用。',
+        selection: '选中文本同步暂不可用。',
+        settings: '设置保存失败，已恢复上次保存的选项。',
+      }
 }
 
 const historyKey = 'screenpilot:translator-history'
@@ -58,6 +91,13 @@ export function TranslatorPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
+  const [listenerErrors, setListenerErrors] = useState<TranslatorListenerErrors>({})
+  const [listenerRetrying, setListenerRetrying] = useState<TranslatorListenerState>({
+    prepare: false,
+    selection: false,
+  })
   const [arrivalCycle, setArrivalCycle] = useState(0)
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
   const activeGeneration = useRef(0)
@@ -70,6 +110,18 @@ export function TranslatorPage() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const immediateRequest = useRef<string | null>(null)
   const skipNextInputRequest = useRef<string | null>(null)
+  const copyRequest = useRef(0)
+  const componentActive = useRef(false)
+  const confirmedSettings = useRef<AppSettings | null>(null)
+  const desiredSettings = useRef<AppSettings | null>(null)
+  const pendingSettings = useRef<AppSettings | null>(null)
+  const settingsWriteTask = useRef<Promise<void> | null>(null)
+  const listenerInstallers = useRef<Record<TranslatorListenerKind, () => Promise<boolean>>>(
+    {
+      prepare: () => Promise.resolve(false),
+      selection: () => Promise.resolve(false),
+    },
+  )
   const { ratio, beginResize, resizeByKeyboard } = useSplitRatio(
     'screenpilot:translator-ocr-golden-split',
     goldenSectionRatio,
@@ -86,19 +138,87 @@ export function TranslatorPage() {
     })
     return cancelGeneration
   }, [desktop])
-  const hideTranslator = useCallback(() => {
+  const hideTranslator = useCallback(async () => {
     cancelTranslation()
-    return desktop.hideWindow()
+    try {
+      await desktop.hideWindow()
+    } catch (reason) {
+      setLoading(false)
+      setError(String(reason))
+    }
   }, [cancelTranslation, desktop])
   useEffect(() => {
     document.documentElement.lang = interfaceLanguage === 'zh' ? 'zh-CN' : 'en'
     document.title = `ScreenPilot — ${t.translatorTitle}`
-    if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+    if ('__TAURI_INTERNALS__' in window) {
+      void getCurrentWindow().setTitle(document.title).catch((reason: unknown) => {
+        console.error('[translator] failed to set window title', reason)
+      })
+    }
   }, [interfaceLanguage, t.translatorTitle])
+  const flushTranslationSettings = useCallback((): Promise<void> => {
+    if (settingsWriteTask.current !== null) return settingsWriteTask.current
+    const run = async () => {
+      while (pendingSettings.current !== null) {
+        const target = pendingSettings.current
+        const confirmed = confirmedSettings.current
+        pendingSettings.current = null
+        if (confirmed === null) break
+        const patch = translationSettingsDiff(confirmed, target)
+        if (Object.keys(patch).length === 0) {
+          confirmedSettings.current = target
+          continue
+        }
+        try {
+          await desktop.updateTranslationSettings(patch)
+          confirmedSettings.current = target
+          if (componentActive.current && desiredSettings.current === target) {
+            setSettings(target)
+            setSettingsError(null)
+          }
+        } catch (reason) {
+          let rollback = confirmed
+          try {
+            rollback = await desktop.loadSettings()
+          } catch (loadReason) {
+            console.error('[translator] failed to reload settings after an update failure', loadReason)
+          }
+          pendingSettings.current = null
+          confirmedSettings.current = rollback
+          desiredSettings.current = rollback
+          if (componentActive.current) {
+            cancelTranslation()
+            immediateRequest.current = translationRequestKey(inputRef.current?.value ?? '', rollback)
+            setOutput('')
+            setLoading(false)
+            setSettings(rollback)
+            setSettingsError(`${translatorRecoveryCopy(rollback.language).settings} ${String(reason)}`)
+          }
+          break
+        }
+      }
+    }
+    const task = run().finally(() => {
+      if (settingsWriteTask.current === task) settingsWriteTask.current = null
+    })
+    settingsWriteTask.current = task
+    return task
+  }, [cancelTranslation, desktop])
   useEffect(() => {
     const lifecycle = { active: true }
-    let prepareUnlisten: (() => void) | undefined
-    let selectionUnlisten: (() => void) | undefined
+    const unlisteners: Record<TranslatorListenerKind, Unlisten | null> = {
+      prepare: null,
+      selection: null,
+    }
+    const attempts: Record<TranslatorListenerKind, number> = {
+      prepare: 0,
+      selection: 0,
+    }
+    const registrations: Record<TranslatorListenerKind, Promise<boolean> | null> = {
+      prepare: null,
+      selection: null,
+    }
+    componentActive.current = true
 
     const focusInput = () => {
       queueMicrotask(() => {
@@ -117,16 +237,22 @@ export function TranslatorPage() {
       setOutput('')
       setError(null)
       setLoading(false)
+      copyRequest.current += 1
       setCopied(false)
+      setCopyError(null)
       focusInput()
     }
     const refreshSettings = () => {
       const request = settingsRequest.current + 1
       settingsRequest.current = request
-      setSettings(null)
-      void desktop.loadSettings().then((loaded) => {
+      if (settingsWriteTask.current === null) setSettings(null)
+      void flushTranslationSettings().then(() => desktop.loadSettings()).then((loaded) => {
         if (lifecycle.active && request === settingsRequest.current) {
           syncDocumentTheme(loaded.theme)
+          confirmedSettings.current = loaded
+          desiredSettings.current = loaded
+          pendingSettings.current = null
+          setSettingsError(null)
           setSettings(loaded)
         }
       }).catch((reason: unknown) => {
@@ -148,8 +274,7 @@ export function TranslatorPage() {
         if (lifecycle.active && request === selectionRequest.current) setError(String(reason))
       })
     }
-
-    void desktop.onTranslatorPrepare(() => {
+    const onPrepare = () => {
       if (!lifecycle.active) return
       inputRevision.current += 1
       cancelTranslation()
@@ -162,34 +287,87 @@ export function TranslatorPage() {
       setOutput('')
       setError(null)
       setLoading(false)
+      copyRequest.current += 1
       setCopied(false)
+      setCopyError(null)
       setArrivalCycle((value) => value + 1)
       refreshSettings()
-    }).then((unlisten) => {
-      if (lifecycle.active) prepareUnlisten = unlisten
-      else unlisten()
-    })
-    void desktop.onTranslatorSelection((selected) => {
+    }
+    const onSelection = (selected: string) => {
       if (!lifecycle.active) return
       selectionRequest.current += 1
       applySelection(selected)
-    }).then((unlisten) => {
-      if (lifecycle.active) selectionUnlisten = unlisten
-      else unlisten()
-    })
+    }
+    const installListener = (kind: TranslatorListenerKind): Promise<boolean> => {
+      if (!lifecycle.active || unlisteners[kind] !== null) return Promise.resolve(true)
+      if (registrations[kind] !== null) return registrations[kind]
+      const attempt = attempts[kind] + 1
+      attempts[kind] = attempt
+      setListenerRetrying((current) => ({ ...current, [kind]: true }))
+      const registration = Promise.resolve()
+        .then(() => kind === 'prepare'
+          ? desktop.onTranslatorPrepare(onPrepare)
+          : desktop.onTranslatorSelection(onSelection))
+        .then((unlisten) => {
+          if (!lifecycle.active || attempt !== attempts[kind]) {
+            unlisten()
+            return false
+          }
+          unlisteners[kind] = unlisten
+          setListenerErrors((current) => {
+            if (current[kind] === undefined) return current
+            return kind === 'prepare'
+              ? { ...(current.selection === undefined ? {} : { selection: current.selection }) }
+              : { ...(current.prepare === undefined ? {} : { prepare: current.prepare }) }
+          })
+          return true
+        })
+        .catch((reason: unknown) => {
+          console.error(`[translator] failed to register ${kind} listener`, reason)
+          if (lifecycle.active && attempt === attempts[kind]) {
+            setListenerErrors((current) => ({ ...current, [kind]: String(reason) }))
+          }
+          return false
+        })
+        .finally(() => {
+          if (registrations[kind] === registration) registrations[kind] = null
+          if (lifecycle.active && attempt === attempts[kind]) {
+            setListenerRetrying((current) => ({ ...current, [kind]: false }))
+          }
+        })
+      registrations[kind] = registration
+      return registration
+    }
+    listenerInstallers.current = {
+      prepare: () => installListener('prepare'),
+      selection: () => installListener('selection'),
+    }
+
+    void installListener('prepare')
+    void installListener('selection')
     refreshSettings()
     syncStoredSelection()
     window.addEventListener('focus', syncStoredSelection)
     return () => {
       lifecycle.active = false
-      prepareUnlisten?.()
-      selectionUnlisten?.()
+      componentActive.current = false
+      attempts.prepare += 1
+      attempts.selection += 1
+      unlisteners.prepare?.()
+      unlisteners.selection?.()
+      unlisteners.prepare = null
+      unlisteners.selection = null
+      listenerInstallers.current = {
+        prepare: () => Promise.resolve(false),
+        selection: () => Promise.resolve(false),
+      }
       window.removeEventListener('focus', syncStoredSelection)
       settingsRequest.current += 1
       selectionRequest.current += 1
+      copyRequest.current += 1
       cancelTranslation()
     }
-  }, [cancelTranslation, desktop])
+  }, [cancelTranslation, desktop, flushTranslationSettings])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -222,7 +400,9 @@ export function TranslatorPage() {
       }).then((result) => {
         if (result.generation !== activeGeneration.current) return
         setOutput(result.text)
+        copyRequest.current += 1
         setCopied(false)
+        setCopyError(null)
         setLoading(false)
         const entry: TranslationHistory = {
           id: roundId.current,
@@ -244,14 +424,19 @@ export function TranslatorPage() {
     if (settings === null) return
     const translation = { ...settings.translation, ...patch }
     const next = normalizeAiAvailability({ ...settings, translation })
+    desiredSettings.current = next
+    pendingSettings.current = next
     immediateRequest.current = translationRequestKey(input, next)
     cancelTranslation()
     setOutput('')
     setLoading(false)
     setError(null)
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
+    setSettingsError(null)
     setSettings(next)
-    void desktop.updateTranslationSettings(patch).catch((reason: unknown) => setError(String(reason)))
+    void flushTranslationSettings()
   }
   const updateInput = (value: string) => {
     if (value === input) return
@@ -263,7 +448,9 @@ export function TranslatorPage() {
     setOutput('')
     setLoading(false)
     setError(null)
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
     if (value.trim().length === 0) {
       roundId.current = crypto.randomUUID()
     }
@@ -272,8 +459,13 @@ export function TranslatorPage() {
     const text = output.trim().length > 0 ? output : input
     if (text.trim().length === 0) return
     cancelTranslation()
-    await desktop.commitText(text, settings?.general.autoPaste ?? false)
-    await desktop.hideWindow()
+    setError(null)
+    try {
+      await desktop.commitText(text, settings?.general.autoPaste ?? false)
+    } catch (reason) {
+      setLoading(false)
+      setError(String(reason))
+    }
   }
   const restoreHistory = (item: TranslationHistory) => {
     inputRevision.current += 1
@@ -284,7 +476,9 @@ export function TranslatorPage() {
     setOutput(item.output)
     setError(null)
     setLoading(false)
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
     roundId.current = item.id
     queueMicrotask(() => inputRef.current?.focus())
   }
@@ -297,6 +491,28 @@ export function TranslatorPage() {
   const availableMethods = translationMethodOptions
     .filter((option) => option.value !== 'ai' || canUseAi)
     .map((option) => ({ ...option, label: translationMethodLabel(option.value, interfaceLanguage) }))
+  const retryListener = (kind: TranslatorListenerKind) => {
+    if (listenerRetrying[kind]) return
+    void listenerInstallers.current[kind]()
+  }
+  const recoveryCopy = translatorRecoveryCopy(interfaceLanguage)
+  const copyOutput = async () => {
+    const request = copyRequest.current + 1
+    copyRequest.current = request
+    try {
+      await navigator.clipboard.writeText(output)
+      if (request !== copyRequest.current) return
+      setCopyError(null)
+      setCopied(true)
+      window.setTimeout(() => {
+        if (request === copyRequest.current) setCopied(false)
+      }, 1200)
+    } catch {
+      if (request !== copyRequest.current) return
+      setCopied(false)
+      setCopyError(t.copyFailed)
+    }
+  }
   return (
     <main
       key={arrivalCycle}
@@ -310,7 +526,7 @@ export function TranslatorPage() {
           <h1>{t.translatorTitle}</h1>
         </div>
         <span className="ocr-result-status" aria-live="polite">
-          {loading ? t.translating : input.trim().length > 0 ? t.submitShortcut : t.waitingForInput}
+          {copyError ?? (loading ? t.translating : input.trim().length > 0 ? t.submitShortcut : t.waitingForInput)}
         </span>
         <div className="ocr-result-header-actions">
           <HistoryMenu
@@ -328,6 +544,24 @@ export function TranslatorPage() {
           </button>
         </div>
       </header>
+      {settingsError === null && Object.keys(listenerErrors).length === 0 ? null : (
+        <aside className="mx-3 mt-2 shrink-0 rounded-lg bg-white/95 px-3 py-2 text-[11px] text-red-600 shadow-md ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-red-400 dark:ring-white/10" role="alert">
+          {settingsError === null ? null : <p className="break-words">{settingsError}</p>}
+          {(['prepare', 'selection'] as const).map((kind) => listenerErrors[kind] === undefined ? null : (
+            <div className="flex items-center gap-2" key={kind}>
+              <span className="min-w-0 flex-1 break-words">{recoveryCopy[kind]} {listenerErrors[kind]}</span>
+              <button
+                type="button"
+                className="text-button h-6 shrink-0 px-1"
+                disabled={listenerRetrying[kind]}
+                onClick={() => retryListener(kind)}
+              >
+                {listenerRetrying[kind] ? `${t.retry}…` : t.retry}
+              </button>
+            </div>
+          ))}
+        </aside>
+      )}
       <div
         className="ocr-result-body translator-split-body"
         style={{ gridTemplateRows: `${String(ratio)}fr 9px ${String(1 - ratio)}fr` }}
@@ -386,12 +620,7 @@ export function TranslatorPage() {
               className="ocr-section-button"
               aria-label={t.copyTranslation}
               disabled={output.length === 0}
-              onClick={() => {
-                void navigator.clipboard.writeText(output).then(() => {
-                  setCopied(true)
-                  window.setTimeout(() => setCopied(false), 1200)
-                })
-              }}
+              onClick={() => void copyOutput()}
             >
               {copied ? <Check size={15} /> : <Clipboard size={15} />}
             </button>
@@ -428,7 +657,12 @@ export function TranslatorPage() {
               aria-label={t.translatedText}
               value={output}
               placeholder={t.translatedTextPlaceholder}
-              onChange={(event) => setOutput(event.target.value)}
+              onChange={(event) => {
+                copyRequest.current += 1
+                setOutput(event.target.value)
+                setCopied(false)
+                setCopyError(null)
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !composing.current) {
                   event.preventDefault()

@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { Component, useState, type ErrorInfo, type ReactNode } from 'react'
 import { Loader2 } from 'lucide-react'
 import { useDesktop } from '../desktop/use-desktop'
 
@@ -10,12 +10,14 @@ function interfaceCopy() {
         failed: 'Vision failed to load',
         retry: 'Retry',
         close: 'Close',
+        closeFailed: 'Unable to close the Vision window. Please try again.',
       }
     : {
         loading: '正在加载 Vision…',
         failed: 'Vision 加载失败',
         retry: '重试',
         close: '关闭',
+        closeFailed: '关闭 Vision 窗口失败，请重试。',
       }
 }
 
@@ -34,14 +36,24 @@ export function VisionRouteLoading() {
 function VisionRouteError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const desktop = useDesktop()
   const t = interfaceCopy()
+  const [closeError, setCloseError] = useState<string | null>(null)
+  const close = async () => {
+    setCloseError(null)
+    try {
+      await desktop.hideWindow()
+    } catch {
+      setCloseError(t.closeFailed)
+    }
+  }
   return (
     <main className="fixed inset-0 flex items-center justify-center bg-transparent p-4" role="alert">
       <div className="max-w-md rounded-2xl bg-white/95 p-5 text-neutral-800 shadow-xl ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-neutral-100 dark:ring-white/10">
         <h1 className="text-base font-semibold">{t.failed}</h1>
         <p className="mt-2 break-words text-sm text-neutral-600 dark:text-neutral-300">{error.message}</p>
+        {closeError === null ? null : <p className="mt-2 text-sm text-red-600 dark:text-red-400" role="alert">{closeError}</p>}
         <div className="mt-4 flex gap-2">
           <button type="button" className="primary-button" autoFocus onClick={onRetry}>{t.retry}</button>
-          <button type="button" className="secondary-button" onClick={() => void desktop.hideWindow()}>{t.close}</button>
+          <button type="button" className="secondary-button" onClick={() => void close()}>{t.close}</button>
         </div>
       </div>
     </main>

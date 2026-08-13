@@ -2,9 +2,16 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
-import type { TranslationRequest, TranslationResult } from '../../desktop/contract'
+import type {
+  TranslationRequest,
+  TranslationResult,
+  TranslationSettingsPatch,
+  Unlisten,
+} from '../../desktop/contract'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { TRANSLATOR_INPUT_DEBOUNCE_MS, TranslatorPage } from './translator-page'
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 class RecordingDesktop extends FakeDesktopPort {
   readonly translations: TranslationRequest[] = []
@@ -59,11 +66,96 @@ class DeferredTranslationDesktop extends RecordingDesktop {
   }
 }
 
+class RejectingTranslatorDesktop extends RecordingDesktop {
+  rejectCommit = false
+  rejectHide = false
+
+  override commitText(text: string, autoPaste: boolean): Promise<void> {
+    this.commits.push(text)
+    this.commitAutoPaste.push(autoPaste)
+    if (this.rejectCommit) return Promise.reject(new Error('synthetic commit failure'))
+    return Promise.resolve()
+  }
+
+  override hideWindow(): Promise<void> {
+    this.hides += 1
+    if (this.rejectHide) return Promise.reject(new Error('synthetic hide failure'))
+    return Promise.resolve()
+  }
+
+}
+
+class DeferredSettingsDesktop extends RecordingDesktop {
+  readonly settingsUpdates: {
+    patch: TranslationSettingsPatch
+    resolve: () => void
+    reject: (reason: unknown) => void
+  }[] = []
+
+  override updateTranslationSettings(patch: TranslationSettingsPatch): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.settingsUpdates.push({
+        patch: structuredClone(patch),
+        resolve: () => {
+          void super.updateTranslationSettings(patch).then(resolve, reject)
+        },
+        reject,
+      })
+    })
+  }
+}
+
+class RecoveringListenerDesktop extends RecordingDesktop {
+  prepareAttempts = 0
+  selectionAttempts = 0
+  prepareFailures = 0
+  selectionFailures = 0
+  prepareUnlistens = 0
+  selectionUnlistens = 0
+
+  override onTranslatorPrepare(listener: () => void): Promise<Unlisten> {
+    this.prepareAttempts += 1
+    if (this.prepareFailures > 0) {
+      this.prepareFailures -= 1
+      return Promise.reject(new Error('synthetic prepare listener failure'))
+    }
+    return super.onTranslatorPrepare(listener).then((unlisten) => () => {
+      this.prepareUnlistens += 1
+      unlisten()
+    })
+  }
+
+  override onTranslatorSelection(listener: (selection: string) => void): Promise<Unlisten> {
+    this.selectionAttempts += 1
+    if (this.selectionFailures > 0) {
+      this.selectionFailures -= 1
+      return Promise.reject(new Error('synthetic selection listener failure'))
+    }
+    return super.onTranslatorSelection(listener).then((unlisten) => () => {
+      this.selectionUnlistens += 1
+      unlisten()
+    })
+  }
+}
+
+class DeferredPrepareListenerDesktop extends RecoveringListenerDesktop {
+  resolvePrepare: ((unlisten: Unlisten) => void) | null = null
+
+  override onTranslatorPrepare(): Promise<Unlisten> {
+    this.prepareAttempts += 1
+    return new Promise((resolve) => {
+      this.resolvePrepare = resolve
+    })
+  }
+}
+
 describe('TranslatorPage', () => {
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
     vi.restoreAllMocks()
+    if (originalClipboardDescriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
+    else Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
     sessionStorage.clear()
     localStorage.clear()
   })
@@ -366,6 +458,46 @@ describe('TranslatorPage', () => {
     expect(desktop.commits).not.toContain('translated:source text')
   })
 
+  it('announces clipboard failures without an unhandled rejection and preserves copy success feedback', async () => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    const writeText = vi.fn<(text: string) => Promise<void>>()
+      .mockRejectedValueOnce(new DOMException('synthetic clipboard denial', 'NotAllowedError'))
+      .mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.change(screen.getByLabelText('原文'), { target: { value: 'copy source' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    const copy = screen.getByRole('button', { name: '复制译文' })
+
+    await act(async () => {
+      fireEvent.click(copy)
+      await Promise.resolve()
+    })
+
+    expect(writeText).toHaveBeenNthCalledWith(1, 'translated:copy source')
+    expect(screen.getByText('复制失败，请检查剪贴板权限')).toHaveAttribute('aria-live', 'polite')
+    expect(copy.querySelector('svg')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(copy)
+      await Promise.resolve()
+    })
+
+    expect(writeText).toHaveBeenNthCalledWith(2, 'translated:copy source')
+    expect(screen.queryByText('复制失败，请检查剪贴板权限')).not.toBeInTheDocument()
+    expect(copy.querySelector('.lucide-check')).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTime(1200))
+    expect(copy.querySelector('.lucide-clipboard')).toBeInTheDocument()
+  })
+
   it('shows and synchronizes the translation history badge', async () => {
     localStorage.setItem('screenpilot:translator-history', JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
       id: `saved-translation-${String(index)}`,
@@ -471,6 +603,84 @@ describe('TranslatorPage', () => {
     expect(desktop.translations.at(-1)?.sourceLanguage).toBe('en')
   })
 
+  it('serializes rapid setting changes and persists the last intent', async () => {
+    const desktop = new DeferredSettingsDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.change(screen.getByRole('combobox', { name: '源语言' }), {
+      target: { value: 'en' },
+    })
+    fireEvent.change(screen.getByRole('combobox', { name: '目标语言' }), {
+      target: { value: 'ja' },
+    })
+    await act(async () => Promise.resolve())
+
+    expect(desktop.settingsUpdates).toHaveLength(1)
+    expect(desktop.settingsUpdates[0]?.patch).toEqual({ sourceLanguage: 'en' })
+    await act(async () => {
+      desktop.settingsUpdates[0]?.resolve()
+      await Promise.resolve()
+    })
+    expect(desktop.settingsUpdates).toHaveLength(2)
+    expect(desktop.settingsUpdates[1]?.patch).toEqual({ targetLanguage: 'ja' })
+    await act(async () => {
+      desktop.settingsUpdates[1]?.resolve()
+      await Promise.resolve()
+    })
+
+    const saved = await desktop.loadSettings()
+    expect(saved.translation.sourceLanguage).toBe('en')
+    expect(saved.translation.targetLanguage).toBe('ja')
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en')
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('ja')
+  })
+
+  it('does not let a late settings refresh discard a pending last intent', async () => {
+    const desktop = new DeferredSettingsDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.change(screen.getByRole('combobox', { name: '目标语言' }), {
+      target: { value: 'ko' },
+    })
+    await act(async () => {
+      desktop.emitTranslatorPrepare()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('ko')
+    expect(desktop.settingsUpdates).toHaveLength(1)
+
+    await act(async () => {
+      desktop.settingsUpdates[0]?.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('ko')
+    expect((await desktop.loadSettings()).translation.targetLanguage).toBe('ko')
+  })
+
+  it('rolls setting controls back to confirmed storage after a rejected update', async () => {
+    const desktop = new DeferredSettingsDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.change(screen.getByRole('combobox', { name: '目标语言' }), {
+      target: { value: 'ja' },
+    })
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('ja')
+    await act(async () => {
+      desktop.settingsUpdates[0]?.reject(new Error('synthetic settings update failure'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('auto')
+    expect(screen.getByRole('alert')).toHaveTextContent('设置保存失败，已恢复上次保存的选项')
+    expect(screen.getByRole('alert')).toHaveTextContent('synthetic settings update failure')
+    expect((await desktop.loadSettings()).translation.targetLanguage).toBe('auto')
+  })
+
   it('preserves providers and AI settings when a stale translator window changes method', async () => {
     const desktop = new RecordingDesktop()
     const initialProvider = {
@@ -536,6 +746,92 @@ describe('TranslatorPage', () => {
     screen.getByRole('combobox', { name: '翻译接口' }).focus()
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(desktop.hides).toBe(2)
+  })
+
+  it('shows native commit and close failures without repeating the native hide', async () => {
+    const desktop = new RejectingTranslatorDesktop()
+    desktop.rejectCommit = true
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const input = screen.getByRole('textbox', { name: '原文' })
+    fireEvent.change(input, { target: { value: 'commit source' } })
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Error: synthetic commit failure')
+    expect(desktop.hides).toBe(0)
+
+    desktop.rejectCommit = false
+    desktop.rejectHide = true
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+      await Promise.resolve()
+    })
+    expect(desktop.commits).toEqual(['commit source', 'commit source'])
+    expect(desktop.hides).toBe(0)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '关闭翻译' }))
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Error: synthetic hide failure')
+    expect(desktop.hides).toBe(1)
+  })
+
+  it('retries only a failed translator listener and keeps the successful listener active', async () => {
+    const desktop = new RecoveringListenerDesktop()
+    desktop.prepareFailures = 1
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    expect(consoleError).toHaveBeenCalledWith(
+      '[translator] failed to register prepare listener',
+      expect.objectContaining({ message: 'synthetic prepare listener failure' }),
+    )
+    expect(screen.getByRole('heading', { name: '文本翻译' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('窗口唤起同步暂不可用')
+    expect(desktop.prepareAttempts).toBe(1)
+    expect(desktop.selectionAttempts).toBe(1)
+
+    await act(async () => {
+      desktop.emitTranslatorSelection('listener remains active')
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '原文' })).toHaveValue('listener remains active')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '重试' }))
+      await Promise.resolve()
+    })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(desktop.prepareAttempts).toBe(2)
+    expect(desktop.selectionAttempts).toBe(1)
+
+    await act(async () => {
+      desktop.emitTranslatorPrepare()
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '原文' })).toHaveValue('')
+  })
+
+  it('cleans up a listener registration that resolves after unmount', async () => {
+    const desktop = new DeferredPrepareListenerDesktop()
+    const view = render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    view.unmount()
+
+    expect(desktop.selectionUnlistens).toBe(1)
+    await act(async () => {
+      desktop.resolvePrepare?.(() => { desktop.prepareUnlistens += 1 })
+      await Promise.resolve()
+    })
+    expect(desktop.prepareUnlistens).toBe(1)
   })
 
   it('uses one explicit drag path for every repeated primary title press', async () => {

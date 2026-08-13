@@ -144,6 +144,13 @@ export type Settings = {
   imageArchivePath?: string
 }
 
+export type ScreenshotTranslationSettingsPatch = Partial<Settings['screenshotTranslation']>
+
+export type PromptOptimizationResult = {
+  generation: number
+  text: string
+}
+
 export type UpdateInfo = {
   available: boolean
   version?: string
@@ -183,9 +190,10 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
 }
 
 export const api = {
-  getSettings: () => invoke<Settings>('get_settings'),
+  getSettings: () => invoke<Settings>('vision_runtime_settings_load'),
   getDefaultPromptTemplates: () => invoke<DefaultPromptTemplates>('get_default_prompt_templates'),
-  saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  updateScreenshotTranslationSettings: (patch: ScreenshotTranslationSettingsPatch) =>
+    invoke<Settings>('screenshot_translation_settings_update', { patch }),
   exportSettingsConfig: () => invoke<boolean>('export_settings_config'),
   importSettingsConfig: () => invoke<Settings | null>('import_settings_config'),
 
@@ -201,7 +209,7 @@ export const api = {
   getAppVersion: () => getVersion(),
 
   translateText: (text: string) => invoke<string>('translate_text', { text }),
-  optimizePrompt: (text: string) => invoke<string>('optimize_prompt', { text }),
+  optimizePrompt: (text: string) => invoke<string>('vision_optimize_prompt', { text }),
   commitTranslation: (text: string) => invoke<void>('commit_translation', { text }),
   takeTranslatorSelection: () => invoke<string>('take_translator_selection'),
 

@@ -28,6 +28,8 @@ import { ModalDialog } from '../../shared/ui/modal-dialog'
 
 type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
+type SettingsOperation = 'directory' | 'export' | 'import'
+type StatusTone = 'status' | 'error'
 
 const SAVE_SUCCESS_TOAST_VISIBLE_MS = 3_200
 const SAVE_SUCCESS_TOAST_EXIT_MS = 200
@@ -150,12 +152,15 @@ export function SettingsPage() {
   const [importedSecrets, setImportedSecrets] = useState<SettingsSecrets | null>(null)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [status, setStatusState] = useState<string | null>(null)
+  const [statusTone, setStatusTone] = useState<StatusTone>('status')
   const [startupNoticePending, setStartupNoticePending] = useState(false)
   const [saveSuccessToast, setSaveSuccessToast] = useState<SaveSuccessToast | null>(null)
   const saveSuccessToastSequence = useRef(0)
   const saveSuccessToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveSuccessToastExitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [saving, setSaving] = useState(false)
+  const [settingsOperation, setSettingsOperation] = useState<SettingsOperation | null>(null)
+  const settingsOperationRef = useRef<SettingsOperation | null>(null)
   const [dialog, setDialog] = useState<DialogState>('none')
   const [pendingImport, setPendingImport] = useState<SettingsExport | null>(null)
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>()
@@ -183,13 +188,15 @@ export function SettingsPage() {
     clearSaveSuccessToastTimer()
     setSaveSuccessToast(null)
   }, [clearSaveSuccessToastTimer])
-  const setStatus = useCallback((message: string | null) => {
+  const setStatus = useCallback((message: string | null, tone: StatusTone = 'status') => {
     dismissSaveSuccessToast()
+    setStatusTone(tone)
     setStatusState(message)
   }, [dismissSaveSuccessToast])
   const showSaveSuccessToast = useCallback(() => {
     clearSaveSuccessToastTimer()
     setStatusState(null)
+    setStatusTone('status')
     const key = saveSuccessToastSequence.current + 1
     saveSuccessToastSequence.current = key
     setSaveSuccessToast({
@@ -253,11 +260,15 @@ export function SettingsPage() {
     syncDocumentTheme(draft.theme)
     document.documentElement.lang = draft.language === 'zh' ? 'zh-CN' : 'en'
     document.title = `ScreenPilot — ${copyFor(draft.language)[activeNavigation.label]}`
-    if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+    if ('__TAURI_INTERNALS__' in window) {
+      void getCurrentWindow().setTitle(document.title).catch((reason: unknown) => {
+        console.error('[settings] failed to set window title', reason)
+      })
+    }
   }, [activeNavigation.label, draft])
   const issues = useMemo(() => (draft === null ? [] : validateSettings(draft)), [draft])
   const save = useCallback(async (): Promise<boolean> => {
-    if (draft === null || issues.length > 0 || saving) return false
+    if (draft === null || issues.length > 0 || saving || settingsOperationRef.current !== null) return false
     const keyDraftSnapshot = structuredClone(providerKeyDrafts)
     const importedSecretsSnapshot = importedSecrets === null ? null : structuredClone(importedSecrets)
     const normalizedKeyDraftSnapshot = normalizeProviderKeyDrafts(keyDraftSnapshot)
@@ -302,7 +313,7 @@ export function SettingsPage() {
           const suffix = rollbackError === null
             ? ''
             : `${language === 'zh' ? '；' : '; '}${t.settingsRollbackFailed}${separator}${credentialErrorMessage(rollbackError, changes, t.unknownError)}`
-          setStatus(`${t.saveFailed}${separator}${t.credentialSaveFailed}${separator}${credentialError}${suffix}`)
+          setStatus(`${t.saveFailed}${separator}${t.credentialSaveFailed}${separator}${credentialError}${suffix}`, 'error')
           return false
         }
       }
@@ -321,21 +332,27 @@ export function SettingsPage() {
       showSaveSuccessToast()
       return true
     } catch (error) {
-      setStatus(`${t.saveFailed}${language === 'zh' ? '：' : ': '}${String(error)}`)
+      setStatus(`${t.saveFailed}${language === 'zh' ? '：' : ': '}${String(error)}`, 'error')
       return false
     } finally {
       setSaving(false)
     }
   }, [desktop, draft, importedSecrets, issues.length, language, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast, t])
-  const hide = useCallback(() => {
+  const hide = useCallback(async () => {
     dismissSaveSuccessToast()
-    void desktop.hideWindow()
-  }, [desktop, dismissSaveSuccessToast])
+    try {
+      await desktop.hideWindow()
+    } catch (error) {
+      const message = errorMessage(error, t.unknownError)
+      if (loadingError !== null) setLoadingError(message)
+      else setStatus(message, 'error')
+    }
+  }, [desktop, dismissSaveSuccessToast, loadingError, setStatus, t.unknownError])
   const requestClose = useCallback(() => {
-    if (saving) return
+    if (saving || settingsOperationRef.current !== null) return
     dismissSaveSuccessToast()
     if (dirty) setDialog('close')
-    else hide()
+    else void hide()
   }, [dirty, dismissSaveSuccessToast, hide, saving])
   const restoreDraft = useCallback(() => {
     if (saved === null) return
@@ -347,7 +364,7 @@ export function SettingsPage() {
     setDialog('none')
   }, [saved, setStatus])
   const cancel = useCallback(() => {
-    if (saving) return
+    if (saving || settingsOperationRef.current !== null) return
     restoreDraft()
   }, [restoreDraft, saving])
   useEffect(() => {
@@ -378,6 +395,67 @@ export function SettingsPage() {
     },
     [setStatus],
   )
+  const startSettingsOperation = useCallback((operation: SettingsOperation): boolean => {
+    if (saving || settingsOperationRef.current !== null) return false
+    settingsOperationRef.current = operation
+    setSettingsOperation(operation)
+    setStatus(null)
+    return true
+  }, [saving, setStatus])
+  const finishSettingsOperation = useCallback((operation: SettingsOperation) => {
+    if (settingsOperationRef.current !== operation) return
+    settingsOperationRef.current = null
+    setSettingsOperation(null)
+  }, [])
+  const showOperationFailure = useCallback((label: string, error: unknown) => {
+    const separator = language === 'zh' ? '：' : ': '
+    setStatus(`${label}${separator}${errorMessage(error, t.unknownError)}`, 'error')
+  }, [language, setStatus, t.unknownError])
+  const pickDirectory = useCallback(async () => {
+    if (!startSettingsOperation('directory')) return
+    try {
+      const imageArchivePath = await desktop.pickDirectory()
+      if (imageArchivePath !== null) {
+        setDraft((current) => current === null ? current : ({
+          ...current,
+          general: { ...current.general, imageArchivePath },
+        }))
+      }
+    } catch (error) {
+      showOperationFailure(t.directoryPickFailed, error)
+    } finally {
+      finishSettingsOperation('directory')
+    }
+  }, [desktop, finishSettingsOperation, showOperationFailure, startSettingsOperation, t.directoryPickFailed])
+  const exportSettings = useCallback(async (includeSecrets: boolean) => {
+    if (!startSettingsOperation('export')) return
+    try {
+      const exported = await desktop.exportSettings(includeSecrets)
+      if (exported) setStatus(t.settingsExported)
+    } catch (error) {
+      showOperationFailure(t.settingsExportFailed, error)
+    } finally {
+      finishSettingsOperation('export')
+    }
+  }, [desktop, finishSettingsOperation, setStatus, showOperationFailure, startSettingsOperation, t.settingsExportFailed, t.settingsExported])
+  const importSettings = useCallback(async () => {
+    if (!startSettingsOperation('import')) return
+    try {
+      const value = await desktop.importSettings()
+      if (value === null) return
+      if (dirty) {
+        dismissSaveSuccessToast()
+        setPendingImport(value)
+        setDialog('import')
+      } else {
+        applyImport(value)
+      }
+    } catch (error) {
+      showOperationFailure(t.settingsImportFailed, error)
+    } finally {
+      finishSettingsOperation('import')
+    }
+  }, [applyImport, desktop, dirty, dismissSaveSuccessToast, finishSettingsOperation, showOperationFailure, startSettingsOperation, t.settingsImportFailed])
   if (loadingError !== null) {
     return (
       <main className="load-state" onPointerDown={beginWindowDrag}>
@@ -388,7 +466,7 @@ export function SettingsPage() {
           <button type="button" className="primary-button" onClick={() => void load()}>
             {t.retry}
           </button>
-          <button type="button" className="secondary-button" onClick={hide}>
+          <button type="button" className="secondary-button" onClick={() => void hide()}>
             {t.close}
           </button>
         </div>
@@ -403,16 +481,9 @@ export function SettingsPage() {
       <GeneralSection
         settings={draft}
         onChange={setDraft}
-        onPickDirectory={() => {
-          void desktop.pickDirectory().then((imageArchivePath) => {
-            if (imageArchivePath !== null) {
-              setDraft((current) => current === null ? current : ({
-                ...current,
-                general: { ...current.general, imageArchivePath },
-              }))
-            }
-          })
-        }}
+        onPickDirectory={() => void pickDirectory()}
+        pickDirectoryDisabled={saving || settingsOperation !== null}
+        pickingDirectory={settingsOperation === 'directory'}
       />
     ),
     translation: <TranslationSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
@@ -444,24 +515,10 @@ export function SettingsPage() {
     about: (
       <AboutSection
         language={draft.language}
-        disabled={saving}
-        onExport={(includeSecrets) => {
-          void desktop.exportSettings(includeSecrets).then((exported) => {
-            setStatus(exported ? t.settingsExported : null)
-          })
-        }}
-        onImport={() => {
-          void desktop.importSettings().then((value) => {
-            if (value === null) return
-            if (dirty) {
-              dismissSaveSuccessToast()
-              setPendingImport(value)
-              setDialog('import')
-            } else {
-              applyImport(value)
-            }
-          })
-        }}
+        disabled={saving || settingsOperation !== null}
+        operation={settingsOperation === 'export' || settingsOperation === 'import' ? settingsOperation : null}
+        onExport={(includeSecrets) => void exportSettings(includeSecrets)}
+        onImport={() => void importSettings()}
       />
     ),
   } satisfies Record<Section, React.ReactNode>
@@ -515,7 +572,7 @@ export function SettingsPage() {
             type="button"
             className="icon-button"
             aria-label={t.closeSettings}
-            disabled={saving}
+            disabled={saving || settingsOperation !== null}
             onClick={requestClose}
           >
             <X size={16} />
@@ -525,14 +582,21 @@ export function SettingsPage() {
           {issues.length === 0 ? null : (
             <div className="validation-banner" role="alert">{settingsIssueMessage(issues[0], t)}</div>
           )}
-          {status === null ? null : <div className="status-banner" role="status">{status}</div>}
+          {status === null ? null : (
+            <div
+              className={statusTone === 'error' ? 'validation-banner' : 'status-banner'}
+              role={statusTone === 'error' ? 'alert' : 'status'}
+            >
+              {status}
+            </div>
+          )}
           {content[section]}
         </div>
         <footer className="settings-footer">
           <button
             type="button"
             className="secondary-button settings-footer-button"
-            disabled={!dirty || saving}
+            disabled={!dirty || saving || settingsOperation !== null}
             onClick={cancel}
           >
             {t.cancel}
@@ -540,7 +604,7 @@ export function SettingsPage() {
           <button
             type="button"
             className="primary-button settings-footer-button"
-            disabled={!dirty || issues.length > 0 || saving}
+            disabled={!dirty || issues.length > 0 || saving || settingsOperation !== null}
             onClick={() => void save()}
           >
             {saving ? t.saving : t.save}
@@ -585,12 +649,12 @@ export function SettingsPage() {
                 onClick={() => void save().then((savedNow) => {
                   if (!savedNow) return
                   setDialog('none')
-                  hide()
+                  void hide()
                 })}
               >
                 {t.saveAndClose}
               </button>
-              <button type="button" className="secondary-button" disabled={saving} onClick={() => { restoreDraft(); hide() }}>
+              <button type="button" className="secondary-button" disabled={saving} onClick={() => { restoreDraft(); void hide() }}>
                 {t.discardChanges}
               </button>
               <button ref={continueEditingRef} type="button" className="text-button" disabled={saving} onClick={() => setDialog('none')}>

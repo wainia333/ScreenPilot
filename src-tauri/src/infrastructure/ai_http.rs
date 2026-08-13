@@ -337,6 +337,21 @@ pub async fn complete_text_with_options(
     policy: AiRequestPolicy,
     options: TextRequestOptions,
 ) -> Result<String, String> {
+    complete_text_with_options_cancelled(provider, model, keys, system, user, policy, options, None)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_text_with_options_cancelled(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    system: &str,
+    user: &str,
+    policy: AiRequestPolicy,
+    options: TextRequestOptions,
+    cancellation: Option<Arc<CancellationSignal>>,
+) -> Result<String, String> {
     let endpoints = derive_endpoints(&provider.base_url)?;
     let mut body = match endpoints.protocol {
         ApiProtocol::ChatCompletions => json!({
@@ -357,7 +372,7 @@ pub async fn complete_text_with_options(
         }),
     };
     apply_text_options(&mut body, endpoints.protocol, options);
-    send_completion_at(
+    send_completion_at_cancelled(
         provider,
         model,
         keys,
@@ -365,6 +380,7 @@ pub async fn complete_text_with_options(
         endpoints.protocol,
         policy,
         endpoints.request,
+        cancellation,
     )
     .await
 }
@@ -386,6 +402,30 @@ pub async fn complete_text_with_effort(
         user,
         policy,
         TextRequestOptions::new(thinking_effort),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_text_with_effort_cancelled(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    system: &str,
+    user: &str,
+    policy: AiRequestPolicy,
+    thinking_effort: ThinkingEffort,
+    cancellation: Option<Arc<CancellationSignal>>,
+) -> Result<String, String> {
+    complete_text_with_options_cancelled(
+        provider,
+        model,
+        keys,
+        system,
+        user,
+        policy,
+        TextRequestOptions::new(thinking_effort),
+        cancellation,
     )
     .await
 }
@@ -690,28 +730,6 @@ where
     } else {
         Err("Provider stream ended before completion".into())
     }
-}
-
-async fn send_completion_at(
-    provider: &ProviderSettings,
-    model: &str,
-    keys: &[String],
-    body: Value,
-    protocol: ApiProtocol,
-    policy: AiRequestPolicy,
-    request_url: Url,
-) -> Result<String, String> {
-    send_completion_at_cancelled(
-        provider,
-        model,
-        keys,
-        body,
-        protocol,
-        policy,
-        request_url,
-        None,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2303,6 +2321,44 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         assert_eq!(
             result.expect_err("text response body should cancel"),
+            "Request cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn optimizer_completion_with_effort_cancellation_wakes_an_idle_response_body() {
+        let (base_url, _accepted, _body_sent, stop) = spawn_partial_http_server(
+            "application/json",
+            br#"{"output":[{"content":[{"type":"output_text","text":"partial"}]}]}"#,
+        );
+        let signal = Arc::new(CancellationSignal::new());
+        let observer = new_test_client_phase_observer(&signal);
+        let test_provider = provider(format!("{base_url}/responses"));
+        let keys = vec!["optimizer-cancel-secret".to_string()];
+        let task_signal = Arc::clone(&signal);
+        let worker = tokio::spawn(async move {
+            complete_text_with_effort_cancelled(
+                &test_provider,
+                "model:text",
+                &keys,
+                "system",
+                "user",
+                AiRequestPolicy::new(false, 1, false),
+                ThinkingEffort::Max,
+                Some(task_signal),
+            )
+            .await
+        });
+
+        wait_test_client_phase(&observer, TestClientPhase::ResponseJsonBody).await;
+        signal.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("optimizer body cancellation should wake")
+            .expect("worker join");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(
+            result.expect_err("optimizer response body should cancel"),
             "Request cancelled"
         );
     }

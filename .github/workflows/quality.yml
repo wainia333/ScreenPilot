@@ -92,6 +92,26 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install pinned cargo-audit
+        shell: pwsh
+        env:
+          CARGO_AUDIT_VERSION: 0.22.2
+        run: |
+          cargo install cargo-audit --version "=$env:CARGO_AUDIT_VERSION" --locked --force
+          if ($LASTEXITCODE -ne 0) {
+            throw 'cargo-audit installation failed.'
+          }
+          $actualVersion = cargo-audit --version
+          if ($LASTEXITCODE -ne 0 -or $actualVersion -ne "cargo-audit $env:CARGO_AUDIT_VERSION") {
+            throw "Unexpected cargo-audit version: $actualVersion"
+          }
+
+      - name: Audit locked Rust dependencies
+        run: npm run audit:rust
+
+      - name: Verify Rust formatting, tests and Clippy
+        run: npm run verify:rust
+
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 

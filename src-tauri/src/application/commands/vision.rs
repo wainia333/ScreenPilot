@@ -1516,9 +1516,7 @@ pub fn take_vision_selection(state: State<'_, AppState>) -> String {
     state.take_vision_selection()
 }
 
-#[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
-    let mut settings = state.current()?;
+fn vision_runtime_settings_projection(mut settings: AppSettings) -> Result<Value, String> {
     settings.normalize_ai_options();
     let providers = settings
         .providers
@@ -1626,6 +1624,11 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     }))
 }
 
+#[tauri::command]
+pub fn vision_runtime_settings_load(state: State<'_, AppState>) -> Result<Value, String> {
+    vision_runtime_settings_projection(state.current()?)
+}
+
 fn model_parts(selection: &Option<ModelSelection>) -> (&str, &str) {
     selection
         .as_ref()
@@ -1640,21 +1643,24 @@ fn configured_at(values: &[String], index: usize) -> bool {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Value) -> Result<(), String> {
+pub fn screenshot_translation_settings_update(
+    state: State<'_, AppState>,
+    patch: Value,
+) -> Result<Value, String> {
     let _settings_write = state.lock_settings_write()?;
     let mut current = state.current()?;
-    apply_screenshot_settings_patch(&mut current, &settings)?;
+    apply_screenshot_settings_patch(&mut current, &patch)?;
+    let projection = vision_runtime_settings_projection(current.clone())?;
     state.store.save(&current)?;
-    state.replace(&current)
+    state.replace(&current)?;
+    Ok(projection)
 }
 
 fn apply_screenshot_settings_patch(
     current: &mut AppSettings,
     settings: &Value,
 ) -> Result<(), String> {
-    let screenshot = settings
-        .get("screenshotTranslation")
-        .ok_or("Screenshot settings are missing")?;
+    let screenshot = settings.get("screenshotTranslation").unwrap_or(settings);
     if let Some(method) = screenshot.get("ocrMethod").and_then(Value::as_str) {
         current.screenshot_translation.ocr_method = parse_ocr_method(method)?;
     }
@@ -2631,7 +2637,10 @@ fn translation_method_name(method: TranslationMethod) -> &'static str {
 }
 
 #[tauri::command]
-pub async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result<String, String> {
+pub async fn vision_optimize_prompt(
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<String, String> {
     let settings = state.current()?;
     ensure_optimizer_enabled(&settings)?;
     let selection = settings
@@ -2700,34 +2709,80 @@ async fn synthesize_speech_data(app: AppHandle, text: String) -> Result<String, 
     std::fs::create_dir_all(&app.state::<AppState>().cache_directory)
         .map_err(|error| error.to_string())?;
     let spoken = text.chars().take(10_000).collect::<String>();
-    let generated = path.clone();
-    tokio::task::spawn_blocking(move || {
-        use std::os::windows::process::CommandExt;
-        let script = "$voice=New-Object System.Speech.Synthesis.SpeechSynthesizer;$voice.SetOutputToWaveFile($env:SCREENPILOT_SPEECH_PATH);$voice.Speak($env:SCREENPILOT_SPEECH_TEXT);$voice.Dispose()";
-        let status = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                script,
-            ])
-            .env("SCREENPILOT_SPEECH_PATH", &generated)
-            .env("SCREENPILOT_SPEECH_TEXT", spoken)
-            .creation_flags(0x08000000)
-            .status()
-            .map_err(|error| error.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("Speech synthesis exited with code {:?}", status.code()))
-        }
+    let generated = tokio::task::spawn_blocking(move || {
+        generate_speech_wave(path, |generated| {
+            use std::os::windows::process::CommandExt;
+            let script = "$ErrorActionPreference='Stop';$voice=$null;try{$voice=New-Object System.Speech.Synthesis.SpeechSynthesizer;$voice.SetOutputToWaveFile($env:SCREENPILOT_SPEECH_PATH);$voice.Speak($env:SCREENPILOT_SPEECH_TEXT)}finally{if($null -ne $voice){$voice.Dispose()}}";
+            let status = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    script,
+                ])
+                .env("SCREENPILOT_SPEECH_PATH", generated)
+                .env("SCREENPILOT_SPEECH_TEXT", spoken)
+                .creation_flags(0x08000000)
+                .status()
+                .map_err(|error| error.to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Speech synthesis exited with code {:?}",
+                    status.code()
+                ))
+            }
+        })
     })
     .await
     .map_err(|error| error.to_string())??;
-    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-    let _ = std::fs::remove_file(path);
+    encode_speech_wave(generated, |path| std::fs::read(path))
+}
+
+struct TemporarySpeechWave {
+    path: PathBuf,
+}
+
+impl TemporarySpeechWave {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporarySpeechWave {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "Failed to clean up temporary speech wave file {}: {error}",
+                self.path.display()
+            ),
+        }
+    }
+}
+
+fn generate_speech_wave(
+    path: PathBuf,
+    generate: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<TemporarySpeechWave, String> {
+    let generated = TemporarySpeechWave::new(path);
+    generate(generated.path())?;
+    Ok(generated)
+}
+
+fn encode_speech_wave(
+    generated: TemporarySpeechWave,
+    read: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<String, String> {
+    let bytes = read(generated.path()).map_err(|error| error.to_string())?;
     Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(bytes)))
 }
 
@@ -2745,6 +2800,102 @@ pub fn permissions_status() -> PermissionStatus {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn temporary_speech_wave_is_removed_after_successful_encoding() {
+        let root = tempfile::tempdir().expect("temporary speech root");
+        let path = root.path().join("success.wav");
+        let generated = generate_speech_wave(path.clone(), |generated| {
+            std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())
+        })
+        .expect("generate speech wave");
+        assert!(path.exists());
+
+        assert_eq!(
+            encode_speech_wave(generated, |generated| std::fs::read(generated))
+                .expect("encode speech wave"),
+            "data:audio/wav;base64,UklGRg=="
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temporary_speech_wave_is_removed_when_generation_fails_after_writing() {
+        let root = tempfile::tempdir().expect("temporary speech root");
+        let path = root.path().join("generation-failure.wav");
+
+        assert_eq!(
+            generate_speech_wave(path.clone(), |generated| {
+                std::fs::write(generated, b"partial").map_err(|error| error.to_string())?;
+                Err("synthetic synthesis failure".into())
+            })
+            .err(),
+            Some("synthetic synthesis failure".into())
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temporary_speech_wave_is_removed_when_reading_fails() {
+        let root = tempfile::tempdir().expect("temporary speech root");
+        let path = root.path().join("read-failure.wav");
+        let generated = generate_speech_wave(path.clone(), |generated| {
+            std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())
+        })
+        .expect("generate speech wave");
+
+        let error = encode_speech_wave(generated, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic read failure",
+            ))
+        })
+        .expect_err("reading must fail");
+        assert!(error.contains("synthetic read failure"));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn detached_speech_generation_cleans_up_after_the_caller_is_cancelled() {
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir().expect("temporary speech root");
+        let path = root.path().join("cancelled.wav");
+        let task_path = path.clone();
+        let (created_sender, created_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let (generated_sender, generated_receiver) = mpsc::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            generate_speech_wave(task_path, |generated| {
+                std::fs::write(generated, b"RIFF").map_err(|error| error.to_string())?;
+                created_sender.send(()).map_err(|error| error.to_string())?;
+                release_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|error| error.to_string())?;
+                generated_sender
+                    .send(())
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+        });
+        created_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("speech task did not create its wave file");
+        assert!(path.exists());
+
+        // Dropping the join handle models cancellation of the command future.
+        // spawn_blocking keeps running, so the cleanup guard must stay with it.
+        drop(task);
+        release_sender.send(()).expect("release speech task");
+        generated_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("detached speech task did not finish generation");
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while path.exists() && Instant::now() < cleanup_deadline {
+            std::thread::yield_now();
+        }
+        assert!(!path.exists());
+    }
 
     #[test]
     fn vision_closing_notification_is_stable_and_emit_failures_do_not_block_cleanup() {
@@ -3035,6 +3186,61 @@ mod tests {
                 model: "model-a".into(),
             })
         );
+    }
+
+    #[test]
+    fn screenshot_translation_patch_updates_only_explicit_fields() {
+        let mut settings = AppSettings::default();
+        settings.screenshot_translation.ocr_method = OcrMethod::Baidu;
+        settings.screenshot_translation.translation_method = TranslationMethod::Microsoft;
+        settings.screenshot_translation.source_language = "auto".into();
+        settings.screenshot_translation.target_language = "auto".into();
+        let before = settings.clone();
+
+        apply_screenshot_settings_patch(
+            &mut settings,
+            &json!({
+                "sourceLanguage": "en",
+                "targetLanguage": "zh-CN"
+            }),
+        )
+        .expect("typed screenshot settings patch");
+
+        assert_eq!(settings.screenshot_translation.source_language, "en");
+        assert_eq!(settings.screenshot_translation.target_language, "zh-CN");
+        assert_eq!(
+            settings.screenshot_translation.ocr_method,
+            before.screenshot_translation.ocr_method
+        );
+        assert_eq!(
+            settings.screenshot_translation.translation_method,
+            before.screenshot_translation.translation_method
+        );
+        assert_eq!(settings.providers, before.providers);
+        assert_eq!(settings.vision, before.vision);
+        assert_eq!(settings.prompt_optimizer, before.prompt_optimizer);
+    }
+
+    #[test]
+    fn vision_runtime_projection_preserves_wire_shape_and_compact_window_behavior() {
+        let mut settings = AppSettings::default();
+        settings.screenshot_translation.keep_fullscreen = true;
+        settings.vision.keep_fullscreen = true;
+        settings.screenshot_translation.source_language = "en".into();
+        settings.screenshot_translation.target_language = "ja".into();
+
+        let projection = vision_runtime_settings_projection(settings)
+            .expect("Vision runtime settings projection");
+
+        assert_eq!(projection["screenshotTranslation"]["sourceLanguage"], "en");
+        assert_eq!(projection["screenshotTranslation"]["targetLanguage"], "ja");
+        assert_eq!(
+            projection["screenshotTranslation"]["keepFullscreenAfterCapture"],
+            false
+        );
+        assert_eq!(projection["vision"]["keepFullscreenAfterCapture"], false);
+        assert!(projection["providers"].is_array());
+        assert!(projection["screenshotTranslation"]["baiduOcr"]["apiKeyConfigured"].is_boolean());
     }
 
     #[test]

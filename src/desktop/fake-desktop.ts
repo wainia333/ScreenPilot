@@ -34,6 +34,7 @@ export class FakeDesktopPort implements DesktopPort {
   readonly providerModelFetchCalls: { provider: ProviderSettings; keys?: string[] }[] = []
   readonly providerTestCalls: { provider: ProviderSettings; keys?: string[] }[] = []
   readonly translationCancelCalls: number[] = []
+  readonly promptOptimizationCancelCalls: number[] = []
   providerKeySaveError: string | null = null
   importedSecretsSaveError: string | null = null
   private readonly listeners: FakeListeners = {
@@ -165,6 +166,11 @@ export class FakeDesktopPort implements DesktopPort {
       generation: request.generation,
       text: `明确目标、约束和输出格式：\n\n${request.text}`,
     })
+  }
+
+  cancelPromptOptimization(generation: number): Promise<boolean> {
+    this.promptOptimizationCancelCalls.push(generation)
+    return Promise.resolve(true)
   }
 
   commitText(text: string, autoPaste: boolean): Promise<void> {

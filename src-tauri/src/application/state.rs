@@ -55,6 +55,7 @@ pub struct AppState {
     pub vision_busy: AtomicBool,
     reference_vision: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
+    optimizer_request: Mutex<TranslatorRequestState>,
     reference_vision_images: Mutex<ReferenceVisionImages>,
     surface_generation: AtomicU64,
     surface_transition: Mutex<()>,
@@ -103,6 +104,11 @@ impl AppState {
                 signal: Arc::new(CancellationSignal::new()),
             }),
             translator_request: Mutex::new(TranslatorRequestState {
+                generation: 0,
+                cancelled: false,
+                signal: Arc::new(CancellationSignal::new()),
+            }),
+            optimizer_request: Mutex::new(TranslatorRequestState {
                 generation: 0,
                 cancelled: false,
                 signal: Arc::new(CancellationSignal::new()),
@@ -205,6 +211,45 @@ impl AppState {
 
     pub fn translator_request_current(&self, generation: u64) -> bool {
         self.translator_request
+            .lock()
+            .map(|state| state.generation == generation && !state.cancelled)
+            .unwrap_or(false)
+    }
+
+    pub fn begin_optimizer_request(&self, generation: u64) -> Option<Arc<CancellationSignal>> {
+        let mut state = self.optimizer_request.lock().ok()?;
+        if generation <= state.generation {
+            return None;
+        }
+        state.signal.cancel();
+        state.generation = generation;
+        state.cancelled = false;
+        state.signal = Arc::new(CancellationSignal::new());
+        Some(Arc::clone(&state.signal))
+    }
+
+    pub fn cancel_optimizer_request(&self, generation: u64) -> bool {
+        let Ok(mut state) = self.optimizer_request.lock() else {
+            return false;
+        };
+        if generation < state.generation {
+            return false;
+        }
+        state.generation = generation;
+        state.cancelled = true;
+        state.signal.cancel();
+        true
+    }
+
+    pub fn cancel_active_optimizer_request(&self) {
+        if let Ok(mut state) = self.optimizer_request.lock() {
+            state.cancelled = true;
+            state.signal.cancel();
+        }
+    }
+
+    pub fn optimizer_request_current(&self, generation: u64) -> bool {
+        self.optimizer_request
             .lock()
             .map(|state| state.generation == generation && !state.cancelled)
             .unwrap_or(false)
@@ -486,6 +531,43 @@ mod tests {
         assert!(state.begin_translator_request(5).is_none());
         assert!(!state.cancel_translator_request(3));
         assert!(state.begin_translator_request(6).is_some());
+    }
+
+    #[test]
+    fn optimizer_generation_cancels_replaced_requests_and_rejects_stale_commands() {
+        let (state, _directory) = state();
+        let first = state
+            .begin_optimizer_request(10)
+            .expect("first optimizer signal");
+        assert!(state.optimizer_request_current(10));
+
+        let second = state
+            .begin_optimizer_request(11)
+            .expect("second optimizer signal");
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(!state.optimizer_request_current(10));
+        assert!(state.optimizer_request_current(11));
+
+        assert!(state.cancel_optimizer_request(12));
+        assert!(second.is_cancelled());
+        assert!(!state.optimizer_request_current(11));
+        assert!(state.begin_optimizer_request(12).is_none());
+        assert!(!state.cancel_optimizer_request(9));
+        assert!(state.begin_optimizer_request(13).is_some());
+    }
+
+    #[test]
+    fn hiding_the_optimizer_cancels_without_consuming_the_next_frontend_token() {
+        let (state, _directory) = state();
+        let signal = state
+            .begin_optimizer_request(100)
+            .expect("active optimization");
+
+        state.cancel_active_optimizer_request();
+        assert!(signal.is_cancelled());
+        assert!(!state.optimizer_request_current(100));
+        assert!(state.begin_optimizer_request(101).is_some());
     }
 
     #[test]

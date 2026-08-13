@@ -120,7 +120,8 @@ if (
 }
 if (
   !translateCardBody.includes('vision-ocr-jelly-pop')
-  || !visionAdapterSource.includes("translateCard.classList.contains('vision-ocr-jelly-pop')")
+  || !translateCardBody.includes('data-screenpilot-native-flight-active')
+  || !visionAdapterSource.includes("translateCard.dataset.screenpilotNativeFlightActive === 'true'")
 ) {
   failures.push('OCR 结果卡没有使用与尺寸反馈隔离的落地回弹动画')
 }

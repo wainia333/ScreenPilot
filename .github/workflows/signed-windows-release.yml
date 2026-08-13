@@ -24,12 +24,20 @@ jobs:
         env:
           SIGNING_PFX: ${{ secrets.SCREENPILOT_AUTHENTICODE_PFX_BASE64 }}
           SIGNING_PASSWORD: ${{ secrets.SCREENPILOT_AUTHENTICODE_PFX_PASSWORD }}
+          APPROVED_THUMBPRINT: ${{ vars.SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX)) {
             throw 'Missing SCREENPILOT_AUTHENTICODE_PFX_BASE64; signed release cannot continue.'
           }
           if ([string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) {
             throw 'Missing SCREENPILOT_AUTHENTICODE_PFX_PASSWORD; signed release cannot continue.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:APPROVED_THUMBPRINT)) {
+            throw 'Missing SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT; signed release cannot continue.'
+          }
+          $normalizedThumbprint = $env:APPROVED_THUMBPRINT -replace '[\s:]', ''
+          if ($normalizedThumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
+            throw 'SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT must be a 40-character hexadecimal SHA-1 thumbprint.'
           }
 
       - name: Check out repository
@@ -51,6 +59,23 @@ jobs:
       - name: Audit all dependencies
         run: npm run audit:dependencies
 
+      - name: Install pinned cargo-audit
+        shell: pwsh
+        env:
+          CARGO_AUDIT_VERSION: 0.22.2
+        run: |
+          cargo install cargo-audit --version "=$env:CARGO_AUDIT_VERSION" --locked --force
+          if ($LASTEXITCODE -ne 0) {
+            throw 'cargo-audit installation failed.'
+          }
+          $actualVersion = cargo-audit --version
+          if ($LASTEXITCODE -ne 0 -or $actualVersion -ne "cargo-audit $env:CARGO_AUDIT_VERSION") {
+            throw "Unexpected cargo-audit version: $actualVersion"
+          }
+
+      - name: Audit locked Rust dependencies
+        run: npm run audit:rust
+
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
@@ -62,6 +87,7 @@ jobs:
         env:
           SCREENPILOT_AUTHENTICODE_PFX_BASE64: ${{ secrets.SCREENPILOT_AUTHENTICODE_PFX_BASE64 }}
           SCREENPILOT_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.SCREENPILOT_AUTHENTICODE_PFX_PASSWORD }}
+          SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT: ${{ vars.SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT }}
         run: npm run release:signed:windows
 
       - name: Launch signed real Windows application smoke test

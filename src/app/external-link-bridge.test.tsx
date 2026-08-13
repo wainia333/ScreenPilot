@@ -1,9 +1,13 @@
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../desktop/context'
 import { FakeDesktopPort } from '../desktop/fake-desktop'
 import { MarkdownView } from '../shared/markdown/markdown-view'
 import { ExternalLinkBridge } from './external-link-bridge'
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+const originalExecCommandDescriptor = Object.getOwnPropertyDescriptor(document, 'execCommand')
 
 class RecordingDesktop extends FakeDesktopPort {
   readonly urls: string[] = []
@@ -28,6 +32,10 @@ function activate(target: Element, type = 'click', button = 0): MouseEvent {
 describe('ExternalLinkBridge', () => {
   afterEach(() => {
     cleanup()
+    if (originalClipboardDescriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
+    else Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+    if (originalExecCommandDescriptor === undefined) Reflect.deleteProperty(document, 'execCommand')
+    else Object.defineProperty(document, 'execCommand', originalExecCommandDescriptor)
     vi.restoreAllMocks()
   })
 
@@ -89,5 +97,33 @@ describe('ExternalLinkBridge', () => {
     await act(async () => Promise.resolve())
     expect(error).toHaveBeenCalledOnce()
     expect(desktop.urls).toEqual(['https://example.com/retry', 'https://example.com/retry'])
+  })
+
+  it('announces a code-block clipboard failure without leaking a rejection', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) },
+    })
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => false),
+    })
+    const view = render(<MarkdownView content={'```ts\nconst value = 1\n```'} />)
+    view.getByRole('button', { name: '复制代码' }).click()
+    await waitFor(() => expect(view.getByRole('alert')).toHaveTextContent('复制失败'))
+  })
+
+  it('keeps code-block copy feedback active through StrictMode effect replay', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    })
+    const view = render(
+      <StrictMode>
+        <MarkdownView content={'```ts\nconst value = 1\n```'} />
+      </StrictMode>,
+    )
+    view.getByRole('button', { name: '复制代码' }).click()
+    await waitFor(() => expect(view.getByRole('button', { name: '复制代码' }).querySelector('.lucide-check')).not.toBeNull())
   })
 })

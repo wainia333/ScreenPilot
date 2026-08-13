@@ -9,11 +9,13 @@ export function AboutSection({
   onImport,
   language,
   disabled = false,
+  operation = null,
 }: {
   onExport: (includeSecrets: boolean) => void
   onImport: () => void
   language: InterfaceLanguage
   disabled?: boolean
+  operation?: 'export' | 'import' | null
 }) {
   const t = copyFor(language)
   const [includeSecrets, setIncludeSecrets] = useState(false)
@@ -31,10 +33,22 @@ export function AboutSection({
           <Toggle checked={includeSecrets} label={t.exportIncludesApiKeys} onChange={setIncludeSecrets} />
         </SettingRow>
         <div className="about-actions">
-          <button type="button" className="secondary-button" disabled={disabled} onClick={() => onExport(includeSecrets)}>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={disabled || operation !== null}
+            aria-busy={operation === 'export'}
+            onClick={() => onExport(includeSecrets)}
+          >
             <Download size={15} />{t.exportConfiguration}
           </button>
-          <button type="button" className="secondary-button" disabled={disabled} onClick={onImport}>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={disabled || operation !== null}
+            aria-busy={operation === 'import'}
+            onClick={onImport}
+          >
             <Upload size={15} />{t.importConfiguration}
           </button>
         </div>

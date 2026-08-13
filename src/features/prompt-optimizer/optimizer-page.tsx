@@ -1,5 +1,5 @@
 import { Check, Clipboard, Replace, Sparkles, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useDesktop } from '../../desktop/use-desktop'
 import { useSplitRatio } from '../../shared/hooks/use-split-ratio'
@@ -9,6 +9,7 @@ import { HistoryMenu } from '../history/history-menu'
 import { copyFor } from '../../shared/ui-copy'
 import type { InterfaceLanguage } from '../settings/types'
 import { syncDocumentTheme } from '../../shared/theme'
+import { nextOptimizerGeneration } from './optimizer-generation'
 
 type OptimizerHistory = {
   id: string
@@ -35,11 +36,14 @@ export function OptimizerPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
   const [interfaceLanguage, setInterfaceLanguage] = useState<InterfaceLanguage>(() =>
     document.documentElement.lang.startsWith('en') ? 'en' : 'zh',
   )
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
   const generation = useRef(0)
+  const requestActive = useRef(false)
+  const copyRequest = useRef(0)
   const composing = useRef(false)
   const { ratio, beginResize, resizeByKeyboard } = useSplitRatio(splitRatioKey, goldenSectionRatio)
   const t = copyFor(interfaceLanguage)
@@ -56,40 +60,70 @@ export function OptimizerPage() {
   useEffect(() => {
     document.documentElement.lang = interfaceLanguage === 'zh' ? 'zh-CN' : 'en'
     document.title = `ScreenPilot — ${t.optimizerTitle}`
-    if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+    if ('__TAURI_INTERNALS__' in window) {
+      void getCurrentWindow().setTitle(document.title).catch((reason: unknown) => {
+        console.error('[optimizer] failed to set window title', reason)
+      })
+    }
   }, [interfaceLanguage, t.optimizerTitle])
+  const invalidateOptimization = useCallback(() => {
+    const invalidationGeneration = nextOptimizerGeneration()
+    generation.current = invalidationGeneration
+    const shouldCancelBackend = requestActive.current
+    requestActive.current = false
+    if (!shouldCancelBackend) return Promise.resolve()
+    return desktop.cancelPromptOptimization(invalidationGeneration).then(() => undefined).catch((reason: unknown) => {
+      console.error('[optimizer] failed to cancel active optimization', reason)
+    })
+  }, [desktop])
+  const hideOptimizer = useCallback(async () => {
+    const cancellation = invalidateOptimization()
+    try {
+      await desktop.hideWindow()
+    } catch (reason) {
+      setLoading(false)
+      setError(String(reason))
+    }
+    await cancellation
+  }, [desktop, invalidateOptimization])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      void desktop.hideWindow()
+      void hideOptimizer()
     }
     window.addEventListener('keydown', handleEscape)
     return () => {
-      generation.current += 1
+      void invalidateOptimization()
+      copyRequest.current += 1
       window.removeEventListener('keydown', handleEscape)
     }
-  }, [desktop])
+  }, [hideOptimizer, invalidateOptimization])
 
   const updateInput = (value: string) => {
     if (value === input) return
-    generation.current += 1
+    void invalidateOptimization()
     setInput(value)
     setOutput('')
     setLoading(false)
     setError(null)
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
   }
 
   const optimize = async () => {
     const source = input
     if (source.trim().length === 0 || loading) return
-    const requestGeneration = generation.current + 1
+    const requestGeneration = nextOptimizerGeneration()
     generation.current = requestGeneration
+    requestActive.current = true
     setLoading(true)
     setError(null)
     setOutput('')
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
     try {
       const result = await desktop.optimizePrompt({ text: source, generation: requestGeneration })
       if (result.generation !== generation.current) return
@@ -99,18 +133,41 @@ export function OptimizerPage() {
     } catch (reason) {
       if (requestGeneration === generation.current) setError(String(reason))
     } finally {
-      if (requestGeneration === generation.current) setLoading(false)
+      if (requestGeneration === generation.current) {
+        requestActive.current = false
+        setLoading(false)
+      }
     }
   }
 
   const restoreHistory = (item: OptimizerHistory) => {
-    generation.current += 1
+    void invalidateOptimization()
     setInput(item.input)
     setOutput(item.output)
     setLoading(false)
     setError(null)
+    copyRequest.current += 1
     setCopied(false)
+    setCopyError(null)
     queueMicrotask(() => document.getElementById('optimizer-input')?.focus())
+  }
+
+  const copyOutput = async () => {
+    const request = copyRequest.current + 1
+    copyRequest.current = request
+    try {
+      await navigator.clipboard.writeText(output)
+      if (request !== copyRequest.current) return
+      setCopyError(null)
+      setCopied(true)
+      window.setTimeout(() => {
+        if (request === copyRequest.current) setCopied(false)
+      }, 1200)
+    } catch {
+      if (request !== copyRequest.current) return
+      setCopied(false)
+      setCopyError(t.copyFailed)
+    }
   }
 
   return (
@@ -125,7 +182,7 @@ export function OptimizerPage() {
           <h1>{t.optimizerTitle}</h1>
         </div>
         <span className="ocr-result-status" aria-live="polite">
-          {loading ? t.optimizing : input.trim().length > 0 ? t.optimizeShortcut : t.waitingForInput}
+          {copyError ?? (loading ? t.optimizing : input.trim().length > 0 ? t.optimizeShortcut : t.waitingForInput)}
         </span>
         <div className="ocr-result-header-actions">
           <HistoryMenu
@@ -138,7 +195,7 @@ export function OptimizerPage() {
             onRemove={(id) => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== id)))}
             onClear={() => setHistory((items) => saveHistory(localStorage, historyKey, items.length === 0 ? items : []))}
           />
-          <button type="button" className="ocr-header-button" aria-label={t.closeOptimizer} onClick={() => void desktop.hideWindow()}><X size={14} /></button>
+          <button type="button" className="ocr-header-button" aria-label={t.closeOptimizer} onClick={() => void hideOptimizer()}><X size={14} /></button>
         </div>
       </header>
       <div
@@ -192,12 +249,24 @@ export function OptimizerPage() {
             <label htmlFor="optimizer-output">{t.optimizationResult}</label>
             <div className="optimizer-result-actions">
               <button type="button" className="ocr-section-button" aria-label={t.replaceOriginal} disabled={output.length === 0} onClick={() => updateInput(output)}><Replace size={12} /></button>
-              <button type="button" className="ocr-section-button" aria-label={t.copyOptimizationResult} disabled={output.length === 0} onClick={() => void navigator.clipboard.writeText(output).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200) })}>{copied ? <Check size={12} /> : <Clipboard size={12} />}</button>
+              <button type="button" className="ocr-section-button" aria-label={t.copyOptimizationResult} disabled={output.length === 0} onClick={() => void copyOutput()}>{copied ? <Check size={12} /> : <Clipboard size={12} />}</button>
             </div>
           </div>
           {loading ? <div className="ocr-result-skeleton"><span /><span /><span /></div> : null}
           {!loading && error !== null ? <div className="ocr-result-error" role="alert">{error}<button type="button" className="text-button" onClick={() => void optimize()}>{t.retry}</button></div> : null}
-          {!loading && error === null ? <textarea id="optimizer-output" value={output} placeholder={t.optimizationResultPlaceholder} onChange={(event) => setOutput(event.target.value)} /> : null}
+          {!loading && error === null ? (
+            <textarea
+              id="optimizer-output"
+              value={output}
+              placeholder={t.optimizationResultPlaceholder}
+              onChange={(event) => {
+                copyRequest.current += 1
+                setOutput(event.target.value)
+                setCopied(false)
+                setCopyError(null)
+              }}
+            />
+          ) : null}
         </section>
       </div>
     </main>

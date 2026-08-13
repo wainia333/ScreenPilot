@@ -2,20 +2,38 @@
 param(
     [string]$CertificateBase64 = $env:SCREENPILOT_AUTHENTICODE_PFX_BASE64,
     [string]$CertificatePassword = $env:SCREENPILOT_AUTHENTICODE_PFX_PASSWORD,
+    [string]$ApprovedCertificateThumbprint = $env:SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT,
     [ValidatePattern('^https?://')]
     [string]$TimestampServer = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
 
+function Remove-SigningEnvironment {
+    Remove-Item Env:SCREENPILOT_AUTHENTICODE_PFX_BASE64 -ErrorAction SilentlyContinue
+    Remove-Item Env:SCREENPILOT_AUTHENTICODE_PFX_PASSWORD -ErrorAction SilentlyContinue
+    Remove-Item Env:SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT -ErrorAction SilentlyContinue
+}
+
 if (-not $IsWindows) {
     throw 'SIGNED_RELEASE_FAILED: Authenticode 正式发布仅支持 Windows。'
 }
 if ([string]::IsNullOrWhiteSpace($CertificateBase64)) {
+    Remove-SigningEnvironment
     throw 'SIGNED_RELEASE_FAILED: 缺少 SCREENPILOT_AUTHENTICODE_PFX_BASE64；正式发布禁止降级为未签名构建。'
 }
 if ([string]::IsNullOrWhiteSpace($CertificatePassword)) {
+    Remove-SigningEnvironment
     throw 'SIGNED_RELEASE_FAILED: 缺少 SCREENPILOT_AUTHENTICODE_PFX_PASSWORD；正式发布禁止降级为未签名构建。'
+}
+if ([string]::IsNullOrWhiteSpace($ApprovedCertificateThumbprint)) {
+    Remove-SigningEnvironment
+    throw 'SIGNED_RELEASE_FAILED: 缺少 SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT；正式发布必须绑定组织批准的签名证书。'
+}
+$normalizedApprovedThumbprint = [regex]::Replace($ApprovedCertificateThumbprint, '[\s:]', '').ToUpperInvariant()
+if ($normalizedApprovedThumbprint -notmatch '^[0-9A-F]{40}$') {
+    Remove-SigningEnvironment
+    throw 'SIGNED_RELEASE_FAILED: SCREENPILOT_AUTHENTICODE_CERT_THUMBPRINT 必须是 40 位十六进制 SHA-1 指纹（可包含空白或冒号分隔符）。'
 }
 
 function Invoke-CheckedCommand {
@@ -69,10 +87,10 @@ function Set-VerifiedSignature {
 }
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-Remove-Item Env:SCREENPILOT_AUTHENTICODE_PFX_BASE64 -ErrorAction SilentlyContinue
-Remove-Item Env:SCREENPILOT_AUTHENTICODE_PFX_PASSWORD -ErrorAction SilentlyContinue
+Remove-SigningEnvironment
 Push-Location $projectRoot
 try {
+    Invoke-CheckedCommand -FilePath 'npm' -ArgumentList @('run', 'verify')
     Invoke-CheckedCommand -FilePath 'npm' -ArgumentList @('run', 'release', '--', '--no-bundle')
 }
 finally {
@@ -96,9 +114,16 @@ try {
     catch {
         throw "SIGNED_RELEASE_FAILED: 无法使用提供的密码加载 PFX：$($_.Exception.Message)"
     }
-    $certificate = $certificates | Where-Object { Test-CodeSigningCertificate $_ } | Select-Object -First 1
+    $codeSigningCertificates = @($certificates | Where-Object { Test-CodeSigningCertificate $_ })
+    $certificate = $codeSigningCertificates | Where-Object {
+        $candidateThumbprint = [regex]::Replace($_.Thumbprint, '[\s:]', '').ToUpperInvariant()
+        $candidateThumbprint -eq $normalizedApprovedThumbprint
+    } | Select-Object -First 1
     if ($null -eq $certificate) {
-        throw 'SIGNED_RELEASE_FAILED: PFX 中没有包含私钥且具备 Code Signing EKU 的证书。'
+        if ($codeSigningCertificates.Count -eq 0) {
+            throw 'SIGNED_RELEASE_FAILED: PFX 中没有包含私钥且具备 Code Signing EKU 的证书。'
+        }
+        throw 'SIGNED_RELEASE_FAILED: PFX 中的代码签名证书与组织批准的证书指纹不一致。'
     }
     $now = [DateTime]::UtcNow
     if ($certificate.NotBefore.ToUniversalTime() -gt $now -or $certificate.NotAfter.ToUniversalTime() -le $now) {
@@ -127,7 +152,10 @@ try {
         }
 
         $allArtifacts = @((Get-Item -LiteralPath $mainExecutable)) + @($installerArtifacts)
-        & (Join-Path $PSScriptRoot 'verify-authenticode.ps1') -Path $allArtifacts.FullName -RequireTimestamp $true
+        & (Join-Path $PSScriptRoot 'verify-authenticode.ps1') `
+            -Path $allArtifacts.FullName `
+            -RequireTimestamp $true `
+            -ApprovedThumbprint $normalizedApprovedThumbprint
 
         $checksumPath = Join-Path $releaseRoot 'bundle\SHA256SUMS.txt'
         $checksumLines = $allArtifacts | ForEach-Object {

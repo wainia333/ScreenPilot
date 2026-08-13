@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { safeExternalUrl } from './citation-links'
 
 const adapterStyles = readFileSync(resolve(process.cwd(), 'src/features/vision/vision-adapter.css'), 'utf8')
+const adapterSource = readFileSync(resolve(process.cwd(), 'src/features/vision/reference-vision.tsx'), 'utf8')
+const visionSource = readFileSync(resolve(process.cwd(), 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
 const adapterStyleElement = document.createElement('style')
 adapterStyleElement.textContent = adapterStyles
 document.head.append(adapterStyleElement)
@@ -26,6 +28,7 @@ describe('Vision prompt input layout', () => {
     const promptBar = document.createElement('div')
     promptBar.dataset.screenpilotPromptBar = 'true'
     const input = document.createElement('input')
+    input.dataset.screenpilotVisionPrompt = 'true'
     input.value = value.repeat(4)
     promptBar.append(input)
     document.body.append(promptBar)
@@ -52,5 +55,40 @@ describe('Vision prompt input layout', () => {
     input.value = input.value.slice(0, -1)
     expect(input.value).toHaveLength(beforeDelete.length - 1)
     promptBar.remove()
+  })
+})
+
+describe('Vision adapter DOM contract', () => {
+  it('uses explicit vendor markers instead of text, class, or sibling fallbacks', () => {
+    expect(adapterSource).not.toContain(':has(')
+    expect(adapterSource).not.toContain('placeholder="')
+    expect(adapterSource).not.toContain('classList.contains')
+    expect(adapterSource).not.toContain('previousElementSibling')
+    expect(adapterSource).not.toContain('parentElement')
+
+    for (const marker of [
+      'data-screenpilot-vision-root',
+      'data-screenpilot-translation-card',
+      'data-screenpilot-translation-header',
+      'data-screenpilot-translation-body',
+      'data-screenpilot-ocr-container',
+      'data-screenpilot-original-heading',
+      'data-screenpilot-ocr-source-content',
+      'data-screenpilot-translated-heading',
+      'data-screenpilot-target-result-slot',
+      'data-screenpilot-answer-panel',
+      'data-screenpilot-answer-scroll',
+      'data-screenpilot-answer-actions',
+    ]) {
+      expect(visionSource).toContain(marker)
+    }
+  })
+
+  it('observes only the adapter root and receives precise component events', () => {
+    expect(adapterSource).toContain('observer.observe(adapterRoot')
+    expect(adapterSource).not.toContain('observer.observe(document.body')
+    expect(adapterSource).toContain("screenpilot:vision-contract-change")
+    expect(adapterSource).toContain("screenpilot:vision-session-reset")
+    expect(visionSource).toContain("screenpilot:vision-session-reset")
   })
 })

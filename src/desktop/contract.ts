@@ -69,6 +69,7 @@ export type DesktopPort = {
   translate(request: TranslationRequest): Promise<TranslationResult>
   cancelTranslation(generation: number): Promise<boolean>
   optimizePrompt(request: PromptOptimizationRequest): Promise<PromptOptimizationResult>
+  cancelPromptOptimization(generation: number): Promise<boolean>
   commitText(text: string, autoPaste: boolean): Promise<void>
   takeTranslatorSelection(): Promise<string>
   hideWindow(): Promise<void>

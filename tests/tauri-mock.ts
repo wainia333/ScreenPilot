@@ -13,8 +13,10 @@ export async function installVisionTauriMock(
   deferFloatingSetResponses = 0,
   nativeResizeClientWidthDelta = 0,
   archiveWarning = '',
+  directTranslate = false,
+  listenerFailures: Partial<Record<'vision-stream' | 'vision-translate-stream', number>> = {},
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     let callbackSequence = 0
@@ -38,6 +40,8 @@ export async function installVisionTauriMock(
       translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string }[],
       externalUrls: [] as string[],
       answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
+      activeVisionImageId: '',
+      activeVisionRequestId: '',
       floatingRect: null as { width: number; height: number } | null,
       floatingRects: [] as { width: number; height: number }[],
       floatingAppliedRects: [] as { width: number; height: number }[],
@@ -62,10 +66,22 @@ export async function installVisionTauriMock(
         return false
       },
       closeVisionSurface: () => undefined,
+      closeCalls: 0,
+      closeFailuresRemaining: 0,
+      listenerFailuresRemaining: { ...initialListenerFailures } as Partial<Record<string, number>>,
+      listenerAttempts: {} as Record<string, number>,
+      visionAskCalls: 0,
+      visionTranslateCalls: 0,
+      emitVisionAnswerDelta: (delta: string) => {
+        void delta
+        return false
+      },
       interfaceLanguage: 'zh' as 'zh' | 'en',
       temporaryImageIds: [] as string[],
       committedImageIds: [] as string[],
       deletedTemporaryImageIds: [] as string[],
+      speechCalls: 0,
+      speechFailuresRemaining: 0,
     }
     const settings = {
       hotkey: 'F2',
@@ -106,7 +122,7 @@ export async function installVisionTauriMock(
         baiduTranslate: { appIdConfigured: true, appKeyConfigured: true },
         tencentTranslate: { secretIdConfigured: true, secretKeyConfigured: true },
         caiyunTranslate: { tokenConfigured: true },
-        directTranslate: false,
+        directTranslate: directTranslateEnabled,
         thinkingEnabled: false,
         thinkingEffort: 'medium',
         streamEnabled: true,
@@ -176,6 +192,17 @@ export async function installVisionTauriMock(
         callbacks.get(callbackId)?.({ event, id: eventId, payload })
       }
     }
+    visionTestState.emitVisionAnswerDelta = (delta: string) => {
+      const eventListeners = listeners.get('vision-stream')
+      if (eventListeners === undefined || eventListeners.size === 0) return false
+      emit('vision-stream', {
+        imageId: visionTestState.activeVisionImageId,
+        requestId: visionTestState.activeVisionRequestId,
+        kind: 'answer',
+        delta,
+      })
+      return true
+    }
     visionTestState.closeVisionSurface = () => {
       emit('screenpilot:vision-closing', null)
       visionTestState.windowVisible = false
@@ -194,6 +221,12 @@ export async function installVisionTauriMock(
       await Promise.resolve()
       if (command === 'plugin:event|listen') {
         const event = String(args.event)
+        visionTestState.listenerAttempts[event] = (visionTestState.listenerAttempts[event] ?? 0) + 1
+        const failuresRemaining: number = Reflect.get(visionTestState.listenerFailuresRemaining, event) ?? 0
+        if (failuresRemaining > 0) {
+          visionTestState.listenerFailuresRemaining[event] = failuresRemaining - 1
+          throw new Error(`synthetic ${event} listener failure`)
+        }
         const eventId = ++listenerSequence
         const handlers = listeners.get(event) ?? new Map<number, number>()
         handlers.set(eventId, Number(args.handler))
@@ -231,13 +264,13 @@ export async function installVisionTauriMock(
         visionTestState.externalUrls.push(String(args.url))
         return null
       }
-      if (command === 'get_settings') {
+      if (command === 'vision_runtime_settings_load') {
         settings.settingsLanguage = visionTestState.interfaceLanguage
         return structuredClone(settings)
       }
-      if (command === 'save_settings') {
-        Object.assign(settings, args.settings)
-        return null
+      if (command === 'screenshot_translation_settings_update') {
+        Object.assign(settings.screenshotTranslation, args.patch)
+        return structuredClone(settings)
       }
       if (command === 'take_vision_selection') return ''
       if (command === 'vision_cursor_position') return { x: 40, y: 40 }
@@ -263,8 +296,11 @@ export async function installVisionTauriMock(
         return { success: true, imageId }
       }
       if (command === 'vision_ask') {
+        visionTestState.visionAskCalls += 1
         const imageId = stringArgument(args.imageId)
         const requestId = stringArgument(args.requestId)
+        visionTestState.activeVisionImageId = imageId
+        visionTestState.activeVisionRequestId = requestId
         emit('vision-stream', {
           imageId,
           requestId,
@@ -290,6 +326,7 @@ export async function installVisionTauriMock(
         return { success: true, requestId }
       }
       if (command === 'vision_translate') {
+        visionTestState.visionTranslateCalls += 1
         const imageId = stringArgument(args.imageId)
         emit('vision-translate-stream', {
           imageId,
@@ -313,9 +350,22 @@ export async function installVisionTauriMock(
         visionTestState.translationRequests.push({ text, sourceLanguage, targetLanguage })
         return { success: true, translated: `编辑后译文(${targetLanguage})：${text}` }
       }
-      if (command === 'optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
-      if (command === 'synthesize_speech') return { success: true, data: '' }
+      if (command === 'vision_optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
+      if (command === 'synthesize_speech') {
+        visionTestState.speechCalls += 1
+        if (visionTestState.speechFailuresRemaining > 0) {
+          visionTestState.speechFailuresRemaining -= 1
+          return { success: false, error: 'synthetic speech failure' }
+        }
+        return { success: true, data: 'data:audio/wav;base64,UklGRg==' }
+      }
       if (command === 'vision_close') {
+        visionTestState.closeCalls += 1
+        if (visionTestState.closeFailuresRemaining > 0) {
+          visionTestState.closeFailuresRemaining -= 1
+          emit('screenpilot:vision-closing', null)
+          throw new Error('synthetic close failure')
+        }
         visionTestState.closeVisionSurface()
         visionTestState.windowVisible = false
         visionTestState.deletedTemporaryImageIds.push(...visionTestState.temporaryImageIds)
@@ -503,5 +553,7 @@ export async function installVisionTauriMock(
     deferSetResponses: deferFloatingSetResponses,
     nativeWidthDelta: nativeResizeClientWidthDelta,
     archiveWarningText: archiveWarning,
+    directTranslateEnabled: directTranslate,
+    initialListenerFailures: listenerFailures,
   })
 }

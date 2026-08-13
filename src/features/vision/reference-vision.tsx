@@ -76,16 +76,12 @@ function isTargetLanguage(value: unknown): value is TargetLanguage {
   return typeof value === 'string' && supportedLanguages.has(value as TargetLanguage)
 }
 
-function findTranslationMethodSelect(): HTMLSelectElement | null {
-  return document.querySelector<HTMLSelectElement>('[data-screenpilot-translation-method="true"]')
-    ?? Array.from(document.querySelectorAll<HTMLSelectElement>('select')).find((select) => (
-    select.querySelector('option[value="microsoft"]') !== null
-    && select.querySelector('option[value="google"]') !== null
-  )) ?? null
+function findTranslationMethodSelect(root: ParentNode | null): HTMLSelectElement | null {
+  return root?.querySelector<HTMLSelectElement>('[data-screenpilot-translation-method="true"]') ?? null
 }
 
-function visibleOcrSource(): string {
-  const source = document.querySelector<HTMLElement>('.ocr-editable, .ocr-markdown')
+function visibleOcrSource(root: ParentNode | null): string {
+  const source = root?.querySelector<HTMLElement>('[data-screenpilot-ocr-source-content="true"]')
   return source?.innerText.trim() ?? ''
 }
 
@@ -183,6 +179,7 @@ function syncFloatingDialogLayout(
 }
 
 export default function ReferenceVisionAdapter() {
+  const adapterRootRef = useRef<HTMLElement>(null)
   const [interfaceLanguage, setInterfaceLanguage] = useState<InterfaceLanguage>('zh')
   const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('auto')
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>('auto')
@@ -239,14 +236,18 @@ export default function ReferenceVisionAdapter() {
     const loadSettings = () => {
       const currentRequest = request + 1
       request = currentRequest
-      void invoke<ReferenceSettings>('get_settings').then((settings) => {
+      void invoke<ReferenceSettings>('vision_runtime_settings_load').then((settings) => {
         if (!active || currentRequest !== request) return
       syncDocumentTheme(settings.theme === 'light' || settings.theme === 'dark' ? settings.theme : 'system')
       const loadedLanguage = settings.settingsLanguage === 'en' ? 'en' : 'zh'
       setInterfaceLanguage(loadedLanguage)
       document.documentElement.lang = loadedLanguage === 'zh' ? 'zh-CN' : 'en'
       document.title = 'ScreenPilot — Vision'
-      if ('__TAURI_INTERNALS__' in window) void getCurrentWindow().setTitle(document.title)
+      if ('__TAURI_INTERNALS__' in window) {
+        void getCurrentWindow().setTitle(document.title).catch((error: unknown) => {
+          console.error('Failed to set the Vision window title', error)
+        })
+      }
       const configuredSource = settings.screenshotTranslation.sourceLanguage
       if (isTargetLanguage(configuredSource)) {
         sourceLanguageRef.current = configuredSource
@@ -281,13 +282,23 @@ export default function ReferenceVisionAdapter() {
     })
     }
     loadSettings()
-    window.addEventListener('vision:reset', loadSettings)
+    const resetSession = () => {
+      sourceRef.current = { imageId: '', text: '' }
+      clearOverride()
+    }
+    const handleVisionReset = () => {
+      resetSession()
+      loadSettings()
+    }
+    window.addEventListener('vision:reset', handleVisionReset)
+    window.addEventListener('screenpilot:vision-session-reset', resetSession)
     return () => {
       active = false
       request += 1
-      window.removeEventListener('vision:reset', loadSettings)
+      window.removeEventListener('vision:reset', handleVisionReset)
+      window.removeEventListener('screenpilot:vision-session-reset', resetSession)
     }
-  }, [])
+  }, [clearOverride])
 
   useEffect(() => {
     let dispose: (() => void) | undefined
@@ -313,46 +324,25 @@ export default function ReferenceVisionAdapter() {
   useEffect(() => {
     let adapterFrame: number | null = null
     const applyAdaptersNow = () => {
-      const send = document.querySelector<HTMLButtonElement>('[data-screenpilot-vision-send="true"]')
-        ?? document.querySelector<HTMLButtonElement>('button:has(svg.lucide-arrow-up)')
+      const adapterRoot = adapterRootRef.current
+      if (adapterRoot === null) return
+      const visionRoot = adapterRoot.querySelector<HTMLElement>('[data-screenpilot-vision-root="true"]')
+      if (visionRoot === null) return
+
+      const send = visionRoot.querySelector<HTMLButtonElement>('[data-screenpilot-vision-send="true"]')
       if (send !== null) send.setAttribute('aria-label', t.send)
 
-      const prompt = document.querySelector<HTMLInputElement>('[data-screenpilot-vision-prompt="true"]')
-        ?? document.querySelector<HTMLInputElement>('input[placeholder="问点什么..."], input[placeholder="Ask anything..."]')
-      const promptBar = prompt?.closest<HTMLElement>('[data-screenpilot-prompt-bar="true"]') ?? prompt?.parentElement
-      const promptPanel = promptBar?.closest<HTMLElement>('[data-screenpilot-prompt-panel="true"]') ?? promptBar?.parentElement
+      const promptBar = visionRoot.querySelector<HTMLElement>('[data-screenpilot-prompt-bar="true"]')
+      const promptPanel = visionRoot.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
       if (promptBar instanceof HTMLElement) {
-        setAttributeIfChanged(promptBar, 'data-screenpilot-prompt-bar', 'true')
         setAttributeIfChanged(promptBar, 'data-screenpilot-window-frame', 'true')
-        if (promptPanel instanceof HTMLElement) {
-          const hasScreenshotThumb = promptBar.querySelector('img[alt="snap"]') !== null
-          const isReadyBar = promptBar.classList.contains('cursor-move')
-          setAttributeIfChanged(promptPanel, 'data-screenpilot-prompt-panel', 'true')
-          setBooleanAttribute(promptPanel, 'data-screenpilot-ready-prompt-panel', isReadyBar || hasScreenshotThumb)
-          setBooleanAttribute(promptPanel, 'data-screenpilot-captured-prompt-panel', hasScreenshotThumb)
-        }
       }
       if (promptPanel instanceof HTMLElement) {
-        // The Vision prompt-optimization preview is the only editable
-        // textarea in the cloned Vision surface. Mark its enclosing frosted
-        // card so the adapter can remove the global focus ring without
-        // changing any other Vision control or the vendor source copy.
-        const promptPreviewEditor = promptPanel.querySelector<HTMLTextAreaElement>('textarea')
         const promptPreviewCard = promptPanel.querySelector<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]')
-          ?? promptPreviewEditor?.closest<HTMLElement>('.window-frosted')
-          ?? null
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
-          if (card !== promptPreviewCard) {
-            card.removeAttribute('data-screenpilot-vision-prompt-preview')
-            clearCssProperty(card, '--screenpilot-dialog-initial-height')
-            clearFloatingDialogLayout(card)
-          }
-        })
         const hasScreenshot = promptBar?.dataset.screenpilotVisionImage !== 'false'
         const dialogInitialHeight = visionDialogHeight(referenceViewportHeightRef.current, hasScreenshot)
         const dialogMinimumHeight = dialogInitialHeight
         if (promptPreviewCard !== null) {
-          setAttributeIfChanged(promptPreviewCard, 'data-screenpilot-vision-prompt-preview', 'true')
           setCssPropertyIfChanged(
             promptPreviewCard,
             '--screenpilot-dialog-initial-height',
@@ -367,43 +357,15 @@ export default function ReferenceVisionAdapter() {
           )
         }
         const answerCard = promptPanel.querySelector<HTMLElement>('[data-screenpilot-answer-panel="true"]')
-          ?? Array.from(promptPanel.children).find((child) => (
-          child instanceof HTMLElement
-          && child.classList.contains('window-frosted')
-          && child.classList.contains('transition-all')
-          && child.classList.contains('absolute')
-        ))
         if (
           answerCard instanceof HTMLElement
-          && answerCard.style.opacity !== '0'
-          && answerCard.style.height !== '0px'
+          && promptPanel.dataset.screenpilotAnswerVisible === 'true'
         ) {
-          setAttributeIfChanged(answerCard, 'data-screenpilot-answer-panel', 'true')
           setCssPropertyIfChanged(
             answerCard,
             '--screenpilot-dialog-initial-height',
             `${String(dialogInitialHeight)}px`,
           )
-          const answerScroll = answerCard.querySelector<HTMLElement>('[data-screenpilot-answer-scroll="true"]')
-            ?? answerCard.querySelector<HTMLElement>('.h-full.overflow-y-auto.custom-scrollbar')
-          if (answerScroll !== null) {
-            setAttributeIfChanged(answerScroll, 'data-screenpilot-answer-scroll', 'true')
-            const answerActions = answerScroll.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
-              ?? Array.from(answerScroll.children).find((child) => (
-              child instanceof HTMLElement
-              && child.classList.contains('flex')
-              && child.classList.contains('items-center')
-              && child.classList.contains('gap-1')
-              && child.querySelector(':scope > button') !== null
-            ))
-            if (answerActions instanceof HTMLElement) {
-              setAttributeIfChanged(answerActions, 'data-screenpilot-answer-actions', 'true')
-            } else {
-              answerScroll.querySelectorAll<HTMLElement>('[data-screenpilot-answer-actions="true"]').forEach((actions) => {
-                actions.removeAttribute('data-screenpilot-answer-actions')
-              })
-            }
-          }
           const top = answerCard.getBoundingClientRect().top
           syncFloatingDialogLayout(
             answerCard,
@@ -412,33 +374,27 @@ export default function ReferenceVisionAdapter() {
             dialogMinimumHeight,
           )
         } else {
-          document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
+          visionRoot.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
             clearFloatingDialogLayout(card)
             clearCssProperty(card, '--screenpilot-dialog-initial-height')
-            card.removeAttribute('data-screenpilot-answer-panel')
           })
         }
       } else {
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-dialog-card="true"]').forEach((card) => {
+        visionRoot.querySelectorAll<HTMLElement>('[data-screenpilot-floating-dialog-card="true"]').forEach((card) => {
           clearFloatingDialogLayout(card)
         })
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
-          card.removeAttribute('data-screenpilot-vision-prompt-preview')
+        visionRoot.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
           clearCssProperty(card, '--screenpilot-dialog-initial-height')
-        })
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
-          card.removeAttribute('data-screenpilot-answer-panel')
         })
       }
 
-      const methodSelect = findTranslationMethodSelect()
+      const methodSelect = findTranslationMethodSelect(visionRoot)
       const availability = aiAvailabilityRef.current
-      document.querySelectorAll<HTMLSelectElement>('select').forEach((select) => {
-        const ocr = select.querySelector('option[value="chaoxing"]') !== null
-        const translation = select.querySelector('option[value="microsoft"]') !== null
-          && select.querySelector('option[value="google"]') !== null
-        const allowed = !aiAvailabilityLoadedRef.current
-          || (ocr ? availability.ocr : translation ? availability.translation : true)
+      visionRoot.querySelectorAll<HTMLSelectElement>(
+        '[data-screenpilot-ocr-method="true"], [data-screenpilot-translation-method="true"]',
+      ).forEach((select) => {
+        const ocr = select.dataset.screenpilotOcrMethod === 'true'
+        const allowed = !aiAvailabilityLoadedRef.current || (ocr ? availability.ocr : availability.translation)
         if (!allowed) {
           select.querySelector('option[value="ai"]')?.remove()
           if (select.value === 'ai') {
@@ -447,67 +403,58 @@ export default function ReferenceVisionAdapter() {
           }
         }
       })
-      const heading = methodSelect?.parentElement
-      const body = heading?.parentElement
-      if (methodSelect === null || heading === undefined || heading === null || body === undefined || body === null) {
+      const translateCard = visionRoot.querySelector<HTMLElement>('[data-screenpilot-translation-card="true"]')
+      const header = translateCard?.querySelector<HTMLElement>('[data-screenpilot-translation-header="true"]') ?? null
+      const body = translateCard?.querySelector<HTMLElement>('[data-screenpilot-translation-body="true"]') ?? null
+      const heading = body?.querySelector<HTMLElement>('[data-screenpilot-translated-heading="true"]') ?? null
+      const source = body?.querySelector<HTMLElement>('[data-screenpilot-ocr-container="true"]') ?? null
+      const sourceHeading = source?.querySelector<HTMLElement>('[data-screenpilot-original-heading="true"]') ?? null
+      const sourceLanguageSlot = sourceHeading?.querySelector<HTMLElement>('[data-screenpilot-source-language-slot="true"]') ?? null
+      const targetLanguageSlot = heading?.querySelector<HTMLElement>('[data-screenpilot-target-language-slot="true"]') ?? null
+      const targetResultSlot = body?.querySelector<HTMLElement>('[data-screenpilot-target-result-slot="true"]') ?? null
+      if (
+        methodSelect === null
+        || translateCard === null
+        || header === null
+        || body === null
+        || heading === null
+        || targetLanguageSlot === null
+        || targetResultSlot === null
+      ) {
         document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
         document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
-        document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {
-          card.removeAttribute('data-screenpilot-floating-translate-surface')
-        })
         return
       }
-      const divider = heading.previousElementSibling
-      const source = divider?.previousElementSibling
-      const sourceHeading = source instanceof HTMLElement
-        ? source.firstElementChild instanceof HTMLElement ? source.firstElementChild : null
-        : null
-      const sourceMethodSelect = document.querySelector<HTMLSelectElement>('[data-screenpilot-ocr-method="true"]')
-        ?? sourceHeading?.querySelector<HTMLSelectElement>(
-          'select:not([data-screenpilot-source-language-select="true"])',
-        )
-        ?? null
-      body.dataset.screenpilotTranslationBody = 'true'
-      const translateCard = body.parentElement
-      translateCard?.setAttribute('data-screenpilot-window-frame', 'true')
+      translateCard.setAttribute('data-screenpilot-window-frame', 'true')
       // The screenshot-translation/OCR result card is the one Vision surface
       // outside the reference component that should receive the same frosted
       // transparency as `.window-frosted`. Keep it explicitly scoped so the
       // regular Vision prompt and answer frames are untouched.
-      translateCard?.setAttribute('data-screenpilot-ocr-card', 'true')
-      const translateRect = translateCard instanceof HTMLElement
-        ? translateCard.getBoundingClientRect()
-        : null
-      const translateLayoutWidth = translateCard instanceof HTMLElement
-        ? translateCard.offsetWidth
-        : 0
-      const floatingTranslateSurface = translateCard instanceof HTMLElement
-        && isFloatingResultSurface(translateCard)
+      translateCard.setAttribute('data-screenpilot-ocr-card', 'true')
+      const translateRect = translateCard.getBoundingClientRect()
+      const translateLayoutWidth = translateCard.offsetWidth
+      const floatingTranslateSurface = isFloatingResultSurface(translateCard)
       const floatingTranslateMatchesViewport = floatingTranslateSurface
-        && translateRect !== null
         && Math.abs(window.innerHeight - VISION_FLOATING_PADDING * 2 - translateRect.height) <= 12
-      if (translateCard instanceof HTMLElement && floatingTranslateMatchesViewport) {
+      if (floatingTranslateMatchesViewport) {
         settledTranslateCards.add(translateCard)
       }
       const floatingTranslateSettled = floatingTranslateSurface
-        && translateCard instanceof HTMLElement
         && settledTranslateCards.has(translateCard)
-      if (floatingTranslateSurface && translateCard instanceof HTMLElement) {
+      if (floatingTranslateSurface) {
         // `transition-property: none` is the vendor surface's explicit rebase
         // phase. During that interval Rust is about to run the native HWND
         // flight with its compact geometry, so an adapter resize would be
         // overwritten a frame later and appear as a vertical kick. Wait for
         // the post-flight style commit before taking sole ownership of height.
-        const nativeFlightActive = translateCard.style.transitionProperty === 'none'
-          || translateCard.classList.contains('vision-ocr-jelly-pop')
+        const nativeFlightActive = translateCard.dataset.screenpilotNativeFlightActive === 'true'
         const initialContentWidth = Math.ceil(
-          translateLayoutWidth > 0 ? translateLayoutWidth : (translateRect?.width ?? 0),
+          translateLayoutWidth > 0 ? translateLayoutWidth : translateRect.width,
         )
         if (!translateFloatingContentWidths.has(translateCard) && initialContentWidth > 0) {
           translateFloatingContentWidths.set(translateCard, initialContentWidth)
         }
-        const header = translateCard.firstElementChild
-        const headerHeight = header instanceof HTMLElement ? header.getBoundingClientRect().height : 0
+        const headerHeight = header.getBoundingClientRect().height
         const desiredHeight = Math.min(
           OCR_FLOATING_MAX_HEIGHT,
           Math.ceil(headerHeight + body.scrollHeight),
@@ -552,18 +499,8 @@ export default function ReferenceVisionAdapter() {
           })
         }
       }
-      if (translateCard instanceof HTMLElement) {
-        setBooleanAttribute(
-          translateCard,
-          'data-screenpilot-floating-translate-surface',
-          floatingTranslateSurface,
-        )
-        setBooleanAttribute(
-          translateCard,
-          'data-screenpilot-floating-translate-card',
-          floatingTranslateSettled,
-        )
-      }
+      setBooleanAttribute(translateCard, 'data-screenpilot-floating-translate-surface', floatingTranslateSurface)
+      setBooleanAttribute(translateCard, 'data-screenpilot-floating-translate-card', floatingTranslateSettled)
       setBooleanAttribute(
         document.documentElement,
         'data-screenpilot-floating-translate-window',
@@ -574,7 +511,7 @@ export default function ReferenceVisionAdapter() {
         'data-screenpilot-floating-translate-pending',
         floatingTranslateSurface && !floatingTranslateSettled,
       )
-      if (source instanceof HTMLElement && source.querySelector('.ocr-editable, .ocr-markdown') !== null) {
+      if (source !== null && source.querySelector('[data-screenpilot-ocr-source-content="true"]') !== null) {
         const reachedHeightLimit = floatingTranslateSettled
           && window.innerHeight >= OCR_FLOATING_MAX_HEIGHT + VISION_FLOATING_PADDING * 2 - 1
         if (reachedHeightLimit) {
@@ -586,23 +523,13 @@ export default function ReferenceVisionAdapter() {
           clearCssProperty(source, '--screenpilot-ocr-source-max-height')
         }
       }
-      heading.dataset.screenpilotTranslatedHeading = 'true'
-      methodSelect.dataset.screenpilotTranslationMethod = 'true'
-      if (sourceHeading !== null) {
-        sourceHeading.dataset.screenpilotOriginalHeading = 'true'
-        if (
-          sourceLanguageHost.parentElement !== sourceHeading
-          || sourceLanguageHost.nextSibling !== sourceMethodSelect
-        ) {
-          sourceHeading.insertBefore(sourceLanguageHost, sourceMethodSelect)
-        }
+      if (sourceHeading !== null && sourceLanguageSlot !== null) {
+        if (sourceLanguageHost.parentNode !== sourceLanguageSlot) sourceLanguageSlot.append(sourceLanguageHost)
+      } else {
+        sourceLanguageHost.remove()
       }
-      if (languageHost.parentElement !== heading || languageHost.nextSibling !== methodSelect) {
-        heading.insertBefore(languageHost, methodSelect)
-      }
-      if (resultHost.parentElement !== body || heading.nextSibling !== resultHost) {
-        heading.after(resultHost)
-      }
+      if (languageHost.parentNode !== targetLanguageSlot) targetLanguageSlot.append(languageHost)
+      if (resultHost.parentNode !== targetResultSlot) targetResultSlot.append(resultHost)
     }
 
     const applyAdapters = () => {
@@ -615,26 +542,23 @@ export default function ReferenceVisionAdapter() {
 
     applyAdapters()
     const observer = new MutationObserver(applyAdapters)
-    observer.observe(document.body, {
-      attributeFilter: [
-        'class',
-        'style',
-        'data-screenpilot-vision-image',
-        'data-screenpilot-floating-layout',
-        'data-screenpilot-floating-width',
-      ],
-      attributes: true,
+    const adapterRoot = adapterRootRef.current
+    if (adapterRoot === null) return
+    observer.observe(adapterRoot, {
       childList: true,
       subtree: true,
     })
     const handleInput = (event: Event) => {
       const target = event.target
-      if (!(target instanceof HTMLElement) || !target.classList.contains('ocr-editable')) return
+      if (!(target instanceof HTMLElement) || target.dataset.screenpilotOcrSourceContent !== 'true') return
       sourceRef.current = { imageId: sourceRef.current.imageId, text: target.innerText }
       clearOverride()
     }
     const handleChange = (event: Event) => {
-      if (event.target === findTranslationMethodSelect()) clearOverride()
+      if (
+        event.target instanceof HTMLElement
+        && event.target.dataset.screenpilotTranslationMethod === 'true'
+      ) clearOverride()
     }
     const promptCaretSyncs = new Map<HTMLInputElement, () => void>()
     const handlePromptCaretEvent = (event: Event) => {
@@ -642,37 +566,38 @@ export default function ReferenceVisionAdapter() {
       promptCaretSyncs.get(event.target)?.()
       promptCaretSyncs.set(event.target, scheduleVisionPromptCaretSync(event.target))
     }
-    document.addEventListener('input', handleInput)
-    document.addEventListener('change', handleChange)
-    document.addEventListener('input', handlePromptCaretEvent)
-    document.addEventListener('compositionend', handlePromptCaretEvent)
-    document.addEventListener('paste', handlePromptCaretEvent)
+    adapterRoot.addEventListener('input', handleInput)
+    adapterRoot.addEventListener('change', handleChange)
+    adapterRoot.addEventListener('input', handlePromptCaretEvent)
+    adapterRoot.addEventListener('compositionend', handlePromptCaretEvent)
+    adapterRoot.addEventListener('paste', handlePromptCaretEvent)
     window.addEventListener('resize', applyAdapters)
     window.addEventListener('screenpilot-ai-availability', applyAdapters)
+    window.addEventListener('screenpilot:vision-contract-change', applyAdapters)
     return () => {
       observer.disconnect()
       if (adapterFrame !== null) window.cancelAnimationFrame(adapterFrame)
       adapterFrame = null
-      document.removeEventListener('input', handleInput)
-      document.removeEventListener('change', handleChange)
-      document.removeEventListener('input', handlePromptCaretEvent)
-      document.removeEventListener('compositionend', handlePromptCaretEvent)
-      document.removeEventListener('paste', handlePromptCaretEvent)
+      adapterRoot.removeEventListener('input', handleInput)
+      adapterRoot.removeEventListener('change', handleChange)
+      adapterRoot.removeEventListener('input', handlePromptCaretEvent)
+      adapterRoot.removeEventListener('compositionend', handlePromptCaretEvent)
+      adapterRoot.removeEventListener('paste', handlePromptCaretEvent)
       promptCaretSyncs.forEach((cancel) => cancel())
       promptCaretSyncs.clear()
       window.removeEventListener('resize', applyAdapters)
       window.removeEventListener('screenpilot-ai-availability', applyAdapters)
-      document.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
-        card.removeAttribute('data-screenpilot-vision-prompt-preview')
+      window.removeEventListener('screenpilot:vision-contract-change', applyAdapters)
+      adapterRoot.querySelectorAll<HTMLElement>('[data-screenpilot-vision-prompt-preview="true"]').forEach((card) => {
         clearCssProperty(card, '--screenpilot-dialog-initial-height')
         clearFloatingDialogLayout(card)
       })
-      document.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
+      adapterRoot.querySelectorAll<HTMLElement>('[data-screenpilot-answer-panel="true"]').forEach((card) => {
         clearCssProperty(card, '--screenpilot-dialog-initial-height')
       })
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-window')
       document.documentElement.removeAttribute('data-screenpilot-floating-translate-pending')
-      document.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {
+      adapterRoot.querySelectorAll<HTMLElement>('[data-screenpilot-floating-translate-surface="true"]').forEach((card) => {
         card.removeAttribute('data-screenpilot-floating-translate-surface')
       })
       languageHost.remove()
@@ -682,7 +607,7 @@ export default function ReferenceVisionAdapter() {
   }, [clearOverride, t.send])
 
   useEffect(() => {
-    const body = resultHost.parentElement
+    const body = adapterRootRef.current?.querySelector<HTMLElement>('[data-screenpilot-translation-body="true"]') ?? null
     if (body === null) return
     if (overrideResult.status === 'idle') delete body.dataset.screenpilotTranslationOverride
     else body.dataset.screenpilotTranslationOverride = 'true'
@@ -692,29 +617,19 @@ export default function ReferenceVisionAdapter() {
   }, [overrideResult.status])
 
   const persistTargetLanguage = useCallback(async (value: TargetLanguage, source: SourceLanguage) => {
-    const settings = await invoke<ReferenceSettings>('get_settings')
-    await invoke('save_settings', {
-      settings: {
-        ...settings,
-        screenshotTranslation: {
-          ...settings.screenshotTranslation,
-          sourceLanguage: source,
-          targetLanguage: value,
-        },
+    await invoke<ReferenceSettings>('screenshot_translation_settings_update', {
+      patch: {
+        sourceLanguage: source,
+        targetLanguage: value,
       },
     })
   }, [])
 
   const persistSourceLanguage = useCallback(async (value: SourceLanguage, target: TargetLanguage) => {
-    const settings = await invoke<ReferenceSettings>('get_settings')
-    await invoke('save_settings', {
-      settings: {
-        ...settings,
-        screenshotTranslation: {
-          ...settings.screenshotTranslation,
-          targetLanguage: target,
-          sourceLanguage: value,
-        },
+    await invoke<ReferenceSettings>('screenshot_translation_settings_update', {
+      patch: {
+        targetLanguage: target,
+        sourceLanguage: value,
       },
     })
   }, [])
@@ -736,7 +651,7 @@ export default function ReferenceVisionAdapter() {
     overrideLockedRef.current = true
     sourceLanguageRef.current = value
     setSourceLanguage(value)
-    const source = visibleOcrSource() || sourceRef.current.text.trim()
+    const source = visibleOcrSource(adapterRootRef.current) || sourceRef.current.text.trim()
     const sequence = requestSequenceRef.current + 1
     requestSequenceRef.current = sequence
     if (source) setOverrideResult({ status: 'loading', text: '' })
@@ -766,7 +681,7 @@ export default function ReferenceVisionAdapter() {
     overrideLockedRef.current = true
     targetLanguageRef.current = value
     setTargetLanguage(value)
-    const source = visibleOcrSource() || sourceRef.current.text.trim()
+    const source = visibleOcrSource(adapterRootRef.current) || sourceRef.current.text.trim()
     const sequence = requestSequenceRef.current + 1
     requestSequenceRef.current = sequence
     if (source) setOverrideResult({ status: 'loading', text: '' })
@@ -794,7 +709,7 @@ export default function ReferenceVisionAdapter() {
   }, [persistTargetLanguage, t.translationFailed, translateVisibleSource])
 
   return (
-    <main data-screenpilot-vision-adapter="true">
+    <main ref={adapterRootRef} data-screenpilot-vision-adapter="true">
       <ReferenceVision />
       {createPortal(
         <span className="screenpilot-source-language-control">

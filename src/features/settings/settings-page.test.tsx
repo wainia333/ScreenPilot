@@ -44,6 +44,19 @@ class FailingSettingsDesktop extends ClosingDesktop {
   }
 }
 
+class FailingSaveDesktop extends ClosingDesktop {
+  override saveSettings(): Promise<SettingsSaveResult> {
+    return Promise.reject(new Error('synthetic save failure'))
+  }
+}
+
+class FailingHideDesktop extends ClosingDesktop {
+  override hideWindow(): Promise<void> {
+    this.hides += 1
+    return Promise.reject(new Error('synthetic hide failure'))
+  }
+}
+
 class AdministratorDesktop extends ClosingDesktop {
   override permissionStatus() {
     return Promise.resolve({
@@ -109,6 +122,30 @@ class ImportSettingsDesktop extends CountingSettingsDesktop {
       settings: structuredClone(this.importedSettings),
       ...(this.importedSecrets === undefined ? {} : { secrets: structuredClone(this.importedSecrets) }),
     })
+  }
+}
+
+class SettingsOperationsDesktop extends ClosingDesktop {
+  directoryCalls = 0
+  exportCalls: boolean[] = []
+  importCalls = 0
+  directoryResult: Promise<string | null> = Promise.resolve(null)
+  exportResult: Promise<boolean> = Promise.resolve(false)
+  importResult: Promise<SettingsExport | null> = Promise.resolve(null)
+
+  override pickDirectory(): Promise<string | null> {
+    this.directoryCalls += 1
+    return this.directoryResult
+  }
+
+  override exportSettings(includeSecrets: boolean): Promise<boolean> {
+    this.exportCalls.push(includeSecrets)
+    return this.exportResult
+  }
+
+  override importSettings(): Promise<SettingsExport | null> {
+    this.importCalls += 1
+    return this.importResult
   }
 }
 
@@ -205,6 +242,29 @@ describe('SettingsPage', () => {
     expect(desktop.hides).toBe(1)
   })
 
+  it('shows close failures for clean and discarded settings without leaking rejected promises', async () => {
+    const desktop = new FailingHideDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('synthetic hide failure')
+
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '放弃更改' }))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('synthetic hide failure')
+    expect(screen.getByRole('radio', { name: '系统' })).toBeChecked()
+    expect(desktop.hides).toBe(2)
+  })
+
   it('keeps the import confirmation on the base dialog presentation', async () => {
     const desktop = new ImportSettingsDesktop(structuredClone(DEFAULT_SETTINGS))
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
@@ -218,6 +278,125 @@ describe('SettingsPage', () => {
     expect(dialog).not.toHaveClass('unsaved-close-dialog')
     expect(dialog.parentElement).toHaveClass('dialog-backdrop')
     expect(dialog.parentElement).not.toHaveClass('unsaved-close-backdrop')
+  })
+
+  it('catches directory picker failures, blocks duplicate work, and keeps cancellation silent', async () => {
+    const desktop = new SettingsOperationsDesktop()
+    let rejectDirectory: ((reason?: unknown) => void) | undefined
+    desktop.directoryResult = new Promise((_resolve, reject) => {
+      rejectDirectory = reject
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('switch', { name: '截图自动归档' }))
+    const chooseDirectory = screen.getByRole('button', { name: '选择目录' })
+
+    fireEvent.click(chooseDirectory)
+
+    expect(chooseDirectory).toBeDisabled()
+    expect(chooseDirectory).toHaveAttribute('aria-busy', 'true')
+    expect(screen.getByRole('button', { name: '关闭设置' })).toBeDisabled()
+    fireEvent.click(chooseDirectory)
+    expect(desktop.directoryCalls).toBe(1)
+
+    await act(async () => {
+      rejectDirectory?.(new Error('synthetic directory failure'))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('选择目录失败：synthetic directory failure')).toHaveAttribute('role', 'alert')
+    expect(chooseDirectory).toBeEnabled()
+    expect(chooseDirectory).toHaveAttribute('aria-busy', 'false')
+
+    desktop.directoryResult = Promise.resolve(null)
+    await act(async () => {
+      fireEvent.click(chooseDirectory)
+      await Promise.resolve()
+    })
+    expect(screen.queryByText(/选择目录失败/u)).not.toBeInTheDocument()
+    expect(chooseDirectory).toHaveTextContent('选择目录')
+
+    desktop.directoryResult = Promise.resolve('D:\\ScreenPilot shots')
+    await act(async () => {
+      fireEvent.click(chooseDirectory)
+      await Promise.resolve()
+    })
+    expect(chooseDirectory).toHaveTextContent('D:\\ScreenPilot shots')
+    expect(desktop.directoryCalls).toBe(3)
+  })
+
+  it('catches export failures, serializes file dialogs, and does not report cancellation as success', async () => {
+    const desktop = new SettingsOperationsDesktop()
+    let rejectExport: ((reason?: unknown) => void) | undefined
+    desktop.exportResult = new Promise((_resolve, reject) => {
+      rejectExport = reject
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    const exportButton = screen.getByRole('button', { name: '导出配置' })
+    const importButton = screen.getByRole('button', { name: '导入配置' })
+
+    fireEvent.click(exportButton)
+
+    expect(exportButton).toBeDisabled()
+    expect(exportButton).toHaveAttribute('aria-busy', 'true')
+    expect(importButton).toBeDisabled()
+    fireEvent.click(exportButton)
+    expect(desktop.exportCalls).toEqual([false])
+
+    await act(async () => {
+      rejectExport?.(new Error('synthetic export failure'))
+      await Promise.resolve()
+    })
+    expect(screen.getByText('配置导出失败：synthetic export failure')).toHaveAttribute('role', 'alert')
+
+    desktop.exportResult = Promise.resolve(false)
+    await act(async () => {
+      fireEvent.click(exportButton)
+      await Promise.resolve()
+    })
+    expect(screen.queryByText(/配置导出失败/u)).not.toBeInTheDocument()
+    expect(screen.queryByText('配置已导出')).not.toBeInTheDocument()
+
+    desktop.exportResult = Promise.resolve(true)
+    await act(async () => {
+      fireEvent.click(exportButton)
+      await Promise.resolve()
+    })
+    expect(screen.getByText('配置已导出')).toHaveAttribute('role', 'status')
+    expect(desktop.exportCalls).toEqual([false, false, false])
+  })
+
+  it('catches import failures, keeps cancellation silent, and remains retryable', async () => {
+    const desktop = new SettingsOperationsDesktop()
+    let rejectImport: ((reason?: unknown) => void) | undefined
+    desktop.importResult = new Promise((_resolve, reject) => {
+      rejectImport = reject
+    })
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    const importButton = screen.getByRole('button', { name: '导入配置' })
+
+    fireEvent.click(importButton)
+    expect(importButton).toBeDisabled()
+    expect(importButton).toHaveAttribute('aria-busy', 'true')
+    await act(async () => {
+      rejectImport?.(new Error('synthetic import failure'))
+      await Promise.resolve()
+    })
+    expect(screen.getByText('配置导入失败：synthetic import failure')).toHaveAttribute('role', 'alert')
+    expect(importButton).toBeEnabled()
+    expect(importButton).toHaveAttribute('aria-busy', 'false')
+
+    desktop.importResult = Promise.resolve(null)
+    await act(async () => {
+      fireEvent.click(importButton)
+      await Promise.resolve()
+    })
+    expect(screen.queryByText(/配置导入失败/u)).not.toBeInTheDocument()
+    expect(desktop.importCalls).toBe(2)
   })
 
   it('keeps the save action in the lower-right footer', async () => {
@@ -623,6 +802,26 @@ describe('SettingsPage', () => {
     fireEvent.pointerDown(screen.getByRole('button', { name: '重试' }), { button: 0 })
     fireEvent.pointerDown(screen.getByRole('button', { name: '关闭' }), { button: 0 })
     expect(failed.drags).toBe(1)
+  })
+
+  it('keeps a native close failure visible on the settings load-error screen', async () => {
+    class FailingLoadAndHideDesktop extends FailingSettingsDesktop {
+      override hideWindow(): Promise<void> {
+        this.hides += 1
+        return Promise.reject(new Error('synthetic load-state hide failure'))
+      }
+    }
+    const desktop = new FailingLoadAndHideDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    expect(await screen.findByText('Error: settings unavailable')).toBeVisible()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('synthetic load-state hide failure')).toBeVisible()
+    expect(desktop.hides).toBe(1)
   })
 
   it('labels the screenshot translation settings section as OCR', async () => {
@@ -1204,12 +1403,25 @@ describe('SettingsPage', () => {
     await act(async () => Promise.resolve())
     const status = screen.getByText(/保存失败：凭据保存失败/u)
     expect(status).toBeVisible()
+    expect(status).toHaveClass('validation-banner')
+    expect(status).toHaveAttribute('role', 'alert')
     expect(status).not.toHaveTextContent('retry-secret')
     expect(screen.queryByText('设置已保存并立即生效')).not.toBeInTheDocument()
     expect(keys).toHaveValue('retry-secret')
     expect(save).toBeEnabled()
     expect(desktop.providerKeySaveCalls).toHaveLength(1)
     expect((await desktop.loadSettings()).providers[0]?.keyCount).toBe(0)
+  })
+
+  it('announces settings persistence failures as errors', async () => {
+    const desktop = new FailingSaveDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    const failure = await screen.findByRole('alert')
+    expect(failure).toHaveTextContent('保存失败：Error: synthetic save failure')
+    expect(failure).toHaveClass('validation-banner')
   })
 
   it('clears a removed provider key draft without writing credentials', async () => {
