@@ -89,6 +89,15 @@ body {
   color: inherit;
 }
 
+/* Code blocks always use a near-black surface, so the translucent global
+   selection color above is too subtle in both themes. Keep this stronger
+   highlight scoped to Vision Markdown code instead of changing OCR/input
+   selection throughout the app. */
+[data-screenpilot-markdown-code="true"] ::selection {
+  background: #2563eb;
+  color: #ffffff;
+}
+
 /* 键盘可见焦点。
    之前只有 input 有 focus 样式，按钮 / 侧栏导航 Tab 过去完全没有反馈，
    纯键盘操作等于盲走。用 :focus-visible 所以鼠标点击不会出现难看的描边。 */

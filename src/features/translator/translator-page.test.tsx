@@ -149,6 +149,22 @@ class DeferredPrepareListenerDesktop extends RecoveringListenerDesktop {
   }
 }
 
+class DeferredSelectionListenerDesktop extends RecordingDesktop {
+  selectionReads = 0
+  resolveSelectionListener: (() => void) | null = null
+
+  override onTranslatorSelection(): Promise<Unlisten> {
+    return new Promise((resolve) => {
+      this.resolveSelectionListener = () => resolve(() => undefined)
+    })
+  }
+
+  override takeTranslatorSelection(): Promise<string> {
+    this.selectionReads += 1
+    return super.takeTranslatorSelection()
+  }
+}
+
 describe('TranslatorPage', () => {
   afterEach(() => {
     cleanup()
@@ -269,7 +285,7 @@ describe('TranslatorPage', () => {
     await act(async () => Promise.resolve())
     expect(screen.getByLabelText('原文')).toHaveValue('selected source')
     await act(async () => {
-      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      vi.advanceTimersByTime(0)
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.text).toBe('selected source')
@@ -292,10 +308,117 @@ describe('TranslatorPage', () => {
     })
     expect(screen.getByLabelText('原文')).toHaveValue('delayed selection')
     await act(async () => {
-      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      vi.advanceTimersByTime(0)
       await Promise.resolve()
     })
     expect(desktop.translations.at(-1)?.text).toBe('delayed selection')
+  })
+
+  it('starts a new translation when consecutive selection events contain the same text', async () => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    await act(async () => {
+      desktop.emitTranslatorSelection('repeated selection')
+      await Promise.resolve()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(0)
+      await Promise.resolve()
+    })
+    const firstGeneration = desktop.translations.at(-1)?.generation
+    expect(desktop.translations.map((request) => request.text)).toEqual(['repeated selection'])
+
+    await act(async () => {
+      desktop.emitTranslatorSelection('repeated selection')
+      await Promise.resolve()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(0)
+      await Promise.resolve()
+    })
+
+    expect(desktop.translations.map((request) => request.text)).toEqual([
+      'repeated selection',
+      'repeated selection',
+    ])
+    expect(desktop.translations.at(-1)?.generation).toBeGreaterThan(firstGeneration ?? 0)
+  })
+
+  it('coalesces a stored snapshot with the matching selection event', async () => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    desktop.selection = 'single captured selection'
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    await act(async () => {
+      desktop.emitTranslatorSelection('single captured selection')
+      await Promise.resolve()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(0)
+      await Promise.resolve()
+    })
+
+    expect(desktop.translations.map((request) => request.text)).toEqual([
+      'single captured selection',
+    ])
+  })
+
+  it('returns to the manual-input debounce when a hotkey selection is edited immediately', async () => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    await act(async () => {
+      desktop.emitTranslatorSelection('hotkey selection')
+      await Promise.resolve()
+    })
+    fireEvent.change(screen.getByLabelText('原文'), { target: { value: 'manual replacement' } })
+    await act(() => vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS - 1))
+    expect(desktop.translations).toHaveLength(0)
+
+    await act(async () => {
+      vi.advanceTimersByTime(1)
+      await Promise.resolve()
+    })
+    expect(desktop.translations.map((request) => request.text)).toEqual(['manual replacement'])
+  })
+
+  it('subscribes before reading the stored selection during a cold start', async () => {
+    const desktop = new DeferredSelectionListenerDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    expect(desktop.selectionReads).toBe(0)
+    desktop.selection = 'captured after OCR'
+    await act(async () => {
+      desktop.resolveSelectionListener?.()
+      await Promise.resolve()
+    })
+
+    expect(desktop.selectionReads).toBe(1)
+    expect(screen.getByLabelText('原文')).toHaveValue('captured after OCR')
+  })
+
+  it('skips the cold-start snapshot when the user has already typed', async () => {
+    const desktop = new DeferredSelectionListenerDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.change(screen.getByLabelText('原文'), { target: { value: 'manual input' } })
+    desktop.selection = 'stale captured text'
+    await act(async () => {
+      desktop.resolveSelectionListener?.()
+      await Promise.resolve()
+    })
+
+    expect(desktop.selectionReads).toBe(0)
+    expect(screen.getByLabelText('原文')).toHaveValue('manual input')
   })
 
   it('reloads the latest settings before translating a reused F2 window', async () => {
@@ -321,7 +444,7 @@ describe('TranslatorPage', () => {
       await Promise.resolve()
     })
     await act(async () => {
-      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      vi.advanceTimersByTime(0)
       await Promise.resolve()
     })
 

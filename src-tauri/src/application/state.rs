@@ -52,12 +52,14 @@ pub struct AppState {
     pub images: ImageStore,
     pub webview_data_directory: PathBuf,
     pub vision_busy: AtomicBool,
+    vision_surface_generation: AtomicU64,
     reference_vision: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
     optimizer_request: Mutex<TranslatorRequestState>,
     reference_vision_images: Mutex<ReferenceVisionImages>,
     surface_generation: AtomicU64,
     surface_transition: Mutex<()>,
+    selection_capture: Mutex<()>,
     settings_write: Mutex<()>,
     translator_selection: Mutex<String>,
     vision_selection: Mutex<String>,
@@ -96,6 +98,7 @@ impl AppState {
             images,
             webview_data_directory,
             vision_busy: AtomicBool::new(false),
+            vision_surface_generation: AtomicU64::new(0),
             reference_vision: Mutex::new(ReferenceVisionState {
                 generation: 0,
                 cancelled: false,
@@ -118,6 +121,7 @@ impl AppState {
             }),
             surface_generation: AtomicU64::new(0),
             surface_transition: Mutex::new(()),
+            selection_capture: Mutex::new(()),
             settings_write: Mutex::new(()),
             translator_selection: Mutex::new(String::new()),
             vision_selection: Mutex::new(String::new()),
@@ -125,12 +129,27 @@ impl AppState {
         }
     }
 
-    pub fn begin_vision(&self) -> bool {
-        self.vision_busy.swap(true, Ordering::SeqCst)
+    pub fn begin_vision(&self, surface_generation: u64) -> bool {
+        let already_active = self.vision_busy.swap(true, Ordering::SeqCst);
+        if !already_active {
+            self.vision_surface_generation
+                .store(surface_generation, Ordering::SeqCst);
+        }
+        already_active
     }
 
     pub fn release_vision(&self) {
+        self.vision_surface_generation.store(0, Ordering::SeqCst);
         self.vision_busy.store(false, Ordering::SeqCst);
+    }
+
+    pub fn vision_active(&self) -> bool {
+        self.vision_busy.load(Ordering::SeqCst)
+    }
+
+    pub fn vision_surface_generation(&self) -> Option<u64> {
+        let generation = self.vision_surface_generation.load(Ordering::SeqCst);
+        (generation != 0).then_some(generation)
     }
 
     pub fn begin_reference_vision_stream(&self) -> u64 {
@@ -155,6 +174,34 @@ impl AppState {
         }
     }
 
+    pub fn cancel_reference_vision_stream_for_surface(&self, surface_generation: u64) -> bool {
+        let Ok(mut state) = self.reference_vision.lock() else {
+            return false;
+        };
+        if !self.surface_action_is_current(surface_generation) {
+            return false;
+        }
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.cancelled = true;
+        state.signal.cancel();
+        true
+    }
+
+    pub fn with_current_selection_capture<T>(
+        &self,
+        surface_generation: u64,
+        capture: impl FnOnce() -> T,
+    ) -> Result<Option<T>, String> {
+        let _guard = self
+            .selection_capture
+            .lock()
+            .map_err(|_| "Selection capture state is unavailable".to_string())?;
+        if !self.cancel_reference_vision_stream_for_surface(surface_generation) {
+            return Ok(None);
+        }
+        Ok(Some(capture()))
+    }
+
     pub fn reference_vision_signal(&self, generation: u64) -> Option<Arc<CancellationSignal>> {
         let state = self.reference_vision.lock().ok()?;
         (state.generation == generation && !state.cancelled).then(|| Arc::clone(&state.signal))
@@ -173,6 +220,21 @@ impl AppState {
             .lock()
             .map(|state| state.generation == generation && !state.cancelled)
             .unwrap_or(false)
+    }
+
+    pub fn with_current_reference_vision_stream<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let state = self
+            .reference_vision
+            .lock()
+            .map_err(|_| "Reference Vision stream state is unavailable".to_string())?;
+        if state.generation != generation || state.cancelled {
+            return Ok(None);
+        }
+        action().map(Some)
     }
 
     pub fn begin_translator_request(&self, generation: u64) -> Option<Arc<CancellationSignal>> {
@@ -366,6 +428,12 @@ impl AppState {
         generation: u64,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<Option<T>, String> {
+        // Stale window events must not wait behind a current transition. On
+        // Windows that transition may be waiting for the main thread to build
+        // a WebView, while the stale event itself is running on that thread.
+        if !self.surface_action_is_current(generation) {
+            return Ok(None);
+        }
         let _guard = self
             .surface_transition
             .lock()
@@ -484,6 +552,60 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_can_join_the_current_surface_generation_without_invalidating_it() {
+        let (state, _directory) = state();
+        let current = state.begin_surface_action();
+
+        assert_eq!(
+            state.with_current_surface_action(current, || Ok::<_, String>("closed")),
+            Ok(Some("closed"))
+        );
+        assert_eq!(
+            state.with_current_surface_action(current, || Ok::<_, String>("selection")),
+            Ok(Some("selection"))
+        );
+    }
+
+    #[test]
+    fn cleanup_snapshot_is_rejected_after_a_new_surface_intent() {
+        let (state, _directory) = state();
+        let cleanup = state.begin_surface_action();
+        let newer = state.begin_surface_action();
+        let mut cleanup_ran = false;
+
+        assert_eq!(
+            state.with_current_surface_action(cleanup, || {
+                cleanup_ran = true;
+                Ok::<_, String>(())
+            }),
+            Ok(None)
+        );
+        assert!(!cleanup_ran);
+        assert_eq!(
+            state.with_current_surface_action(newer, || Ok::<_, String>("newer")),
+            Ok(Some("newer"))
+        );
+    }
+
+    #[test]
+    fn vision_activity_tracks_open_and_close_transitions() {
+        let (state, _directory) = state();
+        let first_generation = state.begin_surface_action();
+        assert!(!state.vision_active());
+        assert!(!state.begin_vision(first_generation));
+        assert!(state.vision_active());
+        assert_eq!(state.vision_surface_generation(), Some(first_generation));
+
+        let replacement_generation = state.begin_surface_action();
+        assert!(state.begin_vision(replacement_generation));
+        assert_eq!(state.vision_surface_generation(), Some(first_generation));
+
+        state.release_vision();
+        assert!(!state.vision_active());
+        assert_eq!(state.vision_surface_generation(), None);
+    }
+
+    #[test]
     fn reference_stream_generation_invalidates_cancelled_and_replaced_requests() {
         let (state, _directory) = state();
         let first = state.begin_reference_vision_stream();
@@ -495,6 +617,123 @@ mod tests {
         assert_ne!(first, second);
         assert!(state.reference_vision_stream_current(second));
         assert!(!state.reference_vision_stream_current(first));
+    }
+
+    #[test]
+    fn current_reference_stream_actions_run_while_stale_actions_are_skipped() {
+        let (state, _directory) = state();
+        let first = state.begin_reference_vision_stream();
+        let second = state.begin_reference_vision_stream();
+        let stale_ran = std::cell::Cell::new(false);
+
+        assert_eq!(
+            state.with_current_reference_vision_stream(first, || {
+                stale_ran.set(true);
+                Ok::<_, String>("stale")
+            }),
+            Ok(None)
+        );
+        assert!(!stale_ran.get());
+        assert_eq!(
+            state.with_current_reference_vision_stream(second, || { Ok::<_, String>("current") }),
+            Ok(Some("current"))
+        );
+    }
+
+    #[test]
+    fn cancelling_a_reference_stream_fences_an_authorized_synchronous_action() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+
+        let (state, directory) = state();
+        let state = Arc::new(state);
+        let generation = state.begin_reference_vision_stream();
+        let order = Arc::new(AtomicUsize::new(0));
+        let (action_started_tx, action_started_rx) = mpsc::channel();
+        let (release_action_tx, release_action_rx) = mpsc::channel();
+
+        let action_state = Arc::clone(&state);
+        let action_order = Arc::clone(&order);
+        let action = thread::spawn(move || {
+            action_state
+                .with_current_reference_vision_stream(generation, || {
+                    action_started_tx.send(()).expect("signal action start");
+                    release_action_rx.recv().expect("release action");
+                    action_order.store(1, Ordering::SeqCst);
+                    Ok::<_, String>(())
+                })
+                .expect("authorized action")
+        });
+        action_started_rx.recv().expect("action started");
+
+        let cancel_state = Arc::clone(&state);
+        let cancel_order = Arc::clone(&order);
+        let (cancel_started_tx, cancel_started_rx) = mpsc::channel();
+        let cancel = thread::spawn(move || {
+            cancel_started_tx.send(()).expect("signal cancel start");
+            cancel_state.cancel_reference_vision_stream();
+            cancel_order.store(2, Ordering::SeqCst);
+        });
+        cancel_started_rx.recv().expect("cancel started");
+        release_action_tx
+            .send(())
+            .expect("release authorized action");
+
+        assert_eq!(action.join().expect("action thread"), Some(()));
+        cancel.join().expect("cancel thread");
+        assert_eq!(order.load(Ordering::SeqCst), 2);
+        assert!(!state.reference_vision_stream_current(generation));
+        drop(directory);
+    }
+
+    #[test]
+    fn queued_selection_captures_serialize_and_recheck_their_surface_ticket() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::thread;
+
+        let (state, directory) = state();
+        let state = Arc::new(state);
+        let ticket = state.begin_surface_action();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+
+        let first_state = Arc::clone(&state);
+        let first = thread::spawn(move || {
+            first_state
+                .with_current_selection_capture(ticket, || {
+                    first_started_tx.send(()).expect("signal first capture");
+                    release_first_rx.recv().expect("release first capture");
+                    "first"
+                })
+                .expect("first capture")
+        });
+        first_started_rx.recv().expect("first capture started");
+
+        let stale_capture_ran = Arc::new(AtomicBool::new(false));
+        let second_state = Arc::clone(&state);
+        let second_ran = Arc::clone(&stale_capture_ran);
+        let (second_queued_tx, second_queued_rx) = mpsc::channel();
+        let second = thread::spawn(move || {
+            second_queued_tx.send(()).expect("signal queued capture");
+            second_state
+                .with_current_selection_capture(ticket, || {
+                    second_ran.store(true, Ordering::SeqCst);
+                    "stale"
+                })
+                .expect("queued capture")
+        });
+        second_queued_rx.recv().expect("second capture queued");
+
+        let newer_ticket = state.begin_surface_action();
+        release_first_tx.send(()).expect("release first capture");
+
+        assert_eq!(first.join().expect("first capture thread"), Some("first"));
+        assert_eq!(second.join().expect("second capture thread"), None);
+        assert!(!stale_capture_ran.load(Ordering::SeqCst));
+        assert!(state.surface_action_is_current(newer_ticket));
+        drop(directory);
     }
 
     #[test]

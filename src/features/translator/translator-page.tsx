@@ -28,6 +28,12 @@ type TranslationHistory = {
 type TranslatorListenerKind = 'prepare' | 'selection'
 type TranslatorListenerErrors = Partial<Record<TranslatorListenerKind, string>>
 type TranslatorListenerState = Record<TranslatorListenerKind, boolean>
+type TranslatorSelectionDelivery = 'event' | 'snapshot'
+
+type AppliedTranslatorSelection = {
+  text: string
+  delivery: TranslatorSelectionDelivery
+}
 
 const translationSettingKeys = ['method', 'sourceLanguage', 'targetLanguage'] as const
 
@@ -100,16 +106,19 @@ export function TranslatorPage() {
     selection: false,
   })
   const [arrivalCycle, setArrivalCycle] = useState(0)
+  const [selectionCycle, setSelectionCycle] = useState(0)
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
   const activeGeneration = useRef(0)
   const inputRevision = useRef(0)
+  const manualInputRevision = useRef(0)
   const settingsRequest = useRef(0)
   const selectionRequest = useRef(0)
-  const lastAppliedSelection = useRef<string | null>(null)
+  const lastAppliedSelection = useRef<AppliedTranslatorSelection | null>(null)
   const roundId = useRef<string>(crypto.randomUUID())
   const composing = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const immediateRequest = useRef<string | null>(null)
+  const immediateSelectionInput = useRef<string | null>(null)
   const skipNextInputRequest = useRef<string | null>(null)
   const copyRequest = useRef(0)
   const componentActive = useRef(false)
@@ -226,14 +235,30 @@ export function TranslatorPage() {
         if (lifecycle.active) inputRef.current?.focus()
       })
     }
-    const applySelection = (selected: string) => {
-      if (!lifecycle.active || lastAppliedSelection.current === selected) return
-      lastAppliedSelection.current = selected
+    const applySelection = (
+      selected: string,
+      delivery: TranslatorSelectionDelivery,
+    ) => {
+      if (!lifecycle.active) return
+      const lastApplied = lastAppliedSelection.current
+      if (lastApplied?.text === selected) {
+        if (delivery === 'snapshot') return
+        if (lastApplied.delivery === 'snapshot') {
+          // Snapshot recovery and the listener can deliver the same capture in
+          // either order. Confirm its event ownership without translating it twice.
+          lastAppliedSelection.current = { text: selected, delivery }
+          focusInput()
+          return
+        }
+      }
+      lastAppliedSelection.current = { text: selected, delivery }
       inputRevision.current += 1
       cancelTranslation()
       immediateRequest.current = null
+      immediateSelectionInput.current = selected.trim().length > 0 ? selected : null
       skipNextInputRequest.current = null
       roundId.current = crypto.randomUUID()
+      setSelectionCycle((value) => value + 1)
       setInput(selected)
       setOutput('')
       setOutputInput(null)
@@ -242,7 +267,7 @@ export function TranslatorPage() {
       copyRequest.current += 1
       setCopied(false)
       setCopyError(null)
-      focusInput()
+      if (delivery === 'event' || selected.trim().length > 0) focusInput()
     }
     const refreshSettings = () => {
       const request = settingsRequest.current + 1
@@ -271,7 +296,7 @@ export function TranslatorPage() {
           || request !== selectionRequest.current
           || revision !== inputRevision.current
         ) return
-        applySelection(selected)
+        applySelection(selected, 'snapshot')
       }).catch((reason: unknown) => {
         if (lifecycle.active && request === selectionRequest.current) setError(String(reason))
       })
@@ -283,6 +308,7 @@ export function TranslatorPage() {
       selectionRequest.current += 1
       lastAppliedSelection.current = null
       immediateRequest.current = null
+      immediateSelectionInput.current = null
       skipNextInputRequest.current = null
       roundId.current = crypto.randomUUID()
       setInput('')
@@ -299,7 +325,7 @@ export function TranslatorPage() {
     const onSelection = (selected: string) => {
       if (!lifecycle.active) return
       selectionRequest.current += 1
-      applySelection(selected)
+      applySelection(selected, 'event')
     }
     const installListener = (kind: TranslatorListenerKind): Promise<boolean> => {
       if (!lifecycle.active || unlisteners[kind] !== null) return Promise.resolve(true)
@@ -346,10 +372,20 @@ export function TranslatorPage() {
       selection: () => installListener('selection'),
     }
 
+    const initialManualInputRevision = manualInputRevision.current
     void installListener('prepare')
-    void installListener('selection')
+    // A newly-created translator window can miss the selection event emitted
+    // while its React tree is still mounting. Subscribe first, then read the
+    // stored snapshot so either side of that race delivers the captured text.
+    void installListener('selection').then(() => {
+      if (
+        lifecycle.active
+        && initialManualInputRevision === manualInputRevision.current
+      ) {
+        syncStoredSelection()
+      }
+    })
     refreshSettings()
-    syncStoredSelection()
     window.addEventListener('focus', syncStoredSelection)
     return () => {
       lifecycle.active = false
@@ -387,11 +423,17 @@ export function TranslatorPage() {
       return
     }
     const requestKey = translationRequestKey(input, settings)
-    const delay = immediateRequest.current === requestKey ? 0 : TRANSLATOR_INPUT_DEBOUNCE_MS
+    const selectionIsImmediate = immediateSelectionInput.current === input
+    const delay = selectionIsImmediate || immediateRequest.current === requestKey
+      ? 0
+      : TRANSLATOR_INPUT_DEBOUNCE_MS
     if (delay === 0) immediateRequest.current = null
     const requestGeneration = nextTranslationGeneration()
     activeGeneration.current = requestGeneration
     const timer = window.setTimeout(() => {
+      if (selectionIsImmediate && immediateSelectionInput.current === input) {
+        immediateSelectionInput.current = null
+      }
       setLoading(true)
       setError(null)
       void desktop.translate({
@@ -423,7 +465,7 @@ export function TranslatorPage() {
       })
     }, delay)
     return () => window.clearTimeout(timer)
-  }, [desktop, input, settings])
+  }, [desktop, input, selectionCycle, settings])
   const updateTranslationSettings = (patch: TranslationSettingsPatch) => {
     if (settings === null) return
     const translation = { ...settings.translation, ...patch }
@@ -446,8 +488,10 @@ export function TranslatorPage() {
   const updateInput = (value: string) => {
     if (value === input) return
     inputRevision.current += 1
+    manualInputRevision.current += 1
     cancelTranslation()
     immediateRequest.current = null
+    immediateSelectionInput.current = null
     skipNextInputRequest.current = null
     setInput(value)
     if (value.trim().length === 0) {
@@ -477,8 +521,10 @@ export function TranslatorPage() {
   }
   const restoreHistory = (item: TranslationHistory) => {
     inputRevision.current += 1
+    manualInputRevision.current += 1
     cancelTranslation()
     immediateRequest.current = null
+    immediateSelectionInput.current = null
     skipNextInputRequest.current = item.input === input ? null : item.input
     setInput(item.input)
     setOutput(item.output)

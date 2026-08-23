@@ -2554,19 +2554,15 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await expect(answerActions).toBeVisible()
   await expectTransparentAnswerActions(answerActions)
   await expectAnswerActionsLeftAligned(answerPanel)
-  await expect.poll(async () => answerPanel.evaluate((element) => {
-    const panel = element.getBoundingClientRect()
-    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')?.getBoundingClientRect()
-    if (actions === undefined) return false
-    const settled = element.getAnimations().length === 0
-    return settled && Math.abs(panel.bottom - actions.bottom) <= 1
-  })).toBe(true)
+  await expect.poll(async () => answerPanel.evaluate((element) => element.getAnimations().length)).toBe(0)
   const answerPanelBox = await answerPanel.boundingBox()
   const answerActionsBox = await answerActions.boundingBox()
   expect(answerPanelBox).not.toBeNull()
   expect(answerActionsBox).not.toBeNull()
   if (answerPanelBox === null || answerActionsBox === null) throw new Error('Vision answer action geometry is missing')
-  expect(Math.abs(answerPanelBox.y + answerPanelBox.height - (answerActionsBox.y + answerActionsBox.height))).toBeLessThanOrEqual(1)
+  const answerActionsBottomGap = answerPanelBox.y + answerPanelBox.height - (answerActionsBox.y + answerActionsBox.height)
+  expect(answerActionsBottomGap).toBeGreaterThanOrEqual(-1)
+  expect(answerActionsBottomGap).toBeLessThanOrEqual(13)
   await page.getByTitle('历史').click()
   await expect(page.getByRole('button', { name: /What is visible/ })).toBeVisible()
   await expectAccessible(page)
@@ -2598,6 +2594,28 @@ test('Vision reports clipboard failures and clears them after a successful retry
 
   const copyCode = page.locator('[data-screenpilot-copy-target="code"]')
   await expect(copyCode).toBeVisible()
+  const codeSelection = await page.locator('[data-screenpilot-markdown-code="true"] code').evaluate((element) => {
+    const textNode = element.firstChild
+    if (!(textNode instanceof Text)) throw new Error('Vision code text is missing')
+    const range = document.createRange()
+    range.setStart(textNode, 0)
+    range.setEnd(textNode, 'const'.length)
+    const selection = window.getSelection()
+    if (selection === null) throw new Error('Document selection is unavailable')
+    selection.removeAllRanges()
+    selection.addRange(range)
+    const selectionStyle = getComputedStyle(element, '::selection')
+    return {
+      backgroundColor: selectionStyle.backgroundColor,
+      color: selectionStyle.color,
+      selectedText: selection.toString(),
+    }
+  })
+  expect(codeSelection).toEqual({
+    backgroundColor: 'rgb(37, 99, 235)',
+    color: 'rgb(255, 255, 255)',
+    selectedText: 'const',
+  })
   await failNextClipboardWrite(page)
   await copyCode.click()
   const copyError = page.locator('[data-screenpilot-copy-error="true"]')
@@ -3382,7 +3400,7 @@ test('Vision mode transitions replace the previous screenshot height profile', a
   })
 })
 
-test('Vision answer actions stay pinned while long responses scroll', async ({ page }) => {
+test('Vision answer actions stay in normal flow below long responses', async ({ page }) => {
   await installVisionTauriMock(page, undefined, true, undefined, 1_200)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.setViewportSize({ width: 1280, height: 720 })
@@ -3416,42 +3434,27 @@ test('Vision answer actions stay pinned while long responses scroll', async ({ p
     if (!(scroll instanceof HTMLElement)) return false
     return scroll.scrollHeight > scroll.clientHeight
   })).toBe(true)
-  await expect.poll(async () => answerPanel.evaluate((element) => {
-    const panel = element.getBoundingClientRect()
-    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')?.getBoundingClientRect()
-    if (actions === undefined) return false
-    const settled = element.getAnimations().length === 0
-    return settled && Math.abs(panel.bottom - actions.bottom) <= 2
-  })).toBe(true)
-
-  const panelBox = await answerPanel.boundingBox()
-  const actionsBox = await answerActions.boundingBox()
-  expect(panelBox).not.toBeNull()
-  expect(actionsBox).not.toBeNull()
-  if (panelBox === null || actionsBox === null) throw new Error('Long Vision answer geometry is missing')
-  const bottomGap = panelBox.y + panelBox.height - (actionsBox.y + actionsBox.height)
-  expect(Math.abs(bottomGap)).toBeLessThanOrEqual(2)
-
   await answerBody.evaluate((element) => {
     if (!(element instanceof HTMLElement)) throw new Error('Vision answer scroll body is missing')
     element.scrollTop = Math.floor(element.scrollHeight / 2)
   })
-  const middleActionsBox = await answerActions.boundingBox()
-  expect(middleActionsBox).not.toBeNull()
-  if (middleActionsBox === null) throw new Error('Middle-scroll Vision action geometry is missing')
-  expect(Math.abs(middleActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(middleActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
-  await expectAnswerActionsLeftAligned(answerPanel)
+  const middleGeometry = await answerPanel.evaluate((element) => {
+    const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
+    const scroll = element.querySelector<HTMLElement>('[data-screenpilot-answer-scroll="true"]')
+    if (actions === null || scroll === null) return null
+    const actionsRect = actions.getBoundingClientRect()
+    const scrollRect = scroll.getBoundingClientRect()
+    return { actionsTop: actionsRect.top, scrollBottom: scrollRect.bottom }
+  })
+  expect(middleGeometry).not.toBeNull()
+  if (middleGeometry === null) throw new Error('Middle-scroll Vision action geometry is missing')
+  expect(middleGeometry.actionsTop).toBeGreaterThanOrEqual(middleGeometry.scrollBottom - 1)
 
   await answerBody.evaluate((element) => {
     if (!(element instanceof HTMLElement)) throw new Error('Vision answer scroll body is missing')
     element.scrollTop = element.scrollHeight
   })
-  const scrolledActionsBox = await answerActions.boundingBox()
-  expect(scrolledActionsBox).not.toBeNull()
-  if (scrolledActionsBox === null) throw new Error('Scrolled Vision action geometry is missing')
-  expect(Math.abs(scrolledActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(scrolledActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
+  await expect(answerActions).toBeVisible()
   await expectAnswerActionsLeftAligned(answerPanel)
 
   const finalLineVisibility = await answerPanel.evaluate((element) => {
@@ -3482,11 +3485,6 @@ test('Vision answer actions stay pinned while long responses scroll', async ({ p
   expect(finalLineVisibility.textBottom).toBeLessThanOrEqual(finalLineVisibility.actionsTop + 1)
 
   await expect(stopButton).toBeHidden()
-  const completedActionsBox = await answerActions.boundingBox()
-  expect(completedActionsBox).not.toBeNull()
-  if (completedActionsBox === null) throw new Error('Completed Vision action geometry is missing')
-  expect(Math.abs(completedActionsBox.y - actionsBox.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(completedActionsBox.x - actionsBox.x)).toBeLessThanOrEqual(1)
   await expectAnswerActionsLeftAligned(answerPanel)
 })
 

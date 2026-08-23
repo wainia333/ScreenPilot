@@ -75,13 +75,24 @@ struct OpenClipboardGuard {
 }
 
 pub fn selected_text(clipboard_fallback: bool) -> String {
-    match selected_text_uia() {
+    resolve_selection(
+        selected_text_uia(),
+        clipboard_fallback,
+        selected_text_clipboard,
+    )
+}
+
+fn resolve_selection(
+    probe: SelectionProbe,
+    clipboard_fallback: bool,
+    fallback: impl FnOnce() -> Option<String>,
+) -> String {
+    match probe {
         SelectionProbe::Selected(text) => text,
-        SelectionProbe::NoSelection => String::new(),
-        SelectionProbe::Unsupported => clipboard_fallback
-            .then(selected_text_clipboard)
-            .flatten()
-            .unwrap_or_default(),
+        SelectionProbe::NoSelection | SelectionProbe::Unsupported if clipboard_fallback => {
+            fallback().unwrap_or_default()
+        }
+        SelectionProbe::NoSelection | SelectionProbe::Unsupported => String::new(),
     }
 }
 
@@ -152,7 +163,6 @@ fn capture_clipboard_selection<B: ClipboardFallbackBackend>(backend: &mut B) -> 
     };
     if let Err(error) = backend.restore(snapshot) {
         eprintln!("[selection] Clipboard restore failed: {error}");
-        return None;
     }
     copied
 }
@@ -460,8 +470,9 @@ fn bounded_selection(value: String) -> Option<String> {
 mod tests {
     use super::{
         capture_clipboard_selection, clipboard_format_has_safe_ownership, copied_selection,
-        ClipboardFallbackBackend, ClipboardOwnerWindow,
+        resolve_selection, ClipboardFallbackBackend, ClipboardOwnerWindow, SelectionProbe,
     };
+    use std::cell::Cell;
     use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
     struct FakeClipboardBackend {
@@ -538,6 +549,44 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_when_uia_reports_no_selection() {
+        let fallback_called = Cell::new(false);
+        let selection = resolve_selection(SelectionProbe::NoSelection, true, || {
+            fallback_called.set(true);
+            Some("clipboard selection".into())
+        });
+
+        assert!(fallback_called.get());
+        assert_eq!(selection, "clipboard selection");
+    }
+
+    #[test]
+    fn keeps_non_clipboard_probes_side_effect_free() {
+        let fallback_called = Cell::new(false);
+        assert_eq!(
+            resolve_selection(
+                SelectionProbe::Selected("uia selection".into()),
+                true,
+                || {
+                    fallback_called.set(true);
+                    Some("clipboard selection".into())
+                }
+            ),
+            "uia selection"
+        );
+        assert!(!fallback_called.get());
+
+        assert_eq!(
+            resolve_selection(SelectionProbe::NoSelection, false, || {
+                fallback_called.set(true);
+                Some("clipboard selection".into())
+            }),
+            ""
+        );
+        assert!(!fallback_called.get());
+    }
+
+    #[test]
     fn rejects_stale_clipboard_text_and_caps_fresh_text() {
         assert_eq!(
             copied_selection(Some("stale"), Some("stale".into()), Some(10), Some(10)),
@@ -608,6 +657,20 @@ mod tests {
                 "restore"
             ]
         );
+    }
+
+    #[test]
+    fn returns_the_captured_selection_even_when_clipboard_restore_fails() {
+        let mut backend = FakeClipboardBackend {
+            restore_error: Some("clipboard busy".into()),
+            ..FakeClipboardBackend::default()
+        };
+
+        assert_eq!(
+            capture_clipboard_selection(&mut backend),
+            Some("selected".into())
+        );
+        assert_eq!(backend.actions.last(), Some(&"restore"));
     }
 
     #[test]

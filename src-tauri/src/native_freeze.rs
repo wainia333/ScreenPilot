@@ -48,6 +48,13 @@ fn overlay_state() -> &'static Mutex<Option<OverlayState>> {
     OVERLAY.get_or_init(|| Mutex::new(None))
 }
 
+pub fn is_active() -> bool {
+    overlay_state()
+        .lock()
+        .map(|state| state.is_some())
+        .unwrap_or(true)
+}
+
 fn hwnd_from_raw(raw: isize) -> HWND {
     HWND(raw as *mut _)
 }

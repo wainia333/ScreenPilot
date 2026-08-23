@@ -6,6 +6,7 @@ import { safeExternalUrl } from './citation-links'
 const adapterStyles = readFileSync(resolve(process.cwd(), 'src/features/vision/vision-adapter.css'), 'utf8')
 const adapterSource = readFileSync(resolve(process.cwd(), 'src/features/vision/reference-vision.tsx'), 'utf8')
 const visionSource = readFileSync(resolve(process.cwd(), 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
+const visionStyles = readFileSync(resolve(process.cwd(), 'src/vendor/kivio-screenshot/index.css'), 'utf8')
 const adapterStyleElement = document.createElement('style')
 adapterStyleElement.textContent = adapterStyles
 document.head.append(adapterStyleElement)
@@ -62,6 +63,27 @@ describe('Vision prompt input layout', () => {
     input.value = input.value.slice(0, -1)
     expect(input.value).toHaveLength(beforeDelete.length - 1)
     promptBar.remove()
+  })
+})
+
+describe('Vision answer readability', () => {
+  it('keeps answer actions in normal flow instead of covering conversation text', () => {
+    const actionsRule = /\[data-screenpilot-answer-actions="true"\]\s*\{(?<body>[^}]*)\}/
+      .exec(adapterStyles)?.groups?.body
+
+    expect(actionsRule).toBeDefined()
+    expect(actionsRule).toContain('position: static')
+    expect(actionsRule).toContain('order: 0')
+    expect(actionsRule).toContain('margin-top: auto')
+    expect(actionsRule).not.toContain('position: sticky')
+    expect(actionsRule).not.toContain('bottom: 0')
+  })
+
+  it('uses a strong selection highlight only inside Vision code blocks', () => {
+    expect(visionSource).toContain('data-screenpilot-markdown-code="true"')
+    expect(visionStyles).toMatch(
+      /\[data-screenpilot-markdown-code="true"\] ::selection\s*\{[^}]*background: #2563eb;[^}]*color: #ffffff;/,
+    )
   })
 })
 

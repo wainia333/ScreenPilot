@@ -109,15 +109,15 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   flex: 1 1 auto;
   flex-direction: column;
   height: auto !important;
-  padding-bottom: 0 !important;
   overflow-y: auto;
 }
 
 [data-screenpilot-answer-actions="true"] {
-  position: sticky;
-  z-index: 1;
-  bottom: 0;
-  order: 999;
+  /* Keep the actions in document flow. A transparent sticky row let the
+     conversation scroll underneath the copy/stop controls, making the last
+     lines look overlapped and obscuring code-block controls. */
+  position: static;
+  order: 0;
   display: flex;
   flex-shrink: 0;
   align-self: stretch;
@@ -126,9 +126,7 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   margin-top: auto;
   padding-top: 8px;
   padding-bottom: 8px;
-  /* Keep the controls pinned without introducing a second visual frame at
-     the bottom of the answer card. The answer panel owns the frosted shell;
-     this adapter layer must remain completely transparent in both themes. */
+  /* The answer panel owns the frosted shell; this row needs no second frame. */
   background: transparent !important;
   background-color: transparent !important;
   background-image: none !important;

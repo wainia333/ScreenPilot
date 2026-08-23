@@ -489,7 +489,10 @@ function MarkdownPre(props: MarkdownPreProps) {
   const text = useMemo(() => reactNodeToText(children).replace(/\n$/, ''), [children])
 
   return (
-    <div className="not-prose group relative my-3 overflow-hidden rounded-xl border border-black/[0.08] bg-neutral-950 text-neutral-100 shadow-sm dark:border-white/[0.08]">
+    <div
+      data-screenpilot-markdown-code="true"
+      className="not-prose group relative my-3 overflow-hidden rounded-xl border border-black/[0.08] bg-neutral-950 text-neutral-100 shadow-sm dark:border-white/[0.08]"
+    >
       <MarkdownCodeCopyButton text={text} />
       <pre
         {...preProps}

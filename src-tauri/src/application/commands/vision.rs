@@ -327,6 +327,12 @@ fn show_native_freeze(
 
 fn close_native_freeze(app: &AppHandle) {
     request_native_freeze_close();
+    // OCR result/close paths can reach this cleanup repeatedly after the
+    // native overlay has already gone away. Avoid scheduling a main-thread
+    // round trip (and its timeout) for that common idempotent case.
+    if !should_schedule_native_freeze_close(crate::native_freeze::is_active()) {
+        return;
+    }
     let Some(window) = app.get_webview_window("vision") else {
         crate::native_freeze::close();
         request_native_freeze_close();
@@ -347,6 +353,10 @@ fn close_native_freeze(app: &AppHandle) {
         request_native_freeze_close();
     }
     request_native_freeze_close();
+}
+
+fn should_schedule_native_freeze_close(active: bool) -> bool {
+    active
 }
 
 #[cfg(target_os = "windows")]
@@ -448,7 +458,11 @@ pub(crate) fn ensure_reference_mode_enabled(
     }
 }
 
-pub(crate) fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), String> {
+pub(crate) fn open_reference_vision(
+    app: &AppHandle,
+    mode: &str,
+    surface_generation: u64,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
@@ -460,7 +474,7 @@ pub(crate) fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), S
     if !existing_vision_visible {
         close_native_freeze(app);
     }
-    if state.begin_vision() {
+    if state.begin_vision(surface_generation) {
         let visible = app
             .get_webview_window("vision")
             .and_then(|window| window.is_visible().ok())
@@ -469,7 +483,7 @@ pub(crate) fn open_reference_vision(app: &AppHandle, mode: &str) -> Result<(), S
             return Err("Vision already active".into());
         }
         state.release_vision();
-        let _ = state.begin_vision();
+        let _ = state.begin_vision(surface_generation);
     }
     let result = (|| {
         let window = ensure_reference_vision_window(app, mode)?;
@@ -836,11 +850,33 @@ pub fn vision_delete_temporary_image(
     state.delete_reference_vision_temporary_image(&image_id)
 }
 
+fn should_process_vision_close(vision_active: bool, visible: bool, freeze_active: bool) -> bool {
+    vision_active || visible || freeze_active
+}
+
 #[tauri::command]
 pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let generation = state.begin_surface_action();
+    // Use the generation that opened this Vision session. Reading the current
+    // generation here would let a delayed Esc join a newer F2 intent and close
+    // surfaces while its external selection capture is already in flight.
+    let Some(generation) = state.vision_surface_generation() else {
+        return Ok(());
+    };
     state
-        .with_current_surface_action(generation, || close_reference_vision_surface(&app))
+        .with_current_surface_action(generation, || {
+            let visible = app
+                .get_webview_window("vision")
+                .and_then(|window| window.is_visible().ok())
+                .unwrap_or(false);
+            if !should_process_vision_close(
+                state.vision_active(),
+                visible,
+                crate::native_freeze::is_active(),
+            ) {
+                return Ok(());
+            }
+            close_reference_vision_surface(&app)
+        })
         .map(|_| ())
 }
 
@@ -864,6 +900,10 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
     let mut failures = Vec::new();
     let state = app.state::<AppState>();
+    // Invalidate OCR/translation before any potentially blocking window
+    // cleanup. A late OCR result must not overwrite the user's new selection
+    // in the clipboard after Esc.
+    state.cancel_reference_vision_stream();
     let vision_window = app.get_webview_window("vision");
     if let Some(window) = vision_window.as_ref() {
         notify_vision_closing(|event| window.emit(event, ()));
@@ -888,6 +928,9 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
         }
     }
     close_native_freeze(app);
+    // Close can overlap a request that was queued before the closing event but
+    // called begin_reference_vision_stream after the cancellation above. Seal
+    // that window before marking the Vision surface inactive.
     state.cancel_reference_vision_stream();
     state.release_vision();
     if failures.is_empty() {
@@ -2377,11 +2420,15 @@ pub async fn vision_translate(
     };
     Ok(match result {
         Ok((source, translated)) => {
-            if !state.reference_vision_stream_current(generation) {
+            let clipboard_committed =
+                state.with_current_reference_vision_stream(generation, || {
+                    let _ = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(source.clone()));
+                    Ok(())
+                })?;
+            if clipboard_committed.is_none() {
                 return Ok(json!({ "success": true, "cancelled": true }));
             }
-            let _ = arboard::Clipboard::new()
-                .and_then(|mut clipboard| clipboard.set_text(source.clone()));
             let emit_translate = |payload: Value| {
                 if state.reference_vision_stream_current(generation) {
                     let _ = app.emit_to("vision", "vision-translate-stream", payload);
@@ -2729,6 +2776,20 @@ mod tests {
         notify_vision_closing(|_| Err::<(), _>("synthetic emit failure"));
         cleanup_continued.set(true);
         assert!(cleanup_continued.get());
+    }
+
+    #[test]
+    fn vision_close_skips_only_an_already_inactive_surface() {
+        assert!(!should_process_vision_close(false, false, false));
+        assert!(should_process_vision_close(true, false, false));
+        assert!(should_process_vision_close(false, true, false));
+        assert!(should_process_vision_close(false, false, true));
+    }
+
+    #[test]
+    fn inactive_native_freeze_skips_the_main_thread_close_round_trip() {
+        assert!(!should_schedule_native_freeze_close(false));
+        assert!(should_schedule_native_freeze_close(true));
     }
 
     #[test]
