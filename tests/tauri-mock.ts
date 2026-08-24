@@ -34,6 +34,8 @@ export async function installVisionTauriMock(
     }
     const pendingCaptureResolvers: ((result: CaptureResult) => void)[] = []
     const pendingShowResolvers: (() => void)[] = []
+    const pendingVisionFlightResolvers: (() => void)[] = []
+    const pendingVisionCloseResolvers: (() => void)[] = []
     const floatingPadding = 8
     const floatingInset = floatingPadding * 2
     const visionTestState = {
@@ -49,6 +51,19 @@ export async function installVisionTauriMock(
       activeVisionRequestId: '',
       floatingRect: null as { width: number; height: number } | null,
       floatingRects: [] as { width: number; height: number }[],
+      visionFlights: [] as {
+        from: { x: number; y: number }
+        to: { x: number; y: number }
+        width: number
+        height: number
+        hasScreenshot: boolean
+        durationMs: number
+      }[],
+      deferVisionFlights: false,
+      visionFlightFailuresRemaining: 0,
+      completedVisionFlightCount: 0,
+      pendingVisionFlightCount: 0,
+      resolveNextVisionFlight: () => false,
       floatingAppliedRects: [] as { width: number; height: number }[],
       floatingDeferredRects: [] as { width: number; height: number }[],
       floatingHitRegion: null as { x: number; y: number; width: number; height: number } | null,
@@ -73,10 +88,23 @@ export async function installVisionTauriMock(
       closeVisionSurface: () => undefined,
       closeCalls: 0,
       closeFailuresRemaining: 0,
+      deferVisionClose: false,
+      pendingVisionCloseCount: 0,
+      resolveNextVisionClose: () => false,
       listenerFailuresRemaining: { ...initialListenerFailures } as Partial<Record<string, number>>,
       listenerAttempts: {} as Record<string, number>,
       visionAskCalls: 0,
       visionTranslateCalls: 0,
+      visionTranslateGeneration: 0,
+      visionTranslateRequests: [] as { imageId: string; requestId: string; generation: number }[],
+      visionTranslateOcrFailuresRemaining: 0,
+      visionTranslateTranslationFailuresRemaining: 0,
+      visionTranslateTextFailuresRemaining: 0,
+      suppressVisionTranslateEvents: false,
+      emitVisionTranslatePayload: (payload: unknown) => {
+        void payload
+        return false
+      },
       emitVisionAnswerDelta: (delta: string) => {
         void delta
         return false
@@ -192,6 +220,20 @@ export async function installVisionTauriMock(
       resolve()
       return true
     }
+    visionTestState.resolveNextVisionFlight = () => {
+      const resolve = pendingVisionFlightResolvers.shift()
+      visionTestState.pendingVisionFlightCount = pendingVisionFlightResolvers.length
+      if (!resolve) return false
+      resolve()
+      return true
+    }
+    visionTestState.resolveNextVisionClose = () => {
+      const resolve = pendingVisionCloseResolvers.shift()
+      visionTestState.pendingVisionCloseCount = pendingVisionCloseResolvers.length
+      if (!resolve) return false
+      resolve()
+      return true
+    }
     const emit = (event: string, payload: unknown) => {
       for (const [eventId, callbackId] of listeners.get(event) ?? []) {
         callbacks.get(callbackId)?.({ event, id: eventId, payload })
@@ -206,6 +248,10 @@ export async function installVisionTauriMock(
         kind: 'answer',
         delta,
       })
+      return true
+    }
+    visionTestState.emitVisionTranslatePayload = (payload: unknown) => {
+      emit('vision-translate-stream', payload)
       return true
     }
     visionTestState.closeVisionSurface = () => {
@@ -343,19 +389,59 @@ export async function installVisionTauriMock(
       }
       if (command === 'vision_translate') {
         visionTestState.visionTranslateCalls += 1
+        const generation = ++visionTestState.visionTranslateGeneration
         const imageId = stringArgument(args.imageId)
-        emit('vision-translate-stream', {
+        const requestId = stringArgument(args.requestId)
+        visionTestState.visionTranslateRequests.push({ imageId, requestId, generation })
+        const emitTranslation = (payload: unknown) => {
+          if (!visionTestState.suppressVisionTranslateEvents) {
+            emit('vision-translate-stream', payload)
+          }
+        }
+        if (visionTestState.visionTranslateOcrFailuresRemaining > 0) {
+          visionTestState.visionTranslateOcrFailuresRemaining -= 1
+          const error = 'synthetic OCR failure'
+          emitTranslation({
+            imageId,
+            requestId,
+            generation,
+            kind: 'original',
+            done: true,
+            success: false,
+            error,
+          })
+          return { success: false, requestId, kind: 'original', error }
+        }
+        emitTranslation({
           imageId,
+          requestId,
+          generation,
           kind: 'original',
           delta: sourceText,
         })
-        emit('vision-translate-stream', {
+        if (visionTestState.visionTranslateTranslationFailuresRemaining > 0) {
+          visionTestState.visionTranslateTranslationFailuresRemaining -= 1
+          const error = 'synthetic translation failure'
+          emitTranslation({
+            imageId,
+            requestId,
+            generation,
+            kind: 'translated',
+            done: true,
+            success: false,
+            error,
+          })
+          return { success: false, requestId, kind: 'translated', original: sourceText, error }
+        }
+        emitTranslation({
           imageId,
+          requestId,
+          generation,
           kind: 'translated',
           delta: translatedResult,
         })
-        emit('vision-translate-stream', { imageId, done: true, success: true })
-        return { success: true }
+        emitTranslation({ imageId, requestId, generation, kind: 'translated', done: true, success: true })
+        return { success: true, requestId, original: sourceText, translated: translatedResult }
       }
       if (command === 'vision_translate_text') {
         const requestedSource = stringArgument(args.sourceLanguage)
@@ -372,6 +458,10 @@ export async function installVisionTauriMock(
         if (visionTestState.translationResponseDelayMs > 0) {
           await new Promise(resolve => window.setTimeout(resolve, visionTestState.translationResponseDelayMs))
         }
+        if (visionTestState.visionTranslateTextFailuresRemaining > 0) {
+          visionTestState.visionTranslateTextFailuresRemaining -= 1
+          return { success: false, error: 'synthetic translation failure' }
+        }
         return { success: true, translated: `编辑后译文(${targetLanguage})：${text}` }
       }
       if (command === 'vision_optimize_prompt') return `明确目标、约束和输出格式：${String(args.text)}`
@@ -385,6 +475,12 @@ export async function installVisionTauriMock(
       }
       if (command === 'vision_close') {
         visionTestState.closeCalls += 1
+        if (visionTestState.deferVisionClose) {
+          await new Promise<void>((resolve) => {
+            pendingVisionCloseResolvers.push(resolve)
+            visionTestState.pendingVisionCloseCount = pendingVisionCloseResolvers.length
+          })
+        }
         if (visionTestState.closeFailuresRemaining > 0) {
           visionTestState.closeFailuresRemaining -= 1
           emit('screenpilot:vision-closing', null)
@@ -485,7 +581,10 @@ export async function installVisionTauriMock(
           visionTestState.floatingDeferredRects.push(floatingRect)
           return true
         }
-        if (enteringResizable || (!screenshotTranslation && (positioned || modeChanged))) {
+        if (
+          enteringResizable
+          || (!screenshotTranslation && requestedHeight > 96 && (positioned || modeChanged))
+        ) {
           floatingRect.height = chatInitialHeight
           visionTestState.floatingResizable = true
           visionTestState.floatingMinimumHeight = chatInitialHeight
@@ -499,14 +598,40 @@ export async function installVisionTauriMock(
         return true
       }
       if (command === 'vision_fly_floating') {
-        const rect = args.rect as { width?: unknown; height?: unknown; hasScreenshot?: unknown } | undefined
+        const rect = args.rect as {
+          from?: { x?: unknown; y?: unknown }
+          to?: { x?: unknown; y?: unknown }
+          width?: unknown
+          height?: unknown
+          hasScreenshot?: unknown
+          durationMs?: unknown
+        } | undefined
         const requestedHeight = Number(rect?.height)
+        const hasScreenshot = typeof rect?.hasScreenshot === 'boolean'
+          ? rect.hasScreenshot
+          : true
+        visionTestState.visionFlights.push({
+          from: {
+            x: Number(rect?.from?.x),
+            y: Number(rect?.from?.y),
+          },
+          to: {
+            x: Number(rect?.to?.x),
+            y: Number(rect?.to?.y),
+          },
+          width: Number(rect?.width),
+          height: requestedHeight,
+          hasScreenshot,
+          durationMs: Number(rect?.durationMs),
+        })
         if (!location.hash.includes('mode=translate') && visionTestState.floatingResizable && requestedHeight <= 96) {
           return null
         }
-        visionTestState.floatingHasScreenshot = typeof rect?.hasScreenshot === 'boolean'
-          ? rect.hasScreenshot
-          : true
+        if (visionTestState.visionFlightFailuresRemaining > 0) {
+          visionTestState.visionFlightFailuresRemaining -= 1
+          throw new Error('Synthetic Vision floating flight failure')
+        }
+        visionTestState.floatingHasScreenshot = hasScreenshot
         const floatingRect = {
           width: Number(rect?.width),
           height: location.hash.includes('mode=translate')
@@ -516,6 +641,13 @@ export async function installVisionTauriMock(
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingRects.push(floatingRect)
         visionTestState.floatingAppliedRects.push(floatingRect)
+        if (visionTestState.deferVisionFlights) {
+          await new Promise<void>((resolve) => {
+            pendingVisionFlightResolvers.push(resolve)
+            visionTestState.pendingVisionFlightCount = pendingVisionFlightResolvers.length
+          })
+        }
+        visionTestState.completedVisionFlightCount += 1
         return null
       }
       if (command === 'vision_commit_image_to_history') {

@@ -81,15 +81,21 @@ export function GeneralSection({
             onChange={(launchAtStartup) => updateGeneral({ launchAtStartup })}
           />
         </SettingRow>
-        <SettingRow label={t.launchAsAdministrator} description={t.launchAsAdministratorDescription}>
-          <Toggle
-            checked={settings.general.launchAtStartupAsAdministrator}
+        {settings.general.launchAtStartup ? (
+          <SettingRow
+            nested
             label={t.launchAsAdministrator}
-            onChange={(launchAtStartupAsAdministrator) =>
-              updateGeneral({ launchAtStartupAsAdministrator })
-            }
-          />
-        </SettingRow>
+            description={t.launchAsAdministratorDescription}
+          >
+            <Toggle
+              checked={settings.general.launchAtStartupAsAdministrator}
+              label={t.launchAsAdministrator}
+              onChange={(launchAtStartupAsAdministrator) =>
+                updateGeneral({ launchAtStartupAsAdministrator })
+              }
+            />
+          </SettingRow>
+        ) : null}
         <SettingRow label={t.screenshotArchive}>
           <Toggle
             checked={settings.general.imageArchiveEnabled}

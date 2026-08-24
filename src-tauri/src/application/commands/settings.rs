@@ -446,22 +446,38 @@ impl SettingsEffects for RuntimeSettingsEffects<'_> {
             return Ok(());
         }
         let regular = self.app.autolaunch();
-        if settings.general.launch_at_startup_as_administrator {
-            if regular.is_enabled().map_err(|error| error.to_string())? {
-                regular.disable().map_err(|error| error.to_string())?;
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+
+        // `launch_at_startup` owns whether any startup entry exists. The
+        // administrator flag only selects the implementation used while that
+        // entry is enabled; it must never create an entry by itself.
+        match startup_mode(settings) {
+            StartupMode::Disabled => {
+                if regular.is_enabled().map_err(|error| error.to_string())? {
+                    regular.disable().map_err(|error| error.to_string())?;
+                }
+                if crate::platform::windows::startup::is_enabled()? {
+                    crate::platform::windows::startup::set_enabled(false, &executable)?;
+                }
+                Ok(())
             }
-            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            crate::platform::windows::startup::set_enabled(true, &executable)
-        } else {
-            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            if crate::platform::windows::startup::is_enabled()? {
-                crate::platform::windows::startup::set_enabled(false, &executable)?;
+            StartupMode::Administrator => {
+                if regular.is_enabled().map_err(|error| error.to_string())? {
+                    regular.disable().map_err(|error| error.to_string())?;
+                }
+                crate::platform::windows::startup::set_enabled(true, &executable)
             }
-            let enabled = regular.is_enabled().map_err(|error| error.to_string())?;
-            match (settings.general.launch_at_startup, enabled) {
-                (true, false) => regular.enable().map_err(|error| error.to_string()),
-                (false, true) => regular.disable().map_err(|error| error.to_string()),
-                _ => Ok(()),
+            StartupMode::Regular => {
+                // A regular autostart and the elevated task are mutually
+                // exclusive. Remove a task left by an earlier administrator
+                // mode before enabling the regular autostart entry.
+                if crate::platform::windows::startup::is_enabled()? {
+                    crate::platform::windows::startup::set_enabled(false, &executable)?;
+                }
+                if !regular.is_enabled().map_err(|error| error.to_string())? {
+                    regular.enable().map_err(|error| error.to_string())?;
+                }
+                Ok(())
             }
         }
     }
@@ -491,6 +507,23 @@ fn startup_settings_changed(previous: &AppSettings, next: &AppSettings) -> bool 
     previous.general.launch_at_startup != next.general.launch_at_startup
         || previous.general.launch_at_startup_as_administrator
             != next.general.launch_at_startup_as_administrator
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupMode {
+    Disabled,
+    Regular,
+    Administrator,
+}
+
+fn startup_mode(settings: &AppSettings) -> StartupMode {
+    if !settings.general.launch_at_startup {
+        StartupMode::Disabled
+    } else if settings.general.launch_at_startup_as_administrator {
+        StartupMode::Administrator
+    } else {
+        StartupMode::Regular
+    }
 }
 
 #[cfg(test)]
@@ -584,6 +617,25 @@ mod tests {
             &previous,
             &administrator_startup_change
         ));
+    }
+
+    #[test]
+    fn startup_mode_is_owned_by_launch_at_startup() {
+        let mut settings = AppSettings::default();
+        assert_eq!(startup_mode(&settings), StartupMode::Disabled);
+
+        settings.general.launch_at_startup_as_administrator = true;
+        assert_eq!(
+            startup_mode(&settings),
+            StartupMode::Disabled,
+            "administrator identity must not enable startup by itself"
+        );
+
+        settings.general.launch_at_startup = true;
+        assert_eq!(startup_mode(&settings), StartupMode::Administrator);
+
+        settings.general.launch_at_startup_as_administrator = false;
+        assert_eq!(startup_mode(&settings), StartupMode::Regular);
     }
 
     #[test]

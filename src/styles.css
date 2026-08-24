@@ -401,6 +401,11 @@ select:focus-visible {
   border-bottom: 1px solid var(--sp-border);
 }
 
+.setting-row--nested {
+  padding-left: 28px;
+  background: color-mix(in srgb, var(--sp-surface) 92%, var(--sp-border));
+}
+
 .setting-row:last-child {
   border-bottom: 0;
 }

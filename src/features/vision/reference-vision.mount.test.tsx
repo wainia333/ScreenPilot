@@ -189,7 +189,10 @@ describe('ReferenceVisionAdapter mount contract', () => {
     if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
     act(() => {
       translateStreamListener?.({
-        payload: { imageId: 'capture-1', kind: 'original', delta: 'Captured source' },
+        payload: { imageId: 'capture-1', generation: 2, kind: 'original', delta: 'Captured source' },
+      })
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Stale source' },
       })
     })
     fireEvent.change(targetLanguage, { target: { value: 'en' } })

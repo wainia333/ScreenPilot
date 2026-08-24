@@ -17,6 +17,23 @@ async function waitForVisionSelection(page: Page) {
   await expect(page.locator('main > div.fixed.inset-0.select-none')).toHaveCSS('cursor', 'crosshair')
 }
 
+async function seedTextOnlyVisionHistory(page: Page, prompt: string, answer: string) {
+  await page.addInitScript(({ historyPrompt, historyAnswer }) => {
+    localStorage.setItem('screenpilot:vision-history:v1', JSON.stringify([{
+      id: 'text-history-flight-edge',
+      imagePreview: '',
+      appLabel: '',
+      messages: [
+        { role: 'user', content: historyPrompt },
+        { role: 'assistant', content: historyAnswer },
+      ],
+      capturedFrame: null,
+      timestamp: Date.now(),
+      textOnly: true,
+    }]))
+  }, { historyPrompt: prompt, historyAnswer: answer })
+}
+
 async function installClipboardFailureMock(page: Page) {
   await page.addInitScript(() => {
     const state = {
@@ -1881,7 +1898,7 @@ test('Vision blocks an answer request until its stream listener recovers', async
   expect(pageErrors).toEqual([])
 })
 
-test('Vision blocks screenshot translation until its stream listener recovers', async ({ page }) => {
+test('Vision falls back to the command result while its translation stream listener recovers', async ({ page }) => {
   const pageErrors: string[] = []
   page.on('pageerror', error => pageErrors.push(error.message))
   await installVisionTauriMock(page, 'Listener recovery source.', true, 'Listener recovery translation.', 0, 0, 0, '', false, {
@@ -1903,9 +1920,11 @@ test('Vision blocks screenshot translation until its stream listener recovers', 
   await page.mouse.up()
 
   await expect(page.locator('[data-screenpilot-stream-listener-error="translate"]')).toHaveText('响应通道连接失败，请重试')
+  await expect(page.getByText('Listener recovery source.')).toBeVisible()
+  await expect(page.getByText('Listener recovery translation.')).toBeVisible()
   await expect.poll(async () => page.evaluate(() => (
     window as typeof window & { __SCREENPILOT_TEST__: { visionTranslateCalls: number } }
-  ).__SCREENPILOT_TEST__.visionTranslateCalls)).toBe(0)
+  ).__SCREENPILOT_TEST__.visionTranslateCalls)).toBe(1)
 
   await page.evaluate(() => window.dispatchEvent(new Event('vision:reset')))
   await waitForVisionSelection(page)
@@ -1917,7 +1936,7 @@ test('Vision blocks screenshot translation until its stream listener recovers', 
   await expect(page.getByText('Listener recovery translation.')).toBeVisible()
   await expect.poll(async () => page.evaluate(() => (
     window as typeof window & { __SCREENPILOT_TEST__: { visionTranslateCalls: number } }
-  ).__SCREENPILOT_TEST__.visionTranslateCalls)).toBe(1)
+  ).__SCREENPILOT_TEST__.visionTranslateCalls)).toBe(2)
   expect(pageErrors).toEqual([])
 })
 
@@ -2501,6 +2520,243 @@ test('Vision supports keyboard capture, arrow annotation, live answers, and hist
   await page.keyboard.press('Tab')
   await expect(historyDialog).toHaveCount(0)
   await expect(page.locator('[data-screenpilot-vision-send="true"]')).toBeFocused()
+})
+
+test('Vision message toolbars reveal safely and support copy, role-aware editing, and regeneration', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, false)
+  await installClipboardFailureMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const userPrompt = 'Explain this **Markdown** prompt.'
+  const assistantMarkdown = 'Assistant **Markdown** response.\n\n```ts\nconst answer = 42\n```'
+  await page.evaluate((answerText) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = answerText
+  }, assistantMarkdown)
+  await page.locator('[data-screenpilot-vision-prompt="true"]').fill(userPrompt)
+  await page.locator('[data-screenpilot-vision-send="true"]').click()
+
+  const log = page.getByRole('log')
+  const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answerPanel).toBeVisible()
+  await expect(log).toHaveAttribute('aria-busy', 'false')
+  const userShell = page.locator(
+    '[data-screenpilot-message-shell="true"][data-screenpilot-message-role="user"]',
+  ).first()
+  const assistantShell = page.locator(
+    '[data-screenpilot-message-shell="true"][data-screenpilot-message-role="assistant"]',
+  ).first()
+  await expect(userShell).toContainText(userPrompt)
+  await expect(assistantShell).toContainText('Assistant Markdown response.')
+  expect(await page.locator('[data-screenpilot-message-shell="true"]').evaluateAll(shells => shells.map(
+    shell => (shell as HTMLElement).dataset.screenpilotMessagePairGap,
+  ))).toEqual(['standard', 'compact'])
+
+  const toolbarExpectations = [
+    { shell: userShell, actions: ['speak', 'regenerate', 'edit', 'copy'], iconSize: 13 },
+    { shell: assistantShell, actions: ['speak', 'regenerate', 'copy'], iconSize: 13 },
+  ] as const
+  for (const { shell, actions, iconSize } of toolbarExpectations) {
+    const toolbar = shell.locator('[data-screenpilot-message-toolbar="true"]')
+    await page.mouse.move(1, 1)
+    await expect(toolbar).toHaveCSS('opacity', '0')
+    await expect(toolbar).toHaveCSS('pointer-events', 'none')
+    await shell.hover()
+    await expect(toolbar).toHaveCSS('opacity', '1')
+    await expect(toolbar).toHaveCSS('pointer-events', 'auto')
+    await expect(toolbar.locator('button')).toHaveCount(actions.length)
+    await expect(toolbar).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+    await expect(toolbar).toHaveCSS('border-top-width', '0px')
+    await expect(toolbar).toHaveCSS('box-shadow', 'none')
+    await expect(toolbar).toHaveCSS('backdrop-filter', 'none')
+    expect(await toolbar.locator('button').evaluateAll(buttons => buttons.map(
+      button => (button as HTMLElement).dataset.screenpilotMessageAction,
+    ))).toEqual(actions)
+    expect(await toolbar.locator('button').evaluateAll(buttons => buttons.map((button) => {
+      const bounds = button.getBoundingClientRect()
+      const iconBounds = button.querySelector('svg')?.getBoundingClientRect()
+      return {
+        width: bounds.width,
+        height: bounds.height,
+        iconWidth: iconBounds?.width,
+        iconHeight: iconBounds?.height,
+      }
+    }))).toEqual(actions.map(() => ({
+      width: 26,
+      height: 26,
+      iconWidth: iconSize,
+      iconHeight: iconSize,
+    })))
+    const firstEnabledAction = toolbar.locator('button:not(:disabled)').first()
+    await firstEnabledAction.hover()
+    await expect(firstEnabledAction).toHaveCSS(
+      'background-color',
+      /^(?:rgba\(0, 0, 0, 0\.06\)|oklab\(0 0 0 \/ 0\.06\))$/u,
+    )
+    await expect.poll(() => toolbar.evaluate(element => (
+      element.getAnimations().every(animation => animation.playState === 'finished')
+    ))).toBe(true)
+
+    const geometry = await shell.evaluate((element) => {
+      const toolbarElement = element.querySelector<HTMLElement>('[data-screenpilot-message-toolbar="true"]')
+      const contentElement = Array.from(element.children).find(child => (
+        !(child instanceof HTMLElement) || child.dataset.screenpilotMessageToolbar !== 'true'
+      ))
+      if (!(toolbarElement instanceof HTMLElement) || !(contentElement instanceof HTMLElement)) return null
+      const shellBounds = element.getBoundingClientRect()
+      const contentBounds = contentElement.getBoundingClientRect()
+      const toolbarBounds = toolbarElement.getBoundingClientRect()
+      const overlaps = contentBounds.left < toolbarBounds.right
+        && contentBounds.right > toolbarBounds.left
+        && contentBounds.top < toolbarBounds.bottom
+        && contentBounds.bottom > toolbarBounds.top
+      return {
+        overlaps,
+        contentToToolbarGap: toolbarBounds.top - contentBounds.bottom,
+        toolbarInsideShell: toolbarBounds.left >= shellBounds.left - 1
+          && toolbarBounds.right <= shellBounds.right + 1
+          && toolbarBounds.top >= shellBounds.top - 1
+          && toolbarBounds.bottom <= shellBounds.bottom + 1,
+      }
+    })
+    expect(geometry).not.toBeNull()
+    expect(geometry?.overlaps).toBe(false)
+    expect(geometry?.toolbarInsideShell).toBe(true)
+    if (shell === userShell) {
+      expect(geometry?.contentToToolbarGap).toBe(3)
+    }
+  }
+
+  const compactPairGeometry = await page.evaluate(() => {
+    const user = document.querySelector<HTMLElement>(
+      '[data-screenpilot-message-shell="true"][data-screenpilot-message-role="user"]',
+    )
+    const assistant = document.querySelector<HTMLElement>(
+      '[data-screenpilot-message-shell="true"][data-screenpilot-message-role="assistant"]',
+    )
+    const toolbar = user?.querySelector<HTMLElement>('[data-screenpilot-message-toolbar="true"]')
+    const assistantContent = assistant === null ? null : Array.from(assistant.children).find(child => (
+      !(child instanceof HTMLElement) || child.dataset.screenpilotMessageToolbar !== 'true'
+    ))
+    if (user === null || assistant === null || !(toolbar instanceof HTMLElement) || !(assistantContent instanceof HTMLElement)) {
+      return null
+    }
+    const userContent = Array.from(user.children).find(child => (
+      !(child instanceof HTMLElement) || child.dataset.screenpilotMessageToolbar !== 'true'
+    ))
+    if (!(userContent instanceof HTMLElement)) return null
+    const userContentBounds = userContent.getBoundingClientRect()
+    const toolbarBounds = toolbar.getBoundingClientRect()
+    const assistantContentBounds = assistantContent.getBoundingClientRect()
+    return {
+      questionGap: toolbarBounds.top - userContentBounds.bottom,
+      answerGap: assistantContentBounds.top - toolbarBounds.bottom,
+    }
+  })
+  expect(compactPairGeometry).not.toBeNull()
+  expect(compactPairGeometry?.questionGap).toBe(3)
+  expect(compactPairGeometry?.answerGap).toBeGreaterThanOrEqual(6)
+  expect(compactPairGeometry?.questionGap).toBeLessThan(compactPairGeometry?.answerGap ?? 0)
+
+  await userShell.hover()
+  await userShell.locator('[data-screenpilot-message-action="copy"]').click()
+  await expect(userShell.locator('[data-screenpilot-message-action="copy"]')).toHaveAttribute('aria-label', '已复制')
+  await assistantShell.hover()
+  await assistantShell.locator('[data-screenpilot-message-action="copy"]').click()
+  await expect(assistantShell.locator('[data-screenpilot-message-action="copy"]')).toHaveAttribute('aria-label', '已复制')
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_CLIPBOARD_TEST__: { writes: string[] }
+    }
+  ).__SCREENPILOT_CLIPBOARD_TEST__.writes)).toEqual([
+    userPrompt,
+    assistantMarkdown,
+  ])
+  await page.locator('[data-screenpilot-copy-target="answer"]').click()
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_CLIPBOARD_TEST__: { writes: string[] }
+    }
+  ).__SCREENPILOT_CLIPBOARD_TEST__.writes.at(-1) ?? '')).not.toContain('Checking the visible content.')
+
+  await userShell.hover()
+  await userShell.locator('[data-screenpilot-message-action="edit"]').click()
+  let editor = userShell.locator('[data-screenpilot-message-editor="true"]')
+  await expect(editor).toBeVisible()
+  await expect(userShell.locator('[data-screenpilot-message-toolbar="true"]')).toHaveCount(0)
+  expect(await editor.locator('[data-screenpilot-message-editor-action]').evaluateAll(buttons => buttons.map(
+    button => (button as HTMLElement).dataset.screenpilotMessageEditorAction,
+  ))).toEqual(['regenerate', 'save', 'cancel'])
+  await editor.locator('[data-screenpilot-message-editor-input="true"]').fill('Cancelled user edit')
+  await page.keyboard.press('Escape')
+  await expect(editor).toHaveCount(0)
+  await expect(answerPanel).toBeVisible()
+  await expect(userShell).toContainText(userPrompt)
+
+  const savedUserPrompt = 'Saved user **Markdown** prompt.'
+  await userShell.hover()
+  await userShell.locator('[data-screenpilot-message-action="edit"]').click()
+  editor = userShell.locator('[data-screenpilot-message-editor="true"]')
+  await editor.locator('[data-screenpilot-message-editor-input="true"]').fill(savedUserPrompt)
+  await editor.locator('[data-screenpilot-message-editor-action="save"]').click()
+  await expect(editor).toHaveCount(0)
+  await expect(userShell).toContainText(savedUserPrompt)
+  await assistantShell.hover()
+  await expect(assistantShell.locator('[data-screenpilot-message-action="edit"]')).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { visionAskCalls: number } }
+  ).__SCREENPILOT_TEST__.visionAskCalls)).toBe(1)
+
+  const savedUserEditor = userShell.locator('[data-screenpilot-message-editor="true"]')
+  await expect(savedUserEditor).toHaveCount(0)
+  await userShell.hover()
+  await userShell.locator('[data-screenpilot-message-action="edit"]').click()
+  const reopenedUserEditor = userShell.locator('[data-screenpilot-message-editor="true"]')
+  const saveStyle = await reopenedUserEditor.locator('[data-screenpilot-message-editor-action="save"]').evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { backgroundColor: style.backgroundColor, color: style.color }
+  })
+  expect(saveStyle.backgroundColor).not.toBe('rgb(217, 119, 87)')
+  expect(saveStyle.backgroundColor).not.toBe('rgb(201, 104, 77)')
+  expect(saveStyle.color).not.toBe('rgb(255, 255, 255)')
+  await reopenedUserEditor.locator('[data-screenpilot-message-editor-action="cancel"]').click()
+  await expect(reopenedUserEditor).toHaveCount(0)
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = 'Second generated answer.'
+  })
+  await page.locator('[data-screenpilot-vision-prompt="true"]').fill('Follow-up that should be discarded.')
+  await page.locator('[data-screenpilot-vision-send="true"]').click()
+  await expect(log).toContainText('Second generated answer.')
+  await expect(log).toHaveAttribute('aria-busy', 'false')
+  await expect(page.locator('[data-screenpilot-message-shell="true"]')).toHaveCount(4)
+  expect(await page.locator('[data-screenpilot-message-shell="true"]').evaluateAll(shells => shells.map(
+    shell => (shell as HTMLElement).dataset.screenpilotMessagePairGap,
+  ))).toEqual(['standard', 'compact', 'standard', 'compact'])
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = 'Regenerated first answer.'
+  })
+  await assistantShell.hover()
+  await assistantShell.locator('[data-screenpilot-message-action="regenerate"]').click()
+  await expect(log).toContainText('Regenerated first answer.')
+  await expect(log).toHaveAttribute('aria-busy', 'false')
+  await expect(page.locator('[data-screenpilot-message-shell="true"]')).toHaveCount(2)
+  await expect(log).toContainText(savedUserPrompt)
+  await expect(log).not.toContainText('Follow-up that should be discarded.')
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __SCREENPILOT_TEST__: { visionAskCalls: number } }
+  ).__SCREENPILOT_TEST__.visionAskCalls)).toBe(3)
 })
 
 test('vision captures, annotates and answers without stale stream pollution', async ({ page }) => {
@@ -3334,6 +3590,322 @@ test('Vision floating layout retries a deferred native resize before recording s
   expect(profileParity.omittedFlyHasScreenshot).toBe(true)
 })
 
+test('Vision restores text history through the same top-slot flight before expanding the answer', async ({ page }) => {
+  type VisionFlight = {
+    from: { x: number; y: number }
+    to: { x: number; y: number }
+    width: number
+    height: number
+    hasScreenshot: boolean
+    durationMs: number
+  }
+
+  await installVisionTauriMock(page, undefined, false)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  const promptText = 'Restore this text-only history through the native flight.'
+  const answerText = 'Text-only history answer restored after the flight.'
+  await page.evaluate((value) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { answerText: string }
+    }).__SCREENPILOT_TEST__
+    state.answerText = value
+  }, answerText)
+  const prompt = page.getByPlaceholder('问点什么...')
+  await prompt.fill(promptText)
+  await prompt.press('Enter')
+
+  const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answerPanel).toBeVisible()
+  await expect(page.getByRole('log')).toHaveAttribute('aria-busy', 'false')
+  await expect(page.getByTitle('历史')).toContainText('1')
+  const directFlight = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { visionFlights: VisionFlight[] }
+    }
+  ).__SCREENPILOT_TEST__.visionFlights.at(-1) ?? null)
+  if (directFlight === null) throw new Error('Direct text-only Vision flight was not recorded')
+  expect(directFlight.from).not.toEqual(directFlight.to)
+  expect(directFlight.height).toBe(56 + VISION_FLOATING_PADDING * 2)
+  expect(directFlight.hasScreenshot).toBe(false)
+  expect(directFlight.durationMs).toBeGreaterThan(0)
+
+  // Recreate the reused Vision WebView in its select state while retaining
+  // localStorage history. The fresh native mock also guarantees that the
+  // history path cannot inherit the direct request's previous floating rect.
+  await page.reload()
+  await waitForVisionSelection(page)
+  await expect(page.getByTitle('历史')).toContainText('1')
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { deferVisionFlights: boolean }
+    }).__SCREENPILOT_TEST__
+    state.deferVisionFlights = true
+  })
+
+  await page.getByTitle('历史').click()
+  const historyItem = page.getByRole('button', { name: new RegExp(promptText, 'u') }).first()
+  await expect(historyItem).toBeVisible()
+  await historyItem.click()
+
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        pendingVisionFlightCount: number
+        visionFlights: VisionFlight[]
+      }
+    }
+  ).__SCREENPILOT_TEST__.visionFlights.length)).toBe(1)
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingVisionFlightCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingVisionFlightCount)).toBe(1)
+
+  const historyFlight = await page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { visionFlights: VisionFlight[] }
+    }
+  ).__SCREENPILOT_TEST__.visionFlights[0] ?? null)
+  if (historyFlight === null) throw new Error('History restore Vision flight was not recorded')
+  expect(historyFlight.to).toEqual(directFlight.to)
+  expect(historyFlight.width).toBe(directFlight.width)
+  expect(historyFlight.height).toBe(directFlight.height)
+  expect(historyFlight.height).toBe(56 + VISION_FLOATING_PADDING * 2)
+  expect(historyFlight.hasScreenshot).toBe(directFlight.hasScreenshot)
+  expect(historyFlight.durationMs).toBe(directFlight.durationMs)
+
+  // While the native flight promise is deliberately held open, restored
+  // messages may already be prepared but the answer surface must stay closed.
+  await expect(page.locator('[data-screenpilot-prompt-panel="true"]')).toHaveAttribute(
+    'data-screenpilot-answer-visible',
+    'false',
+  )
+  await expect(answerPanel).toHaveCSS('height', '0px')
+  await expect(answerPanel).toHaveCSS('pointer-events', 'none')
+
+  expect(await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        deferVisionFlights: boolean
+        resolveNextVisionFlight: () => boolean
+      }
+    }).__SCREENPILOT_TEST__
+    state.deferVisionFlights = false
+    return state.resolveNextVisionFlight()
+  })).toBe(true)
+
+  await expect(page.locator('[data-screenpilot-prompt-panel="true"]')).toHaveAttribute(
+    'data-screenpilot-answer-visible',
+    'true',
+  )
+  await expect(answerPanel).toBeVisible()
+  await expect(page.getByRole('log')).toContainText(promptText)
+  await expect(page.getByRole('log')).toContainText(answerText)
+  await expect(page.locator('[data-screenpilot-vision-image="false"]')).toBeVisible()
+})
+
+test('Vision keeps a restored answer floating when its native history flight fails', async ({ page }) => {
+  const promptText = 'Restore this history after a failed native flight.'
+  const answerText = 'The failed flight still restores this complete answer.'
+  await seedTextOnlyVisionHistory(page, promptText, answerText)
+  await installVisionTauriMock(page, undefined, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { visionFlightFailuresRemaining: number }
+    }).__SCREENPILOT_TEST__
+    state.visionFlightFailuresRemaining = 1
+  })
+
+  await page.getByTitle('历史').click()
+  await page.getByRole('button', { name: new RegExp(promptText, 'u') }).click()
+
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        visionFlightFailuresRemaining: number
+        visionFlights: unknown[]
+      }
+    }
+  ).__SCREENPILOT_TEST__.visionFlights.length)).toBe(1)
+  await expect(page.locator('[data-screenpilot-prompt-panel="true"]')).toHaveAttribute(
+    'data-screenpilot-answer-visible',
+    'true',
+  )
+  const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
+  await expect(answerPanel).toBeVisible()
+  await expect(answerPanel).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
+  await expect(page.locator('[data-screenpilot-floating-layout="true"]')).toBeVisible()
+  await expect(page.getByRole('log')).toContainText(promptText)
+  await expect(page.getByRole('log')).toContainText(answerText)
+  await expect.poll(() => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        floatingHasScreenshot: boolean
+        floatingMinimumHeight: number
+        floatingRect: { height: number } | null
+        visionFlightFailuresRemaining: number
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      failuresRemaining: state.visionFlightFailuresRemaining,
+      hasScreenshot: state.floatingHasScreenshot,
+      height: state.floatingRect?.height ?? 0,
+      minimumHeight: state.floatingMinimumHeight,
+    }
+  })).toEqual({
+    failuresRemaining: 0,
+    hasScreenshot: false,
+    height: 406,
+    minimumHeight: 406,
+  })
+})
+
+test('Vision does not revive a deferred history restore after Escape closes its surface', async ({ page }) => {
+  const promptText = 'This deferred history must stay closed after Escape.'
+  const answerText = 'This answer must never be revived by the stale flight.'
+  await seedTextOnlyVisionHistory(page, promptText, answerText)
+  await installVisionTauriMock(page, undefined, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        deferVisionClose: boolean
+        deferVisionFlights: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    state.deferVisionClose = true
+    state.deferVisionFlights = true
+  })
+
+  await page.getByTitle('历史').click()
+  await page.getByRole('button', { name: new RegExp(promptText, 'u') }).click()
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { pendingVisionFlightCount: number }
+    }
+  ).__SCREENPILOT_TEST__.pendingVisionFlightCount)).toBe(1)
+  await expect(page.locator('[data-screenpilot-prompt-panel="true"]')).toHaveAttribute(
+    'data-screenpilot-answer-visible',
+    'false',
+  )
+
+  await page.keyboard.press('Escape')
+  await expect.poll(() => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        closeCalls: number
+        pendingVisionCloseCount: number
+        pendingVisionFlightCount: number
+        windowVisible: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    return {
+      closeCalls: state.closeCalls,
+      pendingClose: state.pendingVisionCloseCount,
+      pendingFlight: state.pendingVisionFlightCount,
+      windowVisible: state.windowVisible,
+    }
+  })).toEqual({ closeCalls: 1, pendingClose: 1, pendingFlight: 1, windowVisible: true })
+
+  expect(await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        deferVisionFlights: boolean
+        resolveNextVisionFlight: () => boolean
+      }
+    }).__SCREENPILOT_TEST__
+    state.deferVisionFlights = false
+    return state.resolveNextVisionFlight()
+  })).toBe(true)
+
+  // The native flight has now completed, but restoreHistory must wait for the
+  // in-progress close attempt instead of briefly expanding stale content.
+  await expect.poll(() => page.evaluate(({ historyPrompt, historyAnswer }) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        completedVisionFlightCount: number
+        pendingVisionCloseCount: number
+        pendingVisionFlightCount: number
+        windowVisible: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    const promptPanel = document.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
+    const bodyText = document.body.textContent
+    return {
+      answerVisible: promptPanel?.dataset.screenpilotAnswerVisible ?? null,
+      completedFlights: state.completedVisionFlightCount,
+      hasRestoredText: bodyText.includes(historyPrompt) || bodyText.includes(historyAnswer),
+      pendingClose: state.pendingVisionCloseCount,
+      pendingFlight: state.pendingVisionFlightCount,
+      windowVisible: state.windowVisible,
+    }
+  }, { historyPrompt: promptText, historyAnswer: answerText })).toEqual({
+    answerVisible: 'false',
+    completedFlights: 1,
+    hasRestoredText: false,
+    pendingClose: 1,
+    pendingFlight: 0,
+    windowVisible: true,
+  })
+
+  expect(await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        deferVisionClose: boolean
+        resolveNextVisionClose: () => boolean
+      }
+    }).__SCREENPILOT_TEST__
+    state.deferVisionClose = false
+    return state.resolveNextVisionClose()
+  })).toBe(true)
+
+  await expect.poll(() => page.evaluate(({ historyPrompt, historyAnswer }) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        closeCalls: number
+        floatingRect: { width: number; height: number } | null
+        pendingVisionCloseCount: number
+        pendingVisionFlightCount: number
+        windowVisible: boolean
+      }
+    }).__SCREENPILOT_TEST__
+    const promptPanel = document.querySelector<HTMLElement>('[data-screenpilot-prompt-panel="true"]')
+    const selectionRoot = document.querySelector<HTMLElement>('main > div.fixed.inset-0.select-none')
+    const bodyText = document.body.textContent
+    return {
+      activePrompt: (document.activeElement as HTMLElement | null)?.dataset.screenpilotVisionPrompt === 'true',
+      answerVisible: promptPanel?.dataset.screenpilotAnswerVisible ?? null,
+      closeCalls: state.closeCalls,
+      floatingRect: state.floatingRect,
+      hasRestoredText: bodyText.includes(historyPrompt) || bodyText.includes(historyAnswer),
+      pendingClose: state.pendingVisionCloseCount,
+      pendingFlight: state.pendingVisionFlightCount,
+      selectionCursor: selectionRoot === null ? null : getComputedStyle(selectionRoot).cursor,
+      windowVisible: state.windowVisible,
+    }
+  }, { historyPrompt: promptText, historyAnswer: answerText })).toEqual({
+    activePrompt: false,
+    answerVisible: 'false',
+    closeCalls: 1,
+    floatingRect: null,
+    hasRestoredText: false,
+    pendingClose: 0,
+    pendingFlight: 0,
+    selectionCursor: 'crosshair',
+    windowVisible: false,
+  })
+  await expect(page.locator('[data-screenpilot-close-error="true"]')).toHaveCount(0)
+})
+
 test('Vision mode transitions replace the previous screenshot height profile', async ({ page }) => {
   test.setTimeout(60_000)
   await installVisionTauriMock(page, undefined, false)
@@ -3516,6 +4088,131 @@ test('Vision markdown links open externally without navigating the app webview',
     return state.externalUrls
   })).toEqual(['https://example.com/vision?source=screenpilot#answer'])
   expect(page.url()).toBe(before)
+})
+
+test('screenshot translation keeps OCR text when the translation provider fails', async ({ page }) => {
+  const sourceText = 'OCR 内容必须保留，即使后续翻译失败。'
+  await installVisionTauriMock(page, sourceText, false, undefined, 0, 0, 0, '', true)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { visionTranslateTranslationFailuresRemaining: number }
+    }).__SCREENPILOT_TEST__
+    state.visionTranslateTranslationFailuresRemaining = 1
+  })
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+
+  const source = page.locator('[data-screenpilot-ocr-container="true"]')
+  const targetError = page.locator('[data-screenpilot-translation-error="true"]')
+  await expect(source).toContainText(sourceText)
+  await expect(source.getByRole('alert')).toHaveCount(0)
+  await expect(targetError).toContainText('synthetic translation failure')
+  await expect(page.locator('[data-screenpilot-copy-target="original"]')).toBeVisible()
+})
+
+test('screenshot translation displays an OCR failure only in the OCR pane', async ({ page }) => {
+  await installVisionTauriMock(page, 'This source must not be emitted.', false, undefined, 0, 0, 0, '', true)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { visionTranslateOcrFailuresRemaining: number }
+    }).__SCREENPILOT_TEST__
+    state.visionTranslateOcrFailuresRemaining = 1
+  })
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+
+  const source = page.locator('[data-screenpilot-ocr-container="true"]')
+  await expect(page.locator('[data-screenpilot-original-error="true"]')).toContainText('synthetic OCR failure')
+  await expect(source).not.toContainText('This source must not be emitted.')
+  await expect(page.locator('[data-screenpilot-translation-error="true"]')).toHaveCount(0)
+})
+
+test('screenshot translation recovers both results from the command response when stream delivery is unavailable', async ({ page }) => {
+  const sourceText = 'OCR command fallback source.'
+  const translatedText = '翻译命令兜底结果。'
+  await installVisionTauriMock(page, sourceText, false, translatedText)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { suppressVisionTranslateEvents: boolean }
+    }).__SCREENPILOT_TEST__
+    state.suppressVisionTranslateEvents = true
+  })
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+
+  await expect(page.getByText(sourceText)).toBeVisible()
+  await expect(page.getByText(translatedText)).toBeVisible()
+  await expect(page.locator('[data-screenpilot-translation-card="true"]')).toHaveAttribute('aria-busy', 'false')
+})
+
+test('screenshot translation ignores a delayed event from an older request for the same image', async ({ page }) => {
+  const sourceText = 'Current OCR source.'
+  await installVisionTauriMock(page, sourceText, false)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=translate')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(120, 160)
+  await page.mouse.down()
+  await page.mouse.move(620, 460, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.getByText(sourceText)).toBeVisible()
+
+  await page.evaluate((expectedSource) => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        visionTranslateRequests: { imageId: string; requestId: string; generation: number }[]
+        emitVisionTranslatePayload: (payload: unknown) => boolean
+      }
+    }).__SCREENPILOT_TEST__
+    const current = state.visionTranslateRequests.at(-1)
+    if (!current) throw new Error('Current screenshot translation request is missing')
+    state.emitVisionTranslatePayload({
+      ...current,
+      kind: 'original',
+      delta: expectedSource,
+    })
+    const stale = {
+      imageId: current.imageId,
+      requestId: `${current.requestId}-stale`,
+      generation: Math.max(0, current.generation - 1),
+    }
+    state.emitVisionTranslatePayload({
+      ...stale,
+      kind: 'original',
+      delta: 'STALE OCR MUST BE IGNORED',
+    })
+    state.emitVisionTranslatePayload({
+      ...stale,
+      kind: 'translated',
+      done: true,
+      success: false,
+      error: 'stale translation failure',
+    })
+  }, sourceText)
+
+  await expect(page.getByText(sourceText)).toBeVisible()
+  await expect(page.locator('[data-screenpilot-ocr-source-content="true"]')).toHaveText(sourceText)
+  await expect(page.getByText('STALE OCR MUST BE IGNORED')).toHaveCount(0)
+  await expect(page.locator('[data-screenpilot-translation-error="true"]')).toHaveCount(0)
 })
 
 test('screenshot translation keeps editable source and nonblank thumbnail history', async ({ page }) => {

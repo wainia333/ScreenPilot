@@ -68,6 +68,16 @@ class AdministratorDesktop extends ClosingDesktop {
   }
 }
 
+class StartupSettingsDesktop extends ClosingDesktop {
+  constructor(private readonly loadedSettings: AppSettings) {
+    super()
+  }
+
+  override loadSettings(): Promise<AppSettings> {
+    return Promise.resolve(structuredClone(this.loadedSettings))
+  }
+}
+
 class CountingSettingsDesktop extends ClosingDesktop {
   saves = 0
 
@@ -1485,5 +1495,25 @@ describe('SettingsPage', () => {
     standard.unmount()
     render(<DesktopProvider port={new AdministratorDesktop()}><SettingsPage /></DesktopProvider>)
     expect(await screen.findByRole('status', { name: '当前运行权限' })).toHaveTextContent('权限：管理员')
+  })
+
+  it('only shows the administrator identity option under enabled startup', async () => {
+    const startupSettings = structuredClone(DEFAULT_SETTINGS)
+    startupSettings.general.launchAtStartupAsAdministrator = true
+    const desktop = new StartupSettingsDesktop(startupSettings)
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await screen.findByRole('heading', { name: '外观与语言' })
+
+    expect(screen.queryByRole('switch', { name: '管理员身份' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('switch', { name: '开机启动' }))
+    const administratorToggle = screen.getByRole('switch', { name: '管理员身份' })
+    expect(administratorToggle).toBeInTheDocument()
+    expect(administratorToggle).toHaveAttribute('aria-checked', 'true')
+    expect(administratorToggle.closest('.setting-row')).toHaveClass('setting-row--nested')
+
+    fireEvent.click(administratorToggle)
+    expect(administratorToggle).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(screen.getByRole('switch', { name: '开机启动' }))
+    expect(screen.queryByRole('switch', { name: '管理员身份' })).not.toBeInTheDocument()
   })
 })

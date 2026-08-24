@@ -1,10 +1,11 @@
 use crate::application::lifecycle::TRANSLATOR_HEIGHT;
-use crate::application::state::AppState;
+use crate::application::state::{AppState, CancellationSignal};
 use crate::domain::settings::{AppSettings, ModelSelection, OcrMethod, TranslationMethod};
 use crate::infrastructure::ai_http::{
-    complete_text, complete_text_with_effort, complete_vision_with_options,
-    complete_vision_with_options_result_cancelled, stream_vision_with_options_cancelled, AiMessage,
-    AiRequestPolicy, AiStreamFinish, VisionCompletion, VisionRequestOptions,
+    complete_text, complete_text_cancelled, complete_text_with_effort,
+    complete_vision_with_options, complete_vision_with_options_result_cancelled,
+    stream_vision_with_options_cancelled, AiMessage, AiRequestPolicy, AiStreamFinish,
+    VisionCompletion, VisionRequestOptions,
 };
 use crate::infrastructure::credentials::CredentialVault;
 use crate::infrastructure::sse::SseDelta;
@@ -14,15 +15,18 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{
     AppHandle, Emitter, LogicalUnit, Manager, PixelUnit, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowSizeConstraints,
 };
+use tauri_plugin_dialog::DialogExt;
 use url::Url;
 use uuid::Uuid;
 use xcap::Monitor;
@@ -848,6 +852,31 @@ pub fn vision_delete_temporary_image(
     image_id: String,
 ) -> Result<(), String> {
     state.delete_reference_vision_temporary_image(&image_id)
+}
+
+#[tauri::command]
+pub fn vision_export_markdown(
+    app: AppHandle,
+    markdown: String,
+    file_name: String,
+) -> Result<bool, String> {
+    let default_name = if file_name.trim().is_empty() {
+        "vision-conversation.md"
+    } else {
+        file_name.trim()
+    };
+    let file = app
+        .dialog()
+        .file()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(default_name)
+        .blocking_save_file();
+    let Some(file) = file else {
+        return Ok(false);
+    };
+    let path = file.into_path().map_err(|error| error.to_string())?;
+    fs::write(path, markdown.as_bytes()).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn should_process_vision_close(vision_active: bool, visible: bool, freeze_active: bool) -> bool {
@@ -1973,9 +2002,10 @@ async fn run_vision_request(
                         }) {
                             return Ok(());
                         }
-                        if !stream_citations
-                            .iter()
-                            .any(|(_, existing_url)| existing_url == url)
+                        if !title.trim().is_empty()
+                            && !stream_citations
+                                .iter()
+                                .any(|(_, existing_url)| existing_url == url)
                         {
                             stream_citations.push((title.clone(), url.clone()));
                         }
@@ -2133,6 +2163,11 @@ fn citation_markdown(title: &str, url: &str) -> String {
     if !matches!(parsed.scheme(), "http" | "https") {
         return String::new();
     }
+    // Providers occasionally attach a URL annotation without a visible title.
+    // Rendering that as `- [](...)` leaves an orphan list marker in the answer.
+    if title.trim().is_empty() {
+        return String::new();
+    }
     let title = title
         .replace('\\', "\\\\")
         .replace('[', "\\[")
@@ -2145,11 +2180,11 @@ fn citation_sources(citations: &[(String, String)]) -> String {
     let lines = citations
         .iter()
         .filter_map(|(title, url)| {
-            if !seen_urls.insert(url) {
+            let markdown = citation_markdown(title, url);
+            if markdown.is_empty() || !seen_urls.insert(url) {
                 return None;
             }
-            let markdown = citation_markdown(title, url);
-            (!markdown.is_empty()).then_some(markdown)
+            Some(markdown)
         })
         .collect::<Vec<_>>();
     if lines.is_empty() {
@@ -2412,58 +2447,140 @@ pub async fn vision_translate(
     app: AppHandle,
     state: State<'_, AppState>,
     image_id: String,
+    request_id: String,
 ) -> Result<Value, String> {
     let generation = begin_screenshot_translation_stream(&state)?;
-    let result = match recognize_screenshot(&state, &image_id).await {
-        Ok(source) => async_translation(&state, source).await,
-        Err(error) => Err(error),
+    let emit_translate = |payload: Value| {
+        if state.reference_vision_stream_current(generation) {
+            let _ = app.emit_to("vision", "vision-translate-stream", payload);
+        }
     };
-    Ok(match result {
-        Ok((source, translated)) => {
-            let clipboard_committed =
-                state.with_current_reference_vision_stream(generation, || {
-                    let _ = arboard::Clipboard::new()
-                        .and_then(|mut clipboard| clipboard.set_text(source.clone()));
-                    Ok(())
-                })?;
-            if clipboard_committed.is_none() {
-                return Ok(json!({ "success": true, "cancelled": true }));
+    let Some(cancellation) = state.reference_vision_signal(generation) else {
+        return Ok(json!({
+            "success": true,
+            "cancelled": true,
+            "requestId": request_id,
+        }));
+    };
+
+    let recognized = tokio::select! {
+        result = recognize_screenshot(&state, &image_id) => result,
+        _ = cancellation.cancelled() => Err("Request cancelled".into()),
+    };
+    let source = match recognized {
+        Ok(source) => source,
+        Err(error) => {
+            if !state.reference_vision_stream_current(generation) {
+                return Ok(json!({
+                    "success": true,
+                    "cancelled": true,
+                    "requestId": request_id,
+                }));
             }
-            let emit_translate = |payload: Value| {
-                if state.reference_vision_stream_current(generation) {
-                    let _ = app.emit_to("vision", "vision-translate-stream", payload);
-                }
-            };
             emit_translate(json!({
                 "imageId": image_id,
+                "requestId": request_id,
+                "generation": generation,
                 "kind": "original",
-                "delta": source,
+                "done": true,
+                "success": false,
+                "error": error.clone(),
             }));
+            return Ok(json!({
+                "success": false,
+                "requestId": request_id,
+                "kind": "original",
+                "error": error,
+            }));
+        }
+    };
+
+    let clipboard_committed = state.with_current_reference_vision_stream(generation, || {
+        let _ =
+            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(source.clone()));
+        Ok(())
+    })?;
+    if clipboard_committed.is_none() {
+        return Ok(json!({
+            "success": true,
+            "cancelled": true,
+            "requestId": request_id,
+        }));
+    }
+
+    // OCR is a complete, independently useful result. Publish it before the
+    // translation request starts so a provider failure can never hide it.
+    emit_translate(json!({
+        "imageId": image_id,
+        "requestId": request_id,
+        "generation": generation,
+        "kind": "original",
+        "delta": source.clone(),
+    }));
+
+    match translate_source_cancelled(&state, &source, None, None, Some(cancellation)).await {
+        Ok(translated) => {
+            if !state.reference_vision_stream_current(generation) {
+                return Ok(json!({
+                    "success": true,
+                    "cancelled": true,
+                    "requestId": request_id,
+                }));
+            }
             emit_translate(json!({
                 "imageId": image_id,
+                "requestId": request_id,
+                "generation": generation,
                 "kind": "translated",
-                "delta": translated,
+                "delta": translated.clone(),
             }));
             emit_translate(json!({
                 "imageId": image_id,
+                "requestId": request_id,
+                "generation": generation,
+                "kind": "translated",
                 "done": true,
                 "success": true,
             }));
-            json!({ "success": true })
+            Ok(json!({
+                "success": true,
+                "requestId": request_id,
+                "original": source,
+                "translated": translated,
+            }))
         }
-        Err(error) => json!({ "success": false, "error": error }),
-    })
+        Err(error) => {
+            if !state.reference_vision_stream_current(generation) {
+                return Ok(json!({
+                    "success": true,
+                    "cancelled": true,
+                    "requestId": request_id,
+                }));
+            }
+            emit_translate(json!({
+                "imageId": image_id,
+                "requestId": request_id,
+                "generation": generation,
+                "kind": "translated",
+                "done": true,
+                "success": false,
+                "error": error.clone(),
+            }));
+            Ok(json!({
+                "success": false,
+                "requestId": request_id,
+                "kind": "translated",
+                "original": source,
+                "error": error,
+            }))
+        }
+    }
 }
 
 fn begin_screenshot_translation_stream(state: &AppState) -> Result<u64, String> {
     let settings = state.current()?;
     ensure_screenshot_translation_enabled(&settings)?;
     Ok(state.begin_reference_vision_stream())
-}
-
-async fn async_translation(state: &AppState, source: String) -> Result<(String, String), String> {
-    let translated = translate_source(state, &source, None, None).await?;
-    Ok((source, translated))
 }
 
 #[tauri::command]
@@ -2473,19 +2590,25 @@ pub async fn vision_translate_text(
     target_language: Option<String>,
     source_language: Option<String>,
 ) -> Result<Value, String> {
-    Ok(
-        match translate_source(
-            &state,
-            &text,
-            source_language.as_deref(),
-            target_language.as_deref(),
-        )
-        .await
-        {
-            Ok(translated) => json!({ "success": true, "translated": translated }),
-            Err(error) => json!({ "success": false, "error": error }),
-        },
+    let generation = begin_screenshot_translation_stream(&state)?;
+    let Some(cancellation) = state.reference_vision_signal(generation) else {
+        return Ok(json!({ "success": true, "cancelled": true }));
+    };
+    let result = translate_source_cancelled(
+        &state,
+        &text,
+        source_language.as_deref(),
+        target_language.as_deref(),
+        Some(cancellation),
     )
+    .await;
+    if !state.reference_vision_stream_current(generation) {
+        return Ok(json!({ "success": true, "cancelled": true }));
+    }
+    Ok(match result {
+        Ok(translated) => json!({ "success": true, "translated": translated }),
+        Err(error) => json!({ "success": false, "error": error }),
+    })
 }
 
 async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String, String> {
@@ -2530,11 +2653,12 @@ async fn recognize_screenshot(state: &AppState, image_id: &str) -> Result<String
     }
 }
 
-async fn translate_source(
+async fn translate_source_cancelled(
     state: &AppState,
     source: &str,
     requested_source_language: Option<&str>,
     requested_target_language: Option<&str>,
+    cancellation: Option<Arc<CancellationSignal>>,
 ) -> Result<String, String> {
     let mut settings = state.current()?;
     settings.normalize_ai_options();
@@ -2562,15 +2686,21 @@ async fn translate_source(
             screenshot_source_name(source_language),
             &settings.screenshot_translation.translation_prompt,
         );
-        complete_text(
-            provider,
-            &selection.model,
-            &keys,
-            "",
-            &prompt,
-            AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false),
-        )
-        .await
+        let policy = AiRequestPolicy::new(settings.retry.enabled, settings.retry.attempts, false);
+        if let Some(cancellation) = cancellation {
+            complete_text_cancelled(
+                provider,
+                &selection.model,
+                &keys,
+                "",
+                &prompt,
+                policy,
+                Some(cancellation),
+            )
+            .await
+        } else {
+            complete_text(provider, &selection.model, &keys, "", &prompt, policy).await
+        }
     } else {
         let method = translation_method_name(settings.screenshot_translation.translation_method);
         let credential_id = match method {
@@ -2583,12 +2713,13 @@ async fn translate_source(
             .map(CredentialVault::provider_keys)
             .transpose()?
             .unwrap_or_default();
-        translation::translate_with_source(
+        translation::translate_with_source_cancelled(
             method,
             source,
             source_language,
             target_language,
             &credentials,
+            cancellation.as_deref(),
         )
         .await
     }
@@ -2803,6 +2934,14 @@ mod tests {
             citation_sources(&[
                 ("A".into(), "https://example.com".into()),
                 ("A duplicate".into(), "https://example.com".into()),
+            ]),
+            "\n\n来源：\n- [A](<https://example.com>)"
+        );
+        assert_eq!(citation_markdown(" \n", "https://example.com"), "");
+        assert_eq!(
+            citation_sources(&[
+                ("".into(), "https://example.com".into()),
+                ("A".into(), "https://example.com".into()),
             ]),
             "\n\n来源：\n- [A](<https://example.com>)"
         );

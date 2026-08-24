@@ -113,9 +113,8 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
 }
 
 [data-screenpilot-answer-actions="true"] {
-  /* Keep the actions in document flow. A transparent sticky row let the
-     conversation scroll underneath the copy/stop controls, making the last
-     lines look overlapped and obscuring code-block controls. */
+  /* Keep the actions outside the scroll port in document flow. This pins the
+     controls to the panel bottom without covering the last conversation line. */
   position: static;
   order: 0;
   display: flex;
@@ -124,8 +123,7 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   align-items: center;
   justify-content: flex-start;
   margin-top: auto;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding: 8px 14px;
   /* The answer panel owns the frosted shell; this row needs no second frame. */
   background: transparent !important;
   background-color: transparent !important;
@@ -134,6 +132,30 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   box-shadow: none !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+}
+
+/* Match Cherry Studio's frameless message actions: only the buttons fade in.
+   The shell reserves their bottom strip so they never cover message content. */
+[data-screenpilot-message-shell="true"] {
+  position: relative;
+}
+
+[data-screenpilot-message-toolbar="true"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-screenpilot-message-shell="true"]:hover [data-screenpilot-message-toolbar="true"],
+[data-screenpilot-message-shell="true"]:focus-within [data-screenpilot-message-toolbar="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-screenpilot-message-toolbar="true"] {
+    transition: none;
+  }
 }
 
 [data-screenpilot-ready-prompt-panel="true"],

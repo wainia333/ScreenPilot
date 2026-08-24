@@ -43,6 +43,7 @@ type ReferenceSettings = {
 
 type TranslateResult = {
   success: boolean
+  cancelled?: boolean
   translated?: string
   error?: string
 }
@@ -50,6 +51,7 @@ type TranslateResult = {
 type TranslateStreamPayload = {
   imageId?: string
   kind?: 'original' | 'translated'
+  generation?: number
   delta?: string
   done?: boolean
 }
@@ -189,6 +191,7 @@ export default function ReferenceVisionAdapter() {
   // the vendor's initial answer metrics and remains stable during a drag.
   const referenceViewportHeightRef = useRef(initialVisionViewportHeight())
   const sourceRef = useRef({ imageId: '', text: '' })
+  const sourceGenerationRef = useRef(0)
   const requestSequenceRef = useRef(0)
   const sourceLanguageRef = useRef<SourceLanguage>('auto')
   const targetLanguageRef = useRef<TargetLanguage>('auto')
@@ -284,6 +287,7 @@ export default function ReferenceVisionAdapter() {
     loadSettings()
     const resetSession = () => {
       sourceRef.current = { imageId: '', text: '' }
+      sourceGenerationRef.current = 0
       clearOverride()
     }
     const handleVisionReset = () => {
@@ -305,6 +309,12 @@ export default function ReferenceVisionAdapter() {
     let active = true
     void listen<TranslateStreamPayload>('vision-translate-stream', ({ payload }) => {
       if (payload.kind !== 'original' || !payload.delta) return
+      if (payload.generation === undefined) {
+        if (sourceGenerationRef.current > 0) return
+      } else {
+        if (payload.generation < sourceGenerationRef.current) return
+        sourceGenerationRef.current = payload.generation
+      }
       const imageId = payload.imageId ?? ''
       sourceRef.current = {
         imageId,
@@ -663,7 +673,9 @@ export default function ReferenceVisionAdapter() {
         translateVisibleSource(source, value, targetLanguageRef.current),
       ])
       if (sequence !== requestSequenceRef.current || translation === null) return
-      if (translation.success) {
+      if (translation.cancelled) {
+        setOverrideResult({ status: 'idle', text: '' })
+      } else if (translation.success) {
         setOverrideResult({ status: 'ready', text: translation.translated ?? '' })
       } else {
         setOverrideResult({ status: 'error', text: translation.error ?? t.translationFailed })
@@ -694,7 +706,9 @@ export default function ReferenceVisionAdapter() {
         translation,
       ])
       if (sequence !== requestSequenceRef.current || result === null) return
-      if (result.success) {
+      if (result.cancelled) {
+        setOverrideResult({ status: 'idle', text: '' })
+      } else if (result.success) {
         setOverrideResult({ status: 'ready', text: result.translated ?? '' })
       } else {
         setOverrideResult({ status: 'error', text: result.error ?? t.translationFailed })

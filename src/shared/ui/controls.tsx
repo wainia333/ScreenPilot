@@ -15,14 +15,16 @@ export function SettingGroup({ title, titleAction, children }: { title: string; 
 export function SettingRow({
   label,
   description,
+  nested = false,
   children,
 }: {
   label: string
   description?: string
+  nested?: boolean
   children: ReactNode
 }) {
   return (
-    <div className="setting-row">
+    <div className={`setting-row${nested ? ' setting-row--nested' : ''}`}>
       <div className="setting-row__copy">
         <span className="setting-row__label">{label}</span>
         {description === undefined ? null : <span className="setting-row__description">{description}</span>}

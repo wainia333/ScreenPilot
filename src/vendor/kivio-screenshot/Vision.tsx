@@ -1,6 +1,6 @@
 import { createContext, isValidElement, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
-import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X, Sparkles, MessageSquare } from 'lucide-react'
+import { Loader2, Copy, Check, Square, Download, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, Volume2, RefreshCw, Pencil, Save, X, Sparkles, MessageSquare } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, type VisionStreamPayload, type VisionTranslateStreamPayload, type VisionWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
 import {
@@ -25,6 +25,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
+import { buildVisionMarkdown, buildVisionMessageMarkdown, defaultVisionExportFileName } from '../../features/vision/vision-export'
 import {
   shouldPromoteVisionBarLayer,
   shouldReactOwnVisionFloatingResize,
@@ -264,14 +265,14 @@ function isUppercaseAcronymEnd(chars: string[], index: number): boolean {
 
 function shouldAddSpaceAfterEnglishPunctuation(chars: string[], index: number): boolean {
   const ch = chars[index]
-  if (!['.', ',', ';', ':', '?', '!'].includes(ch)) return false
+  if (!ch || !['.', ',', ';', ':', '?', '!'].includes(ch)) return false
 
   const prev = chars[index - 1]
   const prevPrev = chars[index - 2]
   const next = chars[index + 1]
   if (!isAsciiAlphaNumeric(next)) return false
   if (next && /\s/.test(next)) return false
-  if ((ch === '.' || ch === ',' || ch === ':') && /\d/.test(prev || '') && /\d/.test(next)) return false
+  if ((ch === '.' || ch === ',' || ch === ':') && /\d/.test(prev || '') && /\d/.test(next ?? '')) return false
   if (ch === '.' && isAsciiLetter(prev) && isAsciiLetter(next)) {
     const singleLetterAbbrev = !isAsciiLetter(prevPrev) || prevPrev === '.'
     if (singleLetterAbbrev && !(isUppercaseAcronymEnd(chars, index) && !isAsciiUppercase(next))) return false
@@ -413,7 +414,7 @@ function reactNodeToText(node: ReactNode): string {
 
 function MarkdownCodeCopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const timerRef = useRef<number | null>(null)
   const copySequenceRef = useRef(0)
   const lang = useContext(VisionLanguageContext)
   const copyFeedback = useContext(VisionCopyFeedbackContext)
@@ -474,7 +475,7 @@ function MarkdownCodeCopyButton({ text }: { text: string }) {
       aria-label={label}
       data-screenpilot-copy-target="code"
       data-screenpilot-copy-state={copied ? 'copied' : 'idle'}
-      className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
+      className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
     >
       {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.1} />}
     </button>
@@ -517,7 +518,9 @@ function markdownFenceState(value: string): { inFence: boolean; displayMathOpen:
     const leading = line.trimStart()
     const fenceMatch = leading.match(/^(```+|~~~+)/)
     if (fenceMatch) {
-      const mark = fenceMatch[1][0] as '`' | '~'
+      const fenceToken = fenceMatch[1]
+      if (!fenceToken) return
+      const mark = fenceToken[0] as '`' | '~'
       if (!fence) fence = mark
       else if (fence === mark) fence = null
       return
@@ -720,11 +723,218 @@ type Point = { x: number; y: number }
 type Rect = { x: number; y: number; width: number; height: number }
 type BarRect = { x: number; y: number; width: number }
 type CopyTarget = 'answer' | 'original' | 'translated'
+type VisionMessageRole = 'user' | 'assistant'
+type VisionTranslateFailureKind = 'original' | 'translated'
+
+export function resolveVisionTranslateFailureKind(
+  kind: unknown,
+): VisionTranslateFailureKind {
+  if (kind === 'original' || kind === 'translated') return kind
+  // A rejected invoke has no structured command result. It happens before the
+  // frontend can prove OCR completed, so keep that infrastructure failure in
+  // the source pane instead of guessing from React render timing.
+  return 'original'
+}
+
 type Arrow = {
   x1: number
   y1: number
   x2: number
   y2: number
+}
+
+type VisionMessageToolbarProps = {
+  index: number
+  role: VisionMessageRole
+  canMutate: boolean
+  hasText: boolean
+  copied: boolean
+  speaking: boolean
+  speechLoading: boolean
+  speechError: boolean
+  labels: {
+    speak: string
+    stop: string
+    retrySpeak: string
+    regenerate: string
+    edit: string
+    copy: string
+    copied: string
+  }
+  onSpeak: () => void
+  onRegenerate: () => void
+  onEdit: () => void
+  onCopy: () => void
+}
+
+const VISION_MESSAGE_ACTION_BUTTON_CLASS = 'inline-flex h-[26px] w-[26px] items-center justify-center rounded-md border-0 bg-transparent p-1 text-neutral-500 transition-all duration-150 ease-out enabled:cursor-pointer enabled:hover:bg-black/[0.06] enabled:hover:text-neutral-800 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-400 dark:enabled:hover:bg-white/[0.1] dark:enabled:hover:text-neutral-100'
+
+function VisionMessageToolbar({
+  index,
+  role,
+  canMutate,
+  hasText,
+  copied,
+  speaking,
+  speechLoading,
+  speechError,
+  labels,
+  onSpeak,
+  onRegenerate,
+  onEdit,
+  onCopy,
+}: VisionMessageToolbarProps) {
+  const speechActive = speaking || speechLoading
+  const speechLabel = speechActive ? labels.stop : speechError ? labels.retrySpeak : labels.speak
+  return (
+    <div
+      data-screenpilot-message-toolbar="true"
+      data-screenpilot-message-index={index}
+      data-screenpilot-message-role={role}
+      className={`absolute z-10 inline-flex items-center justify-end gap-1.5 bg-transparent ${role === 'user' ? 'right-0 bottom-px' : 'left-0 bottom-0'}`}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        onClick={onSpeak}
+        disabled={!hasText}
+        title={speechLabel}
+        aria-label={speechLabel}
+        data-screenpilot-message-action="speak"
+        className={VISION_MESSAGE_ACTION_BUTTON_CLASS}
+      >
+        {speechActive ? <Square size={13} fill="currentColor" /> : <Volume2 size={13} />}
+      </button>
+      <button
+        type="button"
+        onClick={onRegenerate}
+        disabled={!canMutate || !hasText}
+        title={labels.regenerate}
+        aria-label={labels.regenerate}
+        data-screenpilot-message-action="regenerate"
+        className={VISION_MESSAGE_ACTION_BUTTON_CLASS}
+      >
+        <RefreshCw size={13} />
+      </button>
+      {role === 'user' ? (
+        <button
+          type="button"
+          onClick={onEdit}
+          disabled={!canMutate || !hasText}
+          title={labels.edit}
+          aria-label={labels.edit}
+          data-screenpilot-message-action="edit"
+          className={VISION_MESSAGE_ACTION_BUTTON_CLASS}
+        >
+          <Pencil size={13} />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        onClick={onCopy}
+        disabled={!hasText}
+        title={copied ? labels.copied : labels.copy}
+        aria-label={copied ? labels.copied : labels.copy}
+        data-screenpilot-message-action="copy"
+        className={VISION_MESSAGE_ACTION_BUTTON_CLASS}
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+    </div>
+  )
+}
+
+type VisionMessageEditorProps = {
+  role: VisionMessageRole
+  value: string
+  labels: {
+    regenerate: string
+    save: string
+    cancel: string
+  }
+  onChange: (value: string) => void
+  onSave: () => void
+  onCancel: () => void
+  onRegenerate?: () => void
+}
+
+function VisionMessageEditor({
+  role,
+  value,
+  labels,
+  onChange,
+  onSave,
+  onCancel,
+  onRegenerate,
+}: VisionMessageEditorProps) {
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    editor.focus({ preventScroll: true })
+    editor.setSelectionRange(editor.value.length, editor.value.length)
+  }, [])
+
+  return (
+    <div
+      data-screenpilot-message-editor="true"
+      className="w-full rounded-xl border border-black/[0.1] bg-white/90 p-2 shadow-sm dark:border-white/[0.12] dark:bg-neutral-900/90"
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      <textarea
+        ref={editorRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
+            onCancel()
+          } else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            event.preventDefault()
+            onSave()
+          }
+        }}
+        data-screenpilot-message-editor-input="true"
+        className="min-h-[76px] w-full resize-y rounded-lg border border-black/[0.08] bg-transparent px-2.5 py-2 text-[13px] leading-6 text-neutral-800 outline-none focus:border-[#D97757]/60 dark:border-white/[0.1] dark:text-neutral-100"
+      />
+      <div className="mt-2 flex items-center justify-end gap-1.5">
+        {role === 'user' && onRegenerate ? (
+          <button
+            type="button"
+            onClick={onRegenerate}
+            disabled={!value.trim()}
+            data-screenpilot-message-editor-action="regenerate"
+            className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] text-neutral-600 transition-colors hover:bg-black/[0.06] hover:text-neutral-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+          >
+            <RefreshCw size={12} />
+            {labels.regenerate}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={!value.trim()}
+          data-screenpilot-message-editor-action="save"
+          className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] text-neutral-600 transition-colors hover:bg-black/[0.06] hover:text-neutral-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+        >
+          <Save size={12} />
+          {labels.save}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          data-screenpilot-message-editor-action="cancel"
+          className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-[11px] text-neutral-600 transition-colors hover:bg-black/[0.06] hover:text-neutral-900 dark:text-neutral-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+        >
+          <X size={12} />
+          {labels.cancel}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 const ARROW_COLOR = '#ff3b30'
@@ -807,11 +1017,12 @@ function inflateRect(rect: Rect, amount: number): Rect {
 }
 
 function unionRects(rects: Rect[]): Rect | null {
-  if (rects.length === 0) return null
-  let left = rects[0].x
-  let top = rects[0].y
-  let right = rects[0].x + rects[0].width
-  let bottom = rects[0].y + rects[0].height
+  const first = rects[0]
+  if (!first) return null
+  let left = first.x
+  let top = first.y
+  let right = first.x + first.width
+  let bottom = first.y + first.height
   for (const rect of rects.slice(1)) {
     left = Math.min(left, rect.x)
     top = Math.min(top, rect.y)
@@ -853,7 +1064,7 @@ function scrollChatToLiveEdge(el: HTMLDivElement, order: 'asc' | 'desc') {
 function stripMarkdownFence(value: string): string {
   const trimmed = value.trim()
   const match = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/)
-  return match ? match[1].trim() : trimmed
+  return match?.[1]?.trim() ?? trimmed
 }
 
 function extractOptimizedPromptForInput(value: string): string {
@@ -867,7 +1078,7 @@ function extractOptimizedPromptForInput(value: string): string {
   })
   if (start < 0) return stripMarkdownFence(text)
 
-  const inline = lines[start]
+  const inline = (lines[start] ?? '')
     .trim()
     .replace(/^#{1,6}\s*/, '')
     .replace(/^(优化后的提示词|Optimized Prompt)\s*[:：]?\s*/i, '')
@@ -1249,10 +1460,19 @@ export default function Vision() {
   const [promptPreviewCardHeight, setPromptPreviewCardHeight] = useState<number | null>(null)
   const [copiedTarget, setCopiedTarget] = useState<CopyTarget | null>(null)
   const [copyErrorAnnouncement, setCopyErrorAnnouncement] = useState('')
+  const [exportingConversation, setExportingConversation] = useState(false)
+  const [exportedConversation, setExportedConversation] = useState(false)
+  const [exportErrorAnnouncement, setExportErrorAnnouncement] = useState('')
   const [speechLoadingTarget, setSpeechLoadingTarget] = useState<SpeechTarget | null>(null)
   const [speakingTarget, setSpeakingTarget] = useState<SpeechTarget | null>(null)
   const [speechErrorTarget, setSpeechErrorTarget] = useState<SpeechTarget | null>(null)
   const [speechErrorAnnouncement, setSpeechErrorAnnouncement] = useState('')
+  const [messageSpeechLoadingIndex, setMessageSpeechLoadingIndex] = useState<number | null>(null)
+  const [messageSpeakingIndex, setMessageSpeakingIndex] = useState<number | null>(null)
+  const [messageSpeechErrorIndex, setMessageSpeechErrorIndex] = useState<number | null>(null)
+  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null)
+  const [editingMessageDraft, setEditingMessageDraft] = useState('')
+  const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
   const [lang, setLang] = useState<Lang>('zh')
   const [activeVisionModel, setActiveVisionModel] = useState('AI')
   const [messageOrder, setMessageOrder] = useState<'asc' | 'desc'>('asc')
@@ -1280,9 +1500,10 @@ export default function Vision() {
   const translateStartRef = useRef<number | null>(null)
   const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const translateEditSeqRef = useRef(0)
+  const translateRequestSeqRef = useRef(0)
+  const activeTranslateRequestIdRef = useRef('')
   const translateOriginalEditedRef = useRef(false)
   const ignoreTranslateStreamRef = useRef(false)
-  const showTranslateOriginalRef = useRef(true)
   const translateOriginalRef = useRef('')
   const translateTextRef = useRef('')
   const [viewport, setViewport] = useState(() => ({
@@ -1360,21 +1581,36 @@ export default function Vision() {
   // 纯文字会话的会话 id。多轮对话要落到同一条历史上，所以第一次入库时生成、
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
-  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const copyErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyTimeoutRef = useRef<number | null>(null)
+  const copyErrorTimeoutRef = useRef<number | null>(null)
   const copySequenceRef = useRef(0)
   const copiedTextRef = useRef<{ target: CopyTarget; text: string } | null>(null)
+  const messageCopySequenceRef = useRef(0)
   const messagesRef = useRef<ExplainMessage[]>([])
-  const captureWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const imagePreviewRef = useRef('')
+  const appLabelRef = useRef('')
+  const langRef = useRef<Lang>('zh')
+  const exportTimeoutRef = useRef<number | null>(null)
+  const messageCopyTimeoutRef = useRef<number | null>(null)
+  const captureWarningTimeoutRef = useRef<number | null>(null)
   const historyPersistenceRef = useRef<Set<Promise<void>>>(new Set())
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const speechSeqRef = useRef(0)
   const nativeFlySeqRef = useRef(0)
-  const barFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const jellyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Keep the fullscreen coordinate space that produced the normal text-query
+  // landing slot. History can also be opened from an already-floating panel;
+  // in that case its target must remain the same absolute screen position
+  // instead of being recomputed inside the small WebView viewport.
+  const topSlotSurfaceRef = useRef<{
+    origin: Point
+    viewport: { w: number; h: number }
+    metrics: Metrics
+  } | null>(null)
+  const barFlightTimerRef = useRef<number | null>(null)
+  const jellyTimerRef = useRef<number | null>(null)
   const focusReqIdRef = useRef(0)
   const prevStreamingRef = useRef(false)
-  const visionStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const visionStreamFlushTimerRef = useRef<number | null>(null)
   const visionStreamBufferRef = useRef({ content: '', reasoning: '' })
   const visionStreamListenerReadyRef = useRef(false)
   const translateStreamListenerReadyRef = useRef(false)
@@ -1382,11 +1618,16 @@ export default function Vision() {
   const retryTranslateStreamListenerRef = useRef<() => Promise<boolean>>(async () => false)
   const visionStreamEnabledRef = useRef(true)
   const closePendingRef = useRef(false)
+  // A native close can wait behind an in-progress window flight. Restore
+  // callers await this result before revealing content, so a successful close
+  // never flashes the answer at the landing point while a failed close can
+  // still preserve and resume the live session.
+  const closeAttemptPromiseRef = useRef<Promise<boolean> | null>(null)
   const preparingSendRef = useRef(false)
   const visionRequestLifecycleRef = useRef(new VisionRequestLifecycle())
   const visionTerminalErrorRef = useRef<{ requestId: string; error: string; incompleteReason?: string } | null>(null)
   const closingStreamRef = useRef(false)
-  const closeResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const closeResetTimerRef = useRef<number | null>(null)
   const chatAutoFollowRef = useRef(true)
   const promptOptimizeSeqRef = useRef(0)
   // Stream 真实结束（成功 / 错误 / 用户主动取消）后才置 true，
@@ -1418,10 +1659,12 @@ export default function Vision() {
   stageRef.current = stage
   modeRef.current = mode
   historyOpenRef.current = historyOpen
-  showTranslateOriginalRef.current = showTranslateOriginal
   translateOriginalRef.current = translateOriginal
   translateTextRef.current = translateText
   messagesRef.current = messages
+  imagePreviewRef.current = imagePreview
+  appLabelRef.current = appLabel
+  langRef.current = lang
 
   const ensureVisionStreamListener = useCallback(async () => {
     if (!visionStreamEnabledRef.current || visionStreamListenerReadyRef.current) return true
@@ -1475,16 +1718,19 @@ export default function Vision() {
     reportFailure: reportCopyFailure,
   }), [beginCopyOperation, clearCopyFailure, copyOperationIsCurrent, reportCopyFailure])
 
-  const latestAssistantText = useMemo(() => (
-    [...messages].reverse().find(message => message.role === 'assistant' && message.content)?.content ?? ''
-  ), [messages])
+  const conversationMarkdown = useMemo(() => buildVisionMarkdown({
+    messages,
+    imageDataUrl: imagePreview,
+    appLabel,
+    language: lang,
+  }), [appLabel, imagePreview, lang, messages])
   useEffect(() => {
     if (
       copiedTarget !== 'answer'
       || copiedTextRef.current?.target !== 'answer'
     ) return
-    if (copiedTextRef.current.text !== latestAssistantText) beginCopyOperation()
-  }, [beginCopyOperation, copiedTarget, latestAssistantText])
+    if (copiedTextRef.current.text !== conversationMarkdown) beginCopyOperation()
+  }, [beginCopyOperation, conversationMarkdown, copiedTarget])
   useEffect(() => {
     if (
       copiedTarget !== 'original'
@@ -1584,6 +1830,9 @@ export default function Vision() {
     setSpeakingTarget(null)
     setSpeechErrorTarget(null)
     setSpeechErrorAnnouncement('')
+    setMessageSpeechLoadingIndex(null)
+    setMessageSpeakingIndex(null)
+    setMessageSpeechErrorIndex(null)
   }, [])
 
   const setVisionCursorPassthrough = useCallback((ignore: boolean) => {
@@ -1616,7 +1865,9 @@ export default function Vision() {
           {
             ...last,
             content: last.content + pending.content,
-            reasoning: pending.reasoning ? (last.reasoning ?? '') + pending.reasoning : last.reasoning,
+            ...(pending.reasoning
+              ? { reasoning: (last.reasoning ?? '') + pending.reasoning }
+              : {}),
           },
         ]
       })
@@ -1777,10 +2028,18 @@ export default function Vision() {
       copyErrorTimeoutRef.current = null
     }
     copySequenceRef.current += 1
+    messageCopySequenceRef.current += 1
+    if (messageCopyTimeoutRef.current) {
+      clearTimeout(messageCopyTimeoutRef.current)
+      messageCopyTimeoutRef.current = null
+    }
     translateEditSeqRef.current++
+    translateRequestSeqRef.current++
+    activeTranslateRequestIdRef.current = ''
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
+    topSlotSurfaceRef.current = null
     chatAutoFollowRef.current = true
     resetVisionStreamBuffer()
     justFinishedStreamRef.current = false
@@ -1823,6 +2082,9 @@ export default function Vision() {
       setMessages([])
       setStreaming(false)
       setCopiedTarget(null)
+      setCopiedMessageIndex(null)
+      setEditingMessageIndex(null)
+      setEditingMessageDraft('')
       setCopyErrorAnnouncement('')
       setCloseFailed(false)
       setTranslateOriginal('')
@@ -1901,6 +2163,12 @@ export default function Vision() {
       if (!surfaceIsCurrent()) return
       const sf = scale || 1
       currentOrigin = { x: pos.x / sf, y: pos.y / sf }
+      const fullscreenViewport = { w: window.innerWidth, h: window.innerHeight }
+      topSlotSurfaceRef.current = {
+        origin: currentOrigin,
+        viewport: fullscreenViewport,
+        metrics: computeMetrics(fullscreenViewport.w, fullscreenViewport.h),
+      }
       setWinOrigin(currentOrigin)
     } catch (err) {
       if (!surfaceIsCurrent()) return
@@ -2169,7 +2437,7 @@ export default function Vision() {
           visionTerminalErrorRef.current = {
             requestId: payload.requestId,
             error: payload.error,
-            incompleteReason: payload.incompleteReason,
+            ...(payload.incompleteReason ? { incompleteReason: payload.incompleteReason } : {}),
           }
           if (!payload.delta?.includes(payload.error)) {
             const reason = payload.incompleteReason ? ` (${payload.incompleteReason})` : ''
@@ -2289,10 +2557,18 @@ export default function Vision() {
       copyErrorTimeoutRef.current = null
     }
     copySequenceRef.current += 1
+    messageCopySequenceRef.current += 1
+    if (messageCopyTimeoutRef.current) {
+      clearTimeout(messageCopyTimeoutRef.current)
+      messageCopyTimeoutRef.current = null
+    }
     translateEditSeqRef.current++
+    translateRequestSeqRef.current++
+    activeTranslateRequestIdRef.current = ''
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
+    topSlotSurfaceRef.current = null
     resetVisionStreamBuffer()
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
     justFinishedStreamRef.current = false
@@ -2327,6 +2603,9 @@ export default function Vision() {
       setMessages([])
       setStreaming(false)
       setCopiedTarget(null)
+      setCopiedMessageIndex(null)
+      setEditingMessageIndex(null)
+      setEditingMessageDraft('')
       setCopyErrorAnnouncement('')
       setCloseFailed(false)
       setTranslateOriginal('')
@@ -2357,7 +2636,13 @@ export default function Vision() {
 
   const closeLikeEscape = useCallback(async () => {
     if (closePendingRef.current) return
+    let settleCloseAttempt: (closed: boolean) => void = () => undefined
+    const closeAttempt = new Promise<boolean>((resolve) => {
+      settleCloseAttempt = resolve
+    })
+    closeAttemptPromiseRef.current = closeAttempt
     closePendingRef.current = true
+    let closed = false
     setCloseFailed(false)
     setVisionCursorPassthrough(false)
     try {
@@ -2372,6 +2657,7 @@ export default function Vision() {
         await Promise.allSettled([...historyPersistenceRef.current])
       }
       await api.visionClose()
+      closed = true
       invalidateVisionSurface()
       invalidateVisionRequest()
       setVisionCursorPassthrough(false)
@@ -2382,12 +2668,17 @@ export default function Vision() {
       console.error('[vision-close] failed:', err)
     } finally {
       closePendingRef.current = false
+      settleCloseAttempt(closed)
+      if (closeAttemptPromiseRef.current === closeAttempt) {
+        closeAttemptPromiseRef.current = null
+      }
     }
   }, [clearVisionStreamFlushTimer, flushVisionStreamBuffer, invalidateVisionRequest, invalidateVisionSurface, resetAfterClose, setVisionCursorPassthrough, streaming])
 
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (e.defaultPrevented) return
       if (stageRef.current === 'select' && keyboardSelectionMode !== null) {
         e.preventDefault()
         e.stopPropagation()
@@ -2782,13 +3073,25 @@ export default function Vision() {
     }
   }
 
-  const runTranslate = useCallback(async (id: string) => {
-    if (!await ensureTranslateStreamListener()) {
-      translateStartRef.current = null
-      setTranslateRetranslating(false)
-      setTranslateError(i18n[lang].visionStreamListenerFailed)
-      setStage('translated')
+  const reportTranslateFailure = useCallback((message: string, kind?: unknown) => {
+    const failureKind = resolveVisionTranslateFailureKind(kind)
+
+    if (failureKind === 'translated') {
+      setTranslateError(message)
+      setTranslateOriginalError('')
       return
+    }
+
+    setTranslateOriginalError(message)
+    setTranslateError('')
+  }, [])
+
+  const runTranslate = useCallback(async (id: string) => {
+    const requestId = `translate-${String(++translateRequestSeqRef.current)}`
+    activeTranslateRequestIdRef.current = requestId
+    if (!await ensureTranslateStreamListener()) {
+      if (activeTranslateRequestIdRef.current !== requestId) return
+      console.warn('[vision-translate] stream listener unavailable; using command result fallback')
     }
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
@@ -2807,41 +3110,54 @@ export default function Vision() {
     setTranslateNow(Date.now())
     setStage('translating')
     try {
-      const r = await api.visionTranslate(id)
+      const r = await api.visionTranslate(id, requestId)
+      if (activeTranslateRequestIdRef.current !== requestId) return
+      if (r.requestId && r.requestId !== requestId) return
+      // The command response contains the complete OCR/translation snapshot.
+      // Fence any event that was emitted earlier but delivered after this IPC
+      // response, otherwise its delta would be appended a second time.
+      activeTranslateRequestIdRef.current = ''
+      if (r.cancelled) {
+        translateStartRef.current = null
+        setTranslateRetranslating(false)
+        setStage('translated')
+        return
+      }
+      if (r.original !== undefined) {
+        setTranslateOriginal(normalizeEnglishPunctuationSpacing(r.original))
+        setTranslateOriginalError('')
+      }
       if (!r.success) {
         const message = r.error || 'Failed'
-        if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
-          setTranslateError(message)
-        } else {
-          setTranslateOriginalError(message)
-        }
-        if (translateStartRef.current !== null) {
-          setTranslateDurationMs(Date.now() - translateStartRef.current)
-          translateStartRef.current = null
-        }
-        setStage('translated')
+        reportTranslateFailure(message, r.kind)
+      } else if (r.translated !== undefined) {
+        setTranslateText(normalizeEnglishPunctuationSpacing(r.translated))
+        setTranslateError('')
       }
+      if (translateStartRef.current !== null) {
+        setTranslateDurationMs(Date.now() - translateStartRef.current)
+        translateStartRef.current = null
+      }
+      setTranslateRetranslating(false)
+      setStage('translated')
     } catch (err) {
+      if (activeTranslateRequestIdRef.current !== requestId) return
       const message = err instanceof Error ? err.message : String(err)
-      if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
-        setTranslateError(message)
-      } else {
-        setTranslateOriginalError(message)
-      }
+      reportTranslateFailure(message)
       if (translateStartRef.current !== null) {
         setTranslateDurationMs(Date.now() - translateStartRef.current)
         translateStartRef.current = null
       }
       setStage('translated')
     }
-  }, [ensureTranslateStreamListener, lang])
+  }, [ensureTranslateStreamListener, reportTranslateFailure])
 
   const handleTranslateOriginalChange = useCallback((value: string) => {
     const normalizedValue = normalizeEnglishPunctuationSpacing(value)
     if (normalizedValue === translateOriginal) return
-    if (!ignoreTranslateStreamRef.current) {
-      void api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
-    }
+    void api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
+    translateRequestSeqRef.current++
+    activeTranslateRequestIdRef.current = ''
     ignoreTranslateStreamRef.current = true
     translateOriginalEditedRef.current = true
     translateEditSeqRef.current++
@@ -2895,7 +3211,9 @@ export default function Vision() {
         try {
           const result = await api.visionTranslateText(source)
           if (seq === translateEditSeqRef.current) {
-            if (result.success) {
+            if (result.cancelled) {
+              setTranslateError('')
+            } else if (result.success) {
               setTranslateError('')
               setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
             } else {
@@ -2943,6 +3261,8 @@ export default function Vision() {
       translateEditDebounceRef.current = null
     }
     const seq = ++translateEditSeqRef.current
+    translateRequestSeqRef.current++
+    activeTranslateRequestIdRef.current = ''
     translateOriginalEditedRef.current = true
     ignoreTranslateStreamRef.current = true
     void api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
@@ -2968,7 +3288,9 @@ export default function Vision() {
     try {
       const result = await api.visionTranslateText(source)
       if (seq === translateEditSeqRef.current) {
-        if (result.success) {
+        if (result.cancelled) {
+          setTranslateError('')
+        } else if (result.success) {
           setTranslateError('')
           setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
         } else {
@@ -3000,6 +3322,8 @@ export default function Vision() {
     stopSpeechPlayback()
     setOcrMethodSwitching(true)
     try {
+      translateRequestSeqRef.current++
+      activeTranslateRequestIdRef.current = ''
       await api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
       ignoreTranslateStreamRef.current = true
       const settings = await saveScreenshotTranslationSettings({
@@ -3023,8 +3347,8 @@ export default function Vision() {
       setTranslateRetranslating(false)
 
       const configError = ocrConfigError(settings, method, lang)
-      setTranslateOriginalError(showTranslateOriginalRef.current ? configError : '')
-      if (!showTranslateOriginalRef.current) setTranslateError(configError)
+      setTranslateOriginalError(configError)
+      setTranslateError('')
       if (configError) {
         setStage('translated')
         return
@@ -3033,20 +3357,16 @@ export default function Vision() {
       const imageId = imageIdRef.current
       if (!imageId) {
         const message = lang === 'zh' ? '请先截图后再切换 OCR 接口。' : 'Capture a screenshot before switching OCR providers.'
-        if (showTranslateOriginalRef.current) setTranslateOriginalError(message)
-        else setTranslateError(message)
+        setTranslateOriginalError(message)
+        setTranslateError('')
         setStage('translated')
         return
       }
       await runTranslate(imageId)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      if (showTranslateOriginalRef.current) {
-        setTranslateOriginalError(message)
-        setTranslateError('')
-      } else {
-        setTranslateError(message)
-      }
+      setTranslateOriginalError(message)
+      setTranslateError('')
       setTranslateText('')
       setTranslateRetranslating(false)
       translateStartRef.current = null
@@ -3075,6 +3395,8 @@ export default function Vision() {
     setTranslationMethodSwitching(true)
     let settings: Settings
     try {
+      translateRequestSeqRef.current++
+      activeTranslateRequestIdRef.current = ''
       await api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
       ignoreTranslateStreamRef.current = true
       settings = await saveScreenshotTranslationSettings({ translationMethod: method })
@@ -3138,14 +3460,11 @@ export default function Vision() {
       if (pending) return pending
       pending = api.onVisionTranslateStream((payload: VisionTranslateStreamPayload) => {
       if (payload.imageId !== imageIdRef.current) return
+      if (payload.requestId !== activeTranslateRequestIdRef.current) return
       if (ignoreTranslateStreamRef.current) return
       if (payload.done) {
         if (payload.error) {
-          if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
-            setTranslateError(payload.error)
-          } else {
-            setTranslateOriginalError(payload.error)
-          }
+          reportTranslateFailure(payload.error, payload.kind)
         }
         if (translateStartRef.current !== null) {
           setTranslateDurationMs(Date.now() - translateStartRef.current)
@@ -3159,6 +3478,7 @@ export default function Vision() {
         setTranslateOriginalError('')
         setTranslateOriginal(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       } else if (payload.kind === 'translated') {
+        setTranslateError('')
         setTranslateText(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       }
       }).then((dispose) => {
@@ -3192,7 +3512,7 @@ export default function Vision() {
       }
       unlisten?.()
     }
-  }, [])
+  }, [reportTranslateFailure])
 
   useEffect(() => {
     if (stage !== 'translating') return
@@ -3393,6 +3713,7 @@ export default function Vision() {
         return
       }
       const next = windows[index]
+      if (!next) return
       setKeyboardSelectionMode('window')
       setKeyboardRegion(null)
       setHovered(next)
@@ -3497,18 +3818,34 @@ export default function Vision() {
     const contentHeight = READY_BAR_H
     const width = contentWidth + FLOATING_PADDING * 2
     const height = contentHeight + FLOATING_PADDING * 2
-    const slot = computeTopSlot(viewport.w, viewport.h, contentWidth)
+    const currentSurface = {
+      origin: winOrigin,
+      viewport,
+      metrics,
+    }
+    const startsFromFullscreen = stageRef.current === 'select' || !floatingRebased
+    const topSlotSurface = startsFromFullscreen
+      ? currentSurface
+      : topSlotSurfaceRef.current || currentSurface
+    if (startsFromFullscreen || topSlotSurfaceRef.current === null) {
+      topSlotSurfaceRef.current = currentSurface
+    }
+    const slot = computeTopSlot(
+      topSlotSurface.viewport.w,
+      topSlotSurface.viewport.h,
+      contentWidth,
+    )
     const fromOrigin = {
       x: Math.round(winOrigin.x + barRect.x - FLOATING_PADDING),
       y: Math.round(winOrigin.y + barRect.y - FLOATING_PADDING),
     }
     const targetOrigin = {
-      x: Math.round(winOrigin.x + slot.x - FLOATING_PADDING),
-      y: Math.round(winOrigin.y + slot.y - FLOATING_PADDING),
+      x: Math.round(topSlotSurface.origin.x + slot.x - FLOATING_PADDING),
+      y: Math.round(topSlotSurface.origin.y + slot.y - FLOATING_PADDING),
     }
     const flySeq = ++nativeFlySeqRef.current
 
-    fullscreenMetricsRef.current = metrics
+    fullscreenMetricsRef.current = topSlotSurface.metrics
     flushSync(() => {
       // 必须在这一次提交里就离开 select 态。
       // 否则「select 时按 viewport 重算选区条」那个 effect 会在下面
@@ -3530,6 +3867,7 @@ export default function Vision() {
       setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
     })
 
+    let compactWindowApplied = false
     try {
       if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
       await api.visionSetHitRegion(null)
@@ -3542,6 +3880,7 @@ export default function Vision() {
         hasScreenshot,
       }, () => flySeq === nativeFlySeqRef.current && requestIsCurrent())
       if (!applied || flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
+      compactWindowApplied = true
       flushSync(() => {
         setFloatingRebased(true)
         setWinOrigin(fromOrigin)
@@ -3581,6 +3920,32 @@ export default function Vision() {
     } catch (err) {
       if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
       console.error('[vision-floating] fly to top slot failed:', err)
+      const nativeWindowIsFloating = compactWindowApplied || !startsFromFullscreen
+      if (nativeWindowIsFloating) {
+        let recoveredOrigin = fromOrigin
+        try {
+          const [position, scale] = await Promise.all([
+            getCurrentWindow().innerPosition(),
+            getCurrentWindow().scaleFactor(),
+          ])
+          const factor = scale || 1
+          recoveredOrigin = { x: position.x / factor, y: position.y / factor }
+        } catch (originError) {
+          console.error('[vision-floating] failed flight origin recovery failed:', originError)
+        }
+        if (flySeq !== nativeFlySeqRef.current || !requestIsCurrent()) return false
+        flushSync(() => {
+          setFloatingRebased(true)
+          setWinOrigin(recoveredOrigin)
+          setViewport({ w: width, h: height })
+          setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
+          setBarRebaseHidden(false)
+          setBarNoTransition(false)
+          setJellyActive(false)
+          floatingSizeRef.current = { width, height, hasScreenshot }
+        })
+        return false
+      }
       flushSync(() => {
         setFloatingRebased(false)
         setBarRebaseHidden(false)
@@ -3589,7 +3954,7 @@ export default function Vision() {
       })
       return false
     }
-  }, [barRect, metrics, startLandingJelly, viewport, winOrigin])
+  }, [barRect, floatingRebased, metrics, startLandingJelly, viewport, winOrigin])
 
   const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[], requestId: string) => {
     // 先只把输入条飞上去（此时还是单条高度），落地后再置 answering，
@@ -3664,64 +4029,15 @@ export default function Vision() {
     inputRef.current?.focus({ preventScroll: true })
   }, [cancelPromptOptimization])
 
-  const handleSend = async () => {
-    if (streaming) return
-    const question = input.trim()
-    const allowBlankImageAnalysis = (
-      !question
-      && mode === 'chat'
-      && stageRef.current === 'ready'
-      && messages.length === 0
-      && !!imageIdRef.current
-    )
-    if (!question && !allowBlankImageAnalysis) return
-    if (!await ensureVisionStreamListener()) return
-    const requestId = visionRequestLifecycleRef.current.begin()
-    visionTerminalErrorRef.current = null
-    const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
-    setHistoryOpen(false)
-    // 发送即视为放弃这次优化建议：预览卡和答案面板都挂在悬浮条正下方，
-    // 不收掉会直接叠在一起。
-    cancelPromptOptimization()
-    setInput('')
-
-    // 先进入 sending UI，再做合成/注册，避免这段异步窗口被 Esc 关闭掉。
-    const isFirstTurn = messages.length === 0
-    const ctx = (isFirstTurn && mode === 'chat') ? selectionText.trim() : ''
-    const userContent = ctx
-      ? (lang === 'zh'
-          ? `[已选文本]\n${ctx}\n\n[用户问题]\n${effectiveQuestion}`
-          : `[Selected Text]\n${ctx}\n\n[Question]\n${effectiveQuestion}`)
-      : effectiveQuestion
-    const userMsg: ExplainMessage = { role: 'user', content: userContent }
-    const placeholder: ExplainMessage = { role: 'assistant', content: '' }
-    const sendMessages: ExplainMessage[] = [...messages, userMsg]
-    const nextMessages = [...sendMessages, placeholder]
-    chatAutoFollowRef.current = true
-    resetVisionStreamBuffer()
-    preparingSendRef.current = true
-    const textOnlyFloating = (
-      mode === 'chat'
-      && !imageIdRef.current
-      && !capturedFrame
-      && !floatingRebased
-    )
-    if (textOnlyFloating) {
-      await enterTextOnlyFloatingAnswer(nextMessages, requestId)
-      if (!isVisionRequestCurrent(requestId)) return
-    } else {
-      flushSync(() => {
-        setMessages(nextMessages)
-        setStage('answering')
-        setStreaming(true)
-      })
-    }
-
-    // 默认沿用当前 image_id;若有箭头则先合成 + 注册新图,把后续 ask 切到合成版
+  const executeVisionRequest = async (
+    sendMessages: ExplainMessage[],
+    requestId: string,
+    composeArrowImage: boolean,
+  ) => {
     try {
       if (!isVisionRequestCurrent(requestId)) return
       let effectiveImageId = imageIdRef.current
-      if (arrows.length > 0 && imagePreview && capturedFrame) {
+      if (composeArrowImage && arrows.length > 0 && imagePreview && capturedFrame) {
         try {
           const base64 = await composeAnnotatedImage(
             imagePreview,
@@ -3810,6 +4126,62 @@ export default function Vision() {
     }
   }
 
+  const handleSend = async () => {
+    if (streaming) return
+    const question = input.trim()
+    const allowBlankImageAnalysis = (
+      !question
+      && mode === 'chat'
+      && stageRef.current === 'ready'
+      && messages.length === 0
+      && !!imageIdRef.current
+    )
+    if (!question && !allowBlankImageAnalysis) return
+    if (!await ensureVisionStreamListener()) return
+    const requestId = visionRequestLifecycleRef.current.begin()
+    visionTerminalErrorRef.current = null
+    const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
+    setHistoryOpen(false)
+    // 发送即视为放弃这次优化建议：预览卡和答案面板都挂在悬浮条正下方，
+    // 不收掉会直接叠在一起。
+    cancelPromptOptimization()
+    setInput('')
+
+    // 先进入 sending UI，再做合成/注册，避免这段异步窗口被 Esc 关闭掉。
+    const isFirstTurn = messages.length === 0
+    const ctx = (isFirstTurn && mode === 'chat') ? selectionText.trim() : ''
+    const userContent = ctx
+      ? (lang === 'zh'
+          ? `[已选文本]\n${ctx}\n\n[用户问题]\n${effectiveQuestion}`
+          : `[Selected Text]\n${ctx}\n\n[Question]\n${effectiveQuestion}`)
+      : effectiveQuestion
+    const userMsg: ExplainMessage = { role: 'user', content: userContent }
+    const placeholder: ExplainMessage = { role: 'assistant', content: '' }
+    const sendMessages: ExplainMessage[] = [...messages, userMsg]
+    const nextMessages = [...sendMessages, placeholder]
+    chatAutoFollowRef.current = true
+    resetVisionStreamBuffer()
+    preparingSendRef.current = true
+    const textOnlyFloating = (
+      mode === 'chat'
+      && !imageIdRef.current
+      && !capturedFrame
+      && !floatingRebased
+    )
+    if (textOnlyFloating) {
+      await enterTextOnlyFloatingAnswer(nextMessages, requestId)
+      if (!isVisionRequestCurrent(requestId)) return
+    } else {
+      flushSync(() => {
+        setMessages(nextMessages)
+        setStage('answering')
+        setStreaming(true)
+      })
+    }
+
+    await executeVisionRequest(sendMessages, requestId, true)
+  }
+
   const handleStop = async () => {
     const stopSequence = invalidateVisionRequest()
     try { await api.visionCancelStream() } catch (err) { console.error(err) }
@@ -3821,13 +4193,132 @@ export default function Vision() {
     setStreaming(false)
   }
 
+  const restartVisionFromMessage = async (
+    messageIndex: number,
+    editedUserContent?: string,
+  ) => {
+    if (streaming) return
+    const currentMessages = messagesRef.current
+    const target = currentMessages[messageIndex]
+    if (!target) return
+
+    let userIndex = messageIndex
+    if (target.role === 'assistant') {
+      userIndex = -1
+      for (let index = messageIndex - 1; index >= 0; index -= 1) {
+        if (currentMessages[index]?.role === 'user') {
+          userIndex = index
+          break
+        }
+      }
+      if (userIndex < 0) return
+    }
+
+    const originalUser = currentMessages[userIndex]
+    if (!originalUser || originalUser.role !== 'user') return
+    const userContent = editedUserContent === undefined ? originalUser.content : editedUserContent.trim()
+    if (!userContent) return
+    if (!await ensureVisionStreamListener()) return
+
+    stopSpeechPlayback()
+    messageCopySequenceRef.current += 1
+    if (messageCopyTimeoutRef.current) {
+      clearTimeout(messageCopyTimeoutRef.current)
+      messageCopyTimeoutRef.current = null
+    }
+    setCopiedMessageIndex(null)
+    cancelPromptOptimization()
+    setHistoryOpen(false)
+    setEditingMessageIndex(null)
+    setEditingMessageDraft('')
+    setInput('')
+    setArrows([])
+    setDraftArrow(null)
+    setDrawMode(false)
+    justFinishedStreamRef.current = false
+    const requestId = visionRequestLifecycleRef.current.begin()
+    visionTerminalErrorRef.current = null
+    const prefix = currentMessages.slice(0, userIndex)
+    const userMessage: ExplainMessage = { ...originalUser, content: userContent }
+    const sendMessages = [...prefix, userMessage]
+    const nextMessages: ExplainMessage[] = [...sendMessages, { role: 'assistant', content: '' }]
+    chatAutoFollowRef.current = true
+    resetVisionStreamBuffer()
+    preparingSendRef.current = true
+    flushSync(() => {
+      setMessages(nextMessages)
+      setStage('answering')
+      setStreaming(true)
+    })
+    await executeVisionRequest(sendMessages, requestId, false)
+  }
+
+  const handleRegenerateMessage = async (messageIndex: number) => {
+    await restartVisionFromMessage(messageIndex)
+  }
+
+  const handleStartMessageEdit = (messageIndex: number) => {
+    if (streaming || editingMessageIndex !== null) return
+    const message = messagesRef.current[messageIndex]
+    if (!message?.content.trim()) return
+    stopSpeechPlayback()
+    setEditingMessageIndex(messageIndex)
+    setEditingMessageDraft(message.content)
+  }
+
+  const handleCancelMessageEdit = () => {
+    setEditingMessageIndex(null)
+    setEditingMessageDraft('')
+  }
+
+  const handleSaveMessageEdit = () => {
+    const messageIndex = editingMessageIndex
+    const content = editingMessageDraft.trim()
+    if (messageIndex === null || !content) return
+    stopSpeechPlayback()
+    setMessages(prev => prev.map((message, index) => (
+      index === messageIndex ? { ...message, content } : message
+    )))
+    setEditingMessageIndex(null)
+    setEditingMessageDraft('')
+    // The history effect writes an edited message without starting a new AI request.
+    justFinishedStreamRef.current = true
+  }
+
+  const handleCopyMessage = async (messageIndex: number) => {
+    const message = messagesRef.current[messageIndex]
+    if (!message) return
+    const markdown = buildVisionMessageMarkdown(message)
+    if (!markdown.trim()) return
+    const sequence = ++messageCopySequenceRef.current
+    const ok = await copyToClipboard(markdown)
+    if (sequence !== messageCopySequenceRef.current) return
+    const current = messagesRef.current[messageIndex]
+    if (!current || buildVisionMessageMarkdown(current) !== markdown) return
+    if (!ok) {
+      reportCopyFailure(t.visionCopyFailed)
+      return
+    }
+    setCopiedMessageIndex(messageIndex)
+    if (messageCopyTimeoutRef.current) clearTimeout(messageCopyTimeoutRef.current)
+    messageCopyTimeoutRef.current = window.setTimeout(() => {
+      if (messageCopySequenceRef.current === sequence) setCopiedMessageIndex(null)
+      messageCopyTimeoutRef.current = null
+    }, 1800)
+  }
+
   const copyTextWithFeedback = async (text: string, target: CopyTarget) => {
     if (!text.trim()) return
     const sequence = beginCopyOperation()
     const ok = await copyToClipboard(text)
     if (!copyOperationIsCurrent(sequence)) return
     const currentText = target === 'answer'
-      ? [...messagesRef.current].reverse().find(message => message.role === 'assistant' && message.content)?.content ?? ''
+      ? buildVisionMarkdown({
+          messages: messagesRef.current,
+          imageDataUrl: imagePreviewRef.current,
+          appLabel: appLabelRef.current,
+          language: langRef.current,
+        })
       : target === 'original'
         ? translateOriginalRef.current
         : translateTextRef.current
@@ -3838,10 +4329,64 @@ export default function Vision() {
     }
     copiedTextRef.current = { target, text }
     setCopiedTarget(target)
-    copyTimeoutRef.current = setTimeout(() => {
+    copyTimeoutRef.current = window.setTimeout(() => {
       if (copyOperationIsCurrent(sequence)) setCopiedTarget(null)
       copyTimeoutRef.current = null
     }, 2000)
+  }
+
+  const buildCurrentConversationMarkdown = async () => {
+    let imageDataUrl = imagePreviewRef.current
+    const imageId = imageIdRef.current
+    if (imageId) {
+      try {
+        const result = await api.explainReadImage(imageId)
+        if (result.success && result.data) {
+          imageDataUrl = result.data
+          imagePreviewRef.current = result.data
+          setImagePreview(result.data)
+        }
+      } catch (err) {
+        console.error('[vision-export] full image reload failed:', err)
+      }
+    }
+    return buildVisionMarkdown({
+      messages: messagesRef.current,
+      imageDataUrl,
+      appLabel: appLabelRef.current,
+      language: langRef.current,
+    })
+  }
+
+  const handleExport = async () => {
+    if (exportingConversation || !conversationMarkdown.trim()) return
+    setExportingConversation(true)
+    setExportedConversation(false)
+    setExportErrorAnnouncement('')
+    try {
+      const markdown = await buildCurrentConversationMarkdown()
+      const saved = await api.visionExportMarkdown(
+        markdown,
+        defaultVisionExportFileName(),
+      )
+      if (!saved) return
+      setExportedConversation(true)
+      if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current)
+      exportTimeoutRef.current = window.setTimeout(() => {
+        setExportedConversation(false)
+        exportTimeoutRef.current = null
+      }, 2200)
+    } catch (err) {
+      console.error('[vision-export] failed:', err)
+      setExportErrorAnnouncement(t.visionExportFailed)
+      if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current)
+      exportTimeoutRef.current = window.setTimeout(() => {
+        setExportErrorAnnouncement('')
+        exportTimeoutRef.current = null
+      }, 2500)
+    } finally {
+      setExportingConversation(false)
+    }
   }
 
   const playSpeechDataUrl = useCallback((dataUrl: string, seq: number) => {
@@ -3908,10 +4453,48 @@ export default function Vision() {
     }
   }, [playSpeechDataUrl, speakingTarget, speechLoadingTarget, stopSpeechPlayback, t.visionSpeechFailed])
 
+  const speakMessageText = useCallback(async (messageIndex: number, text: string) => {
+    if (!text.trim()) return
+    const isCurrentTarget = messageSpeakingIndex === messageIndex || messageSpeechLoadingIndex === messageIndex
+    stopSpeechPlayback()
+    if (isCurrentTarget) return
+
+    const seq = speechSeqRef.current
+    const chunks = splitSpeechText(text)
+    if (!chunks.length) return
+    setMessageSpeechErrorIndex(null)
+    setMessageSpeechLoadingIndex(messageIndex)
+
+    try {
+      for (const chunk of chunks) {
+        if (speechSeqRef.current !== seq) return
+        const result = await api.synthesizeSpeech(chunk)
+        if (speechSeqRef.current !== seq) return
+        if (!result.success || !result.data) {
+          throw new Error(result.error || 'Speech synthesis failed')
+        }
+        setMessageSpeechLoadingIndex(null)
+        setMessageSpeakingIndex(messageIndex)
+        await playSpeechDataUrl(result.data, seq)
+      }
+    } catch (err) {
+      console.error('Message speech playback failed:', err)
+      if (speechSeqRef.current === seq) {
+        setMessageSpeechErrorIndex(messageIndex)
+      }
+    } finally {
+      if (speechSeqRef.current === seq) {
+        speechAudioRef.current = null
+        setMessageSpeechLoadingIndex(null)
+        setMessageSpeakingIndex(null)
+      }
+    }
+  }, [messageSpeakingIndex, messageSpeechLoadingIndex, playSpeechDataUrl, stopSpeechPlayback])
+
   const handleCopy = async () => {
-    const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && m.content)
-    if (!lastAssistant) return
-    await copyTextWithFeedback(lastAssistant.content, 'answer')
+    if (!messages.some(message => message.content.trim())) return
+    const markdown = await buildCurrentConversationMarkdown()
+    await copyTextWithFeedback(markdown, 'answer')
   }
 
   // 点击历史项：把当前会话恢复到该 item（image / appLabel / messages / capturedFrame）
@@ -3919,6 +4502,14 @@ export default function Vision() {
   const restoreHistory = async (item: HistoryItem) => {
     invalidateVisionRequest()
     beginCopyOperation()
+    messageCopySequenceRef.current += 1
+    if (messageCopyTimeoutRef.current) {
+      clearTimeout(messageCopyTimeoutRef.current)
+      messageCopyTimeoutRef.current = null
+    }
+    setCopiedMessageIndex(null)
+    setEditingMessageIndex(null)
+    setEditingMessageDraft('')
     setHistoryOpen(false)
     cancelPromptOptimization()
     stopSpeechPlayback()
@@ -3935,103 +4526,53 @@ export default function Vision() {
     textSessionIdRef.current = restoreTextOnly ? item.id : ''
     chatAutoFollowRef.current = true
     justFinishedStreamRef.current = false
-    const restoreSeq = ++nativeFlySeqRef.current
     if (barFlightTimerRef.current) {
       clearTimeout(barFlightTimerRef.current)
       barFlightTimerRef.current = null
     }
     panelDraggingRef.current = false
-    fullscreenMetricsRef.current = metrics
+    selectionReqIdRef.current++
+    focusReqIdRef.current++
 
-    const wasFloating = floatingRebased
-    const contentWidth = Math.round(barRect.width || metrics.READY_W)
-    const contentHeight = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
-    const width = contentWidth + FLOATING_PADDING * 2
-    const height = contentHeight + FLOATING_PADDING * 2
-    const localX = wasFloating
-      ? barRect.x
-      : Math.max(16, Math.min(viewport.w - contentWidth - 16, barRect.x))
-    const localY = wasFloating
-      ? barRect.y
-      : Math.max(16, Math.min(viewport.h - contentHeight - 16, barRect.y))
-    let currentOrigin = winOrigin
-    if (wasFloating) {
-      try {
-        const [position, scale] = await Promise.all([
-          getCurrentWindow().innerPosition(),
-          getCurrentWindow().scaleFactor(),
-        ])
-        const factor = scale || 1
-        currentOrigin = { x: position.x / factor, y: position.y / factor }
-        setWinOrigin(currentOrigin)
-        setWindowMoveRevision(prev => prev + 1)
-      } catch (error) {
-        console.error('[vision-history] current window origin failed:', error)
-      }
-    }
-    if (restoreSeq !== nativeFlySeqRef.current) return
-    const origin = {
-      x: Math.round(currentOrigin.x + localX - FLOATING_PADDING),
-      y: Math.round(currentOrigin.y + localY - FLOATING_PADDING),
-    }
-
-    flushSync(() => {
+    // History uses the exact same compact native flight as a first text
+    // question. Keep the answer hidden in `ready` while the one-line bar moves;
+    // only expand it after the native promise reaches the shared top slot.
+    const expectedFlySeq = nativeFlySeqRef.current + 1
+    const flight = flyBarToTopSlot(undefined, () => {
       setMode('chat')
       setImagePreview(item.imagePreview)
       setAppLabel(item.appLabel)
       setInput('')
       setSelectionText('')
-      setMessages(item.messages)
+      setMessages([])
       setCapturedFrame(item.capturedFrame)
       setStreaming(false)
-      setFloatingRebased(false)
-      setNativeHitRegionActive(false)
-      setHitRegionRect(null)
-      setPanelDragActive(false)
-      setBarNoTransition(true)
-      setBarFlyOffset({ x: 0, y: 0 })
-      setBarRebaseHidden(true)
-      setBarInFlight(false)
-      setJellyActive(false)
-      setSelectBarCollapsed(false)
-      setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
-      floatingSizeRef.current = null
-      setStage('answering')
-    })
-    selectionReqIdRef.current++
-    focusReqIdRef.current++
+    }, !restoreTextOnly)
 
-    try {
-      await api.visionSetHitRegion(null)
-      const applied = await setVisionFloatingWithRetry({
-        x: origin.x,
-        y: origin.y,
-        width,
-        height,
-        hasScreenshot: !restoreTextOnly,
-      }, () => restoreSeq === nativeFlySeqRef.current)
-      if (!applied || restoreSeq !== nativeFlySeqRef.current) return
-      flushSync(() => {
-        setFloatingRebased(true)
-        setWinOrigin(origin)
-        setViewport({ w: width, h: height })
-        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: contentWidth })
-        setBarRebaseHidden(false)
-        setBarNoTransition(false)
-        floatingSizeRef.current = { width, height, hasScreenshot: !restoreTextOnly }
+    if (!restoreTextOnly) {
+      void api.explainReadImage(item.id).then((result) => {
+        if (
+          expectedFlySeq !== nativeFlySeqRef.current
+          || imageIdRef.current !== item.id
+          || !result.success
+          || !result.data
+        ) return
+        setImagePreview(result.data)
+      }).catch((error) => {
+        console.error('[vision-history] full image reload failed:', error)
       })
-      focusVisionInput([30, 120, 260])
-    } catch (err) {
-      console.error('[vision-history] native floating restore failed:', err)
-      if (restoreSeq !== nativeFlySeqRef.current) return
-      flushSync(() => {
-        setFloatingRebased(false)
-        setBarRebaseHidden(false)
-        setBarNoTransition(false)
-        setBarRect({ x: Math.round(localX), y: Math.round(localY), width: contentWidth })
-      })
-      focusVisionInput([50, 140, 260])
     }
+
+    const landed = await flight
+    const pendingCloseAttempt = closeAttemptPromiseRef.current
+    if (pendingCloseAttempt && await pendingCloseAttempt) return
+    if (expectedFlySeq !== nativeFlySeqRef.current) return
+    flushSync(() => {
+      setMessages(item.messages)
+      setStage('answering')
+      setStreaming(false)
+    })
+    focusVisionInput(landed ? [30, 120, 260] : [50, 140, 260])
   }
 
   const relTime = (ts: number): string => {
@@ -4048,12 +4589,17 @@ export default function Vision() {
     copySequenceRef.current += 1
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
     if (copyErrorTimeoutRef.current) clearTimeout(copyErrorTimeoutRef.current)
+    if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current)
+    messageCopySequenceRef.current += 1
+    if (messageCopyTimeoutRef.current) clearTimeout(messageCopyTimeoutRef.current)
     if (captureWarningTimeoutRef.current) clearTimeout(captureWarningTimeoutRef.current)
     invalidateVisionSurface()
     invalidateVisionRequest()
     if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
     if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
     translateEditSeqRef.current++
+    translateRequestSeqRef.current++
+    activeTranslateRequestIdRef.current = ''
     promptOptimizeSeqRef.current++
     stopSpeechPlayback()
     setVisionCursorPassthrough(false)
@@ -4096,9 +4642,13 @@ export default function Vision() {
   const showBar = mode === 'chat'
   const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
+  const displayTranslateOriginal = showTranslateOriginal
+    || !!translateOriginalError
+    || (!!translateOriginal && !!translateError)
   // 提示词预览卡只在 chat 模式的悬浮条下方出现；answering 期间不展示，避免和答案面板抢位置
   const showPromptPreview = mode === 'chat' && promptPreviewStatus !== 'idle'
   const readonlyAiOcrOriginal = translateOcrMethod === 'ai'
+  const readonlyDisplayedOcr = readonlyAiOcrOriginal || !showTranslateOriginal
   const methodSwitching = ocrMethodSwitching || translationMethodSwitching
   const methodSelectClass = 'ml-auto shrink-0 h-5 max-w-[122px] rounded-md border border-black/[0.06] bg-white/80 px-1.5 text-[10.5px] font-medium text-neutral-500 outline-none hover:text-neutral-700 hover:border-black/[0.12] disabled:opacity-60 dark:border-white/[0.08] dark:bg-neutral-900/70 dark:text-neutral-400 dark:hover:text-neutral-100 dark:hover:border-white/[0.14]'
   const ocrMethodOptions = useMemo<{ value: ScreenshotOcrMethod; label: string }[]>(() => [
@@ -4715,6 +5265,15 @@ export default function Vision() {
           {copyErrorAnnouncement}
         </div>
       ) : null}
+      {exportErrorAnnouncement ? (
+        <div
+          role="alert"
+          data-screenpilot-export-error="true"
+          className="pointer-events-none absolute left-1/2 top-14 z-[91] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
+        >
+          {exportErrorAnnouncement}
+        </div>
+      ) : null}
       {historyRejectedCount > 0 ? (
         <div className="sr-only" role="status" aria-live="polite">
           {lang === 'zh'
@@ -5310,8 +5869,7 @@ export default function Vision() {
             {stage === 'answering' && (() => {
               const ordered = messageOrder === 'desc' ? messages.slice().reverse() : messages
               const lastChronoIdx = messages.length - 1
-              const lastMsg = messages[lastChronoIdx]
-              const showActions = lastMsg && lastMsg.role === 'assistant' && !!lastMsg.content
+              const showActions = streaming || messages.some(message => !!message.content.trim())
               const Actions = (
                 <div className="flex items-center gap-1" data-screenpilot-answer-actions="true">
                   <button
@@ -5319,15 +5877,31 @@ export default function Vision() {
                     onClick={() => void handleCopy()}
                     data-screenpilot-copy-target="answer"
                     data-screenpilot-copy-state={copiedTarget === 'answer' ? 'copied' : 'idle'}
-                    className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                    title={copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}
+                    aria-label={copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}
+                    className="flex cursor-pointer items-center gap-1 rounded px-2 py-0.5 text-[10px] text-neutral-500 transition-colors hover:bg-black/5 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
                   >
                     {copiedTarget === 'answer' ? <Check size={11} /> : <Copy size={11} />}
                     <span>{copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleExport()}
+                    disabled={exportingConversation}
+                    data-screenpilot-export-target="answer"
+                    data-screenpilot-export-state={exportedConversation ? 'exported' : exportingConversation ? 'exporting' : 'idle'}
+                    title={exportedConversation ? t.visionExported : exportingConversation ? t.visionExporting : t.visionExport}
+                    aria-label={exportedConversation ? t.visionExported : exportingConversation ? t.visionExporting : t.visionExport}
+                    className="flex cursor-pointer items-center gap-1 rounded px-2 py-0.5 text-[10px] text-neutral-500 transition-colors hover:bg-black/5 hover:text-neutral-800 disabled:cursor-wait disabled:opacity-60 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+                  >
+                    {exportedConversation ? <Check size={11} /> : <Download size={11} />}
+                    <span>{exportedConversation ? t.visionExported : exportingConversation ? t.visionExporting : t.visionExport}</span>
+                  </button>
                   {streaming && (
                     <button
+                      type="button"
                       onClick={() => void handleStop()}
-                      className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-neutral-500 hover:text-red-500 dark:text-neutral-400 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                      className="flex cursor-pointer items-center gap-1 rounded px-2 py-0.5 text-[10px] text-neutral-500 transition-colors hover:bg-black/5 hover:text-red-500 dark:text-neutral-400 dark:hover:bg-white/10"
                     >
                       <Square size={10} strokeWidth={2.5} fill="currentColor" />
                       <span>{t.visionStop}</span>
@@ -5336,52 +5910,112 @@ export default function Vision() {
                 </div>
               )
               return (
-              <div
-                ref={chatScrollRef}
-                role="log"
-                aria-live="polite"
-                aria-relevant="additions text"
-                aria-busy={streaming}
-                data-screenpilot-answer-scroll="true"
-                className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3"
-                onScroll={updateChatAutoFollow}
-              >
-                {messageOrder === 'desc' && showActions && Actions}
-                {ordered.map((m, displayIdx) => {
-                  const origIdx = messageOrder === 'desc' ? messages.length - 1 - displayIdx : displayIdx
-                  const isUser = m.role === 'user'
-                  const isLast = origIdx === lastChronoIdx
-                  return (
-                    <div key={origIdx} className={`mb-3 ${isUser ? 'flex justify-end' : ''}`}>
-                      {isUser ? (
-                        <div className="px-3 py-2 rounded-2xl bg-[#D97757]/15 dark:bg-[#D97757]/20 text-[13.5px] text-neutral-800 dark:text-neutral-100 max-w-[88%] whitespace-pre-wrap break-words">
-                          {m.content}
-                        </div>
-                      ) : (
-                        <div className="prose prose-sm dark:prose-invert max-w-none text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
-                          {m.reasoning && (
-                            <ThinkingBlock
-                              reasoning={m.reasoning}
-                              active={isLast && streaming && !m.content}
-                              thinkingLabel={t.visionThinking}
-                              thoughtLabel={t.visionThought}
+                <>
+                  <div
+                    ref={chatScrollRef}
+                    role="log"
+                    aria-live="polite"
+                    aria-relevant="additions text"
+                    aria-busy={streaming}
+                    data-screenpilot-answer-scroll="true"
+                    className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3"
+                    onScroll={updateChatAutoFollow}
+                  >
+                    {ordered.map((m, displayIdx) => {
+                      const origIdx = messageOrder === 'desc' ? messages.length - 1 - displayIdx : displayIdx
+                      const isUser = m.role === 'user'
+                      const previousMessage = ordered[displayIdx - 1]
+                      // Keep the full inter-turn margin, but pull the second message of
+                      // each user/assistant pair slightly closer to its preceding message.
+                      // The role check mirrors the visual order so descending history gets
+                      // the same treatment without changing cross-turn spacing.
+                      const isCompactPairTail = messageOrder === 'asc'
+                        ? !isUser && previousMessage?.role === 'user'
+                        : isUser && previousMessage?.role === 'assistant'
+                      const isLast = origIdx === lastChronoIdx
+                      const isEditing = editingMessageIndex === origIdx
+                      return (
+                        <div
+                          key={origIdx}
+                          data-screenpilot-message-shell="true"
+                          data-screenpilot-message-index={origIdx}
+                          data-screenpilot-message-role={m.role}
+                          data-screenpilot-message-pair-gap={isCompactPairTail ? 'compact' : 'standard'}
+                          className={`${isEditing ? 'mb-3' : 'mb-3 pb-[30px]'} relative ${isCompactPairTail ? '-mt-[6px]' : ''} ${isUser ? 'flex justify-end' : ''}`}
+                        >
+                          {isEditing ? (
+                            <VisionMessageEditor
+                              role={m.role}
+                              value={editingMessageDraft}
+                              labels={{
+                                regenerate: t.visionRegenerate,
+                                save: t.save,
+                                cancel: t.cancel,
+                              }}
+                              onChange={setEditingMessageDraft}
+                              onSave={handleSaveMessageEdit}
+                              onCancel={handleCancelMessageEdit}
+                              {...(m.role === 'user'
+                                ? { onRegenerate: () => void restartVisionFromMessage(origIdx, editingMessageDraft) }
+                                : {})}
                             />
+                          ) : (
+                            isUser ? (
+                              <div className="max-w-[88%] rounded-2xl bg-[#D97757]/15 px-3 py-2 text-[13.5px] text-neutral-800 dark:bg-[#D97757]/20 dark:text-neutral-100 whitespace-pre-wrap break-words">
+                                {m.content}
+                              </div>
+                            ) : (
+                              <div className="prose prose-sm dark:prose-invert max-w-none text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
+                                {m.reasoning && (
+                                  <ThinkingBlock
+                                    reasoning={m.reasoning}
+                                    active={isLast && streaming && !m.content}
+                                    thinkingLabel={t.visionThinking}
+                                    thoughtLabel={t.visionThought}
+                                  />
+                                )}
+                                {m.content ? (
+                                  <StreamingMarkdownText text={m.content} active={isLast && streaming} />
+                                ) : isLast && streaming && !m.reasoning ? (
+                                  <div role="status" className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                                    <Loader2 className="animate-spin" size={14} />
+                                    <span className="text-[12px]">{formatVisionAsking(t.visionAsking, activeVisionModel)}</span>
+                                  </div>
+                                ) : null}
+                              </div>
+                            )
                           )}
-                          {m.content ? (
-                            <StreamingMarkdownText text={m.content} active={isLast && streaming} />
-                          ) : isLast && streaming && !m.reasoning ? (
-                            <div role="status" className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                              <Loader2 className="animate-spin" size={14} />
-                              <span className="text-[12px]">{formatVisionAsking(t.visionAsking, activeVisionModel)}</span>
-                            </div>
+                          {!isEditing ? (
+                            <VisionMessageToolbar
+                              index={origIdx}
+                              role={m.role}
+                              canMutate={!streaming && editingMessageIndex === null}
+                              hasText={!!m.content.trim()}
+                              copied={copiedMessageIndex === origIdx}
+                              speaking={messageSpeakingIndex === origIdx}
+                              speechLoading={messageSpeechLoadingIndex === origIdx}
+                              speechError={messageSpeechErrorIndex === origIdx}
+                              labels={{
+                                speak: t.visionSpeak,
+                                stop: t.visionStop,
+                                retrySpeak: t.visionSpeechRetry,
+                                regenerate: t.visionRegenerate,
+                                edit: t.visionEdit,
+                                copy: t.visionCopy,
+                                copied: t.visionCopied,
+                              }}
+                              onSpeak={() => void speakMessageText(origIdx, m.content)}
+                              onRegenerate={() => void handleRegenerateMessage(origIdx)}
+                              onEdit={() => handleStartMessageEdit(origIdx)}
+                              onCopy={() => void handleCopyMessage(origIdx)}
+                            />
                           ) : null}
                         </div>
-                      )}
-                    </div>
-                  )
-                })}
-                {messageOrder === 'asc' && showActions && Actions}
-              </div>
+                      )
+                    })}
+                  </div>
+                  {showActions && Actions}
+                </>
               )
             })()}
           </div>
@@ -5474,7 +6108,7 @@ export default function Vision() {
                 : Math.min(viewport.h - 110, stableAnswerHeight)
             }}>
             <>
-              {showTranslateOriginal && (
+              {displayTranslateOriginal && (
                 <div data-screenpilot-ocr-container="true">
                   <div data-screenpilot-original-heading="true" className="mb-1.5 flex items-center gap-1.5">
                     <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
@@ -5495,7 +6129,7 @@ export default function Vision() {
                           data-screenpilot-copy-state={copiedTarget === 'original' ? 'copied' : 'idle'}
                           title={copiedTarget === 'original' ? t.visionCopied : t.visionCopy}
                           aria-label={copiedTarget === 'original' ? t.visionCopied : t.visionCopy}
-                          className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                          className="shrink-0 w-5 h-5 cursor-pointer rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
                         >
                           {copiedTarget === 'original' ? <Check size={12} /> : <Copy size={12} />}
                         </button>
@@ -5544,10 +6178,10 @@ export default function Vision() {
                     </select>
                   </div>
                   {translateOriginalError ? (
-                    <div role="alert" className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                    <div data-screenpilot-original-error="true" role="alert" className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
                       {translateOriginalError}
                     </div>
-                  ) : translateOriginal || translateOriginalEditedRef.current ? readonlyAiOcrOriginal ? (
+                  ) : translateOriginal || translateOriginalEditedRef.current ? readonlyDisplayedOcr ? (
                     <ReadonlyOcrMarkdownText text={translateOriginal} />
                   ) : (
                     <EditableOcrText
@@ -5564,7 +6198,7 @@ export default function Vision() {
                 </div>
               )}
 
-              {showTranslateOriginal && (
+              {displayTranslateOriginal && (
                 <div data-screenpilot-translation-divider="true" className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
               )}
 
@@ -5587,7 +6221,7 @@ export default function Vision() {
                       data-screenpilot-copy-state={copiedTarget === 'translated' ? 'copied' : 'idle'}
                       title={copiedTarget === 'translated' ? t.visionCopied : t.visionCopy}
                       aria-label={copiedTarget === 'translated' ? t.visionCopied : t.visionCopy}
-                      className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                      className="shrink-0 w-5 h-5 cursor-pointer rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
                     >
                       {copiedTarget === 'translated' ? <Check size={12} /> : <Copy size={12} />}
                     </button>
@@ -5647,7 +6281,7 @@ export default function Vision() {
                 )
               )}
               {translateError && (
-                <div role="alert" className="mt-2 text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                <div data-screenpilot-translation-error="true" role="alert" className="mt-2 text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
                   {t.visionError}: {translateError}
                 </div>
               )}

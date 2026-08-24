@@ -75,6 +75,7 @@ pub fn run() {
             vision_commit_image_to_history,
             vision_delete_history_image,
             vision_delete_temporary_image,
+            vision_export_markdown,
             vision_close,
             vision_set_floating,
             vision_start_safe_drag,

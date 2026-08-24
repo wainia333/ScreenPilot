@@ -27,6 +27,8 @@ export type VisionAskResult = {
 
 export type VisionTranslateStreamPayload = {
   imageId: string
+  requestId: string
+  generation?: number
   kind?: 'original' | 'translated'
   delta?: string
   done?: boolean
@@ -270,12 +272,20 @@ export const api = {
       'vision_register_annotated_image', { base64Png }
     ),
   visionRequestTranslate: () => invoke<void>('vision_request_translate'),
-  visionTranslate: (imageId: string) =>
-    invoke<{ success: boolean; original?: string; translated?: string; error?: string }>(
-      'vision_translate', { imageId }
+  visionTranslate: (imageId: string, requestId: string) =>
+    invoke<{
+      success: boolean
+      cancelled?: boolean
+      requestId?: string
+      kind?: 'original' | 'translated'
+      original?: string
+      translated?: string
+      error?: string
+    }>(
+      'vision_translate', { imageId, requestId }
     ),
   visionTranslateText: (text: string) =>
-    invoke<{ success: boolean; translated?: string; error?: string }>(
+    invoke<{ success: boolean; cancelled?: boolean; translated?: string; error?: string }>(
       'vision_translate_text', { text }
     ),
   synthesizeSpeech: (text: string) =>
@@ -292,6 +302,8 @@ export const api = {
     invoke<void>('vision_delete_history_image', { imageId }),
   visionDeleteTemporaryImage: (imageId: string) =>
     invoke<void>('vision_delete_temporary_image', { imageId }),
+  visionExportMarkdown: (markdown: string, fileName: string) =>
+    invoke<boolean>('vision_export_markdown', { markdown, fileName }),
   visionSetFloating: (rect: {
     x?: number
     y?: number

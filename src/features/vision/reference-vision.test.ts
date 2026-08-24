@@ -68,15 +68,62 @@ describe('Vision prompt input layout', () => {
 
 describe('Vision answer readability', () => {
   it('keeps answer actions in normal flow instead of covering conversation text', () => {
+    const panelRule = /\[data-screenpilot-answer-panel="true"\]\s*\{(?<body>[^}]*)\}/
+      .exec(adapterStyles)?.groups?.body
+    const scrollRule = /\[data-screenpilot-answer-scroll="true"\]\s*\{(?<body>[^}]*)\}/
+      .exec(adapterStyles)?.groups?.body
     const actionsRule = /\[data-screenpilot-answer-actions="true"\]\s*\{(?<body>[^}]*)\}/
       .exec(adapterStyles)?.groups?.body
 
+    expect(panelRule).toBeDefined()
+    expect(panelRule).toContain('display: flex')
+    expect(panelRule).toContain('flex-direction: column')
+    expect(scrollRule).toBeDefined()
+    expect(scrollRule).toContain('min-height: 0')
+    expect(scrollRule).toContain('flex: 1 1 auto')
+    expect(scrollRule).toContain('overflow-y: auto')
     expect(actionsRule).toBeDefined()
     expect(actionsRule).toContain('position: static')
+    expect(actionsRule).toContain('flex-shrink: 0')
     expect(actionsRule).toContain('order: 0')
     expect(actionsRule).toContain('margin-top: auto')
     expect(actionsRule).not.toContain('position: sticky')
     expect(actionsRule).not.toContain('bottom: 0')
+  })
+
+  it('renders the fixed action row after the answer scroll port', () => {
+    const answerScrollToActions = /data-screenpilot-answer-scroll="true"[\s\S]*?\n\s*<\/div>\s*\n\s*\{showActions && Actions\}/
+
+    expect(visionSource).toMatch(answerScrollToActions)
+    expect(visionSource.match(/\{showActions && Actions\}/g)).toHaveLength(1)
+    expect(visionSource).toContain('data-screenpilot-export-target="answer"')
+    expect(visionSource).toContain('visionExportMarkdown')
+    expect(visionSource).toContain('cursor-pointer')
+  })
+
+  it('provides animated per-message actions and role-specific editors', () => {
+    expect(adapterStyles).toContain('[data-screenpilot-message-toolbar="true"]')
+    expect(adapterStyles).toContain('transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1)')
+    expect(adapterStyles).not.toContain('data-screenpilot-message-action]:not(:disabled):hover::before')
+    expect(adapterStyles).not.toContain('transform: translateY(5px) scale(0.96)')
+    expect(visionSource).toContain('inline-flex items-center justify-end gap-1.5 bg-transparent')
+    expect(visionSource).toContain("role === 'user' ? 'right-0 bottom-px' : 'left-0 bottom-0'")
+    expect(visionSource).toContain('h-[26px] w-[26px]')
+    expect(visionSource).toContain("'mb-3 pb-[30px]'")
+    expect(visionSource).toContain("data-screenpilot-message-pair-gap={isCompactPairTail ? 'compact' : 'standard'}")
+    expect(visionSource).toContain("isCompactPairTail ? '-mt-[6px]' : ''")
+    expect(visionSource).toContain("!isUser && previousMessage?.role === 'user'")
+    expect(visionSource).toContain("isUser && previousMessage?.role === 'assistant'")
+    expect(visionSource).toContain('enabled:cursor-pointer enabled:hover:bg-black/[0.06]')
+    expect(visionSource).not.toContain('gap-0.5 rounded-lg border border-black/[0.08] bg-white/85')
+    expect(visionSource).toContain('data-screenpilot-message-shell="true"')
+    expect(visionSource).toContain('data-screenpilot-message-action="speak"')
+    expect(visionSource).toContain('data-screenpilot-message-action="regenerate"')
+    expect(visionSource).toContain('data-screenpilot-message-action="edit"')
+    expect(visionSource).toContain('data-screenpilot-message-action="copy"')
+    expect(visionSource).toContain('data-screenpilot-message-editor-action="save"')
+    expect(visionSource).toContain('data-screenpilot-message-editor-action="cancel"')
+    expect(visionSource).toContain('restartVisionFromMessage(origIdx, editingMessageDraft)')
   })
 
   it('uses a strong selection highlight only inside Vision code blocks', () => {
