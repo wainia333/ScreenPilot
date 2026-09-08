@@ -131,10 +131,8 @@ impl AppState {
 
     pub fn begin_vision(&self, surface_generation: u64) -> bool {
         let already_active = self.vision_busy.swap(true, Ordering::SeqCst);
-        if !already_active {
-            self.vision_surface_generation
-                .store(surface_generation, Ordering::SeqCst);
-        }
+        self.vision_surface_generation
+            .store(surface_generation, Ordering::SeqCst);
         already_active
     }
 
@@ -598,11 +596,88 @@ mod tests {
 
         let replacement_generation = state.begin_surface_action();
         assert!(state.begin_vision(replacement_generation));
-        assert_eq!(state.vision_surface_generation(), Some(first_generation));
+        assert_eq!(
+            state.vision_surface_generation(),
+            Some(replacement_generation)
+        );
 
         state.release_vision();
         assert!(!state.vision_active());
         assert_eq!(state.vision_surface_generation(), None);
+    }
+
+    #[test]
+    fn repeated_vision_requests_keep_the_existing_session_closable() {
+        let (state, _directory) = state();
+        let first_generation = state.begin_surface_action();
+        assert!(!state.begin_vision(first_generation));
+        let stream_generation = state.begin_reference_vision_stream();
+        let image_generation = state
+            .begin_reference_vision_image_session()
+            .expect("image session");
+
+        for _ in 0..8 {
+            let generation = state.begin_surface_action();
+            assert_eq!(
+                state.with_current_surface_action(generation, || {
+                    Ok(state.begin_vision(generation))
+                }),
+                Ok(Some(true))
+            );
+            let cleanup_generation = state.vision_surface_generation().expect("vision token");
+            assert!(state.surface_action_is_current(cleanup_generation));
+            assert!(state.reference_vision_stream_current(stream_generation));
+            assert_eq!(state.reference_vision_image_session(), Ok(image_generation));
+        }
+
+        let cleanup_generation = state.vision_surface_generation().expect("vision token");
+        assert_eq!(
+            state.with_current_surface_action(cleanup_generation, || {
+                state.release_vision();
+                Ok(())
+            }),
+            Ok(Some(()))
+        );
+        assert!(!state.vision_active());
+        assert_eq!(state.vision_surface_generation(), None);
+
+        let reopened_generation = state.begin_surface_action();
+        assert!(!state.begin_vision(reopened_generation));
+        assert_eq!(state.vision_surface_generation(), Some(reopened_generation));
+    }
+
+    #[test]
+    fn vision_request_queued_during_open_transfers_cleanup_to_the_latest_intent() {
+        let (state, _directory) = state();
+        let first_generation = state.begin_surface_action();
+        let queued_generation = state
+            .with_current_surface_action(first_generation, || {
+                let queued_generation = state.begin_surface_action();
+                assert!(!state.begin_vision(first_generation));
+                Ok(queued_generation)
+            })
+            .expect("initial open")
+            .expect("accepted initial open");
+
+        assert_eq!(
+            state.with_current_surface_action(queued_generation, || {
+                Ok(state.begin_vision(queued_generation))
+            }),
+            Ok(Some(true))
+        );
+        let cleanup_generation = state.vision_surface_generation().expect("vision token");
+        assert_eq!(cleanup_generation, queued_generation);
+
+        let translator_generation = state.begin_surface_action();
+        assert_eq!(
+            state.with_current_surface_action(cleanup_generation, || {
+                state.release_vision();
+                Ok(())
+            }),
+            Ok(None)
+        );
+        assert!(state.vision_active());
+        assert!(state.surface_action_is_current(translator_generation));
     }
 
     #[test]

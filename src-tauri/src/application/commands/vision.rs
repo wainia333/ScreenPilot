@@ -468,26 +468,19 @@ pub(crate) fn open_reference_vision(
     surface_generation: u64,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let existing_visible_window = app
+        .get_webview_window("vision")
+        .filter(|window| window.is_visible().unwrap_or(false));
+    if state.begin_vision(surface_generation) {
+        if let Some(window) = existing_visible_window.as_ref() {
+            return window.set_focus().map_err(|error| error.to_string());
+        }
+    }
     VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
     VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
     VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
-    let existing_vision_visible = app
-        .get_webview_window("vision")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false);
-    if !existing_vision_visible {
+    if existing_visible_window.is_none() {
         close_native_freeze(app);
-    }
-    if state.begin_vision(surface_generation) {
-        let visible = app
-            .get_webview_window("vision")
-            .and_then(|window| window.is_visible().ok())
-            .unwrap_or(false);
-        if visible {
-            return Err("Vision already active".into());
-        }
-        state.release_vision();
-        let _ = state.begin_vision(surface_generation);
     }
     let result = (|| {
         let window = ensure_reference_vision_window(app, mode)?;
