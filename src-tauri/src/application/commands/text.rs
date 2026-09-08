@@ -341,10 +341,14 @@ pub async fn window_hide(window: WebviewWindow, state: State<'_, AppState>) -> R
         return super::vision::vision_close(window.app_handle().clone(), window, state).await;
     }
     if window.label() == "translator" {
-        state.begin_surface_action();
-        state.cancel_active_translator_request();
-    } else if window.label() == "main" {
-        state.cancel_active_optimizer_request();
+        return crate::application::lifecycle::close_translator_window(window)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if window.label() == "main" {
+        return crate::application::lifecycle::close_main_window(window)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     window.hide().map_err(|error| error.to_string())
 }

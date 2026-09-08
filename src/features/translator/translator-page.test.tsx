@@ -937,6 +937,41 @@ describe('TranslatorPage', () => {
     expect(desktop.hides).toBe(2)
   })
 
+  it.each(['Escape', 'button'] as const)('keeps %s closing active during repeated entrances before selection arrives', async (close) => {
+    vi.useFakeTimers()
+    const desktop = new RecordingDesktop()
+    const cancel = vi.spyOn(desktop, 'cancelTranslation')
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    for (let entrance = 0; entrance < 2; entrance += 1) {
+      const previousCard = screen.getByRole('main')
+      await act(async () => {
+        desktop.emitTranslatorPrepare()
+        await Promise.resolve()
+      })
+      const card = screen.getByRole('main')
+      expect(card).not.toBe(previousCard)
+      expect(card).toHaveClass('screenpilot-jelly-pop')
+      expect(screen.getByRole('textbox', { name: '原文' })).toHaveValue('')
+      cancel.mockClear()
+
+      await act(async () => {
+        if (close === 'Escape') {
+          screen.getByRole('combobox', { name: '翻译接口' }).focus()
+          fireEvent.keyDown(window, { key: 'Escape' })
+        } else {
+          fireEvent.click(screen.getByRole('button', { name: '关闭翻译' }))
+        }
+        await Promise.resolve()
+      })
+
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(desktop.hides).toBe(entrance + 1)
+      expect(desktop.translations).toHaveLength(0)
+    }
+  })
+
   it('shows native commit and close failures without repeating the native hide', async () => {
     const desktop = new RejectingTranslatorDesktop()
     desktop.rejectCommit = true

@@ -1,4 +1,4 @@
-use crate::application::state::{AppState, ReferenceSurface};
+use crate::application::state::{AppState, MainRoute, ReferenceSurface};
 use crate::domain::settings::AppSettings;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -113,10 +113,35 @@ pub(crate) fn flush_windows_compositor() {
 pub(crate) fn flush_windows_compositor() {}
 
 fn hide_translator_surface(window: &WebviewWindow) -> Result<(), String> {
-    force_hide_window(window);
-    window.hide().map_err(|error| error.to_string())?;
+    hide_translator_with(
+        &window.state::<AppState>(),
+        || force_hide_window(window),
+        || window.hide().map_err(|error| error.to_string()),
+    )?;
     wait_for_translator_withdrawn(window);
     Ok(())
+}
+
+fn hide_translator_with(
+    state: &AppState,
+    force_hide: impl FnOnce(),
+    framework_hide: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    state.cancel_active_translator_request();
+    force_hide();
+    framework_hide()
+}
+
+pub(crate) fn close_translator_window(
+    window: WebviewWindow,
+) -> tauri::async_runtime::JoinHandle<Result<(), String>> {
+    let generation = window.state::<AppState>().begin_surface_action();
+    tauri::async_runtime::spawn_blocking(move || {
+        window
+            .state::<AppState>()
+            .with_current_surface_action(generation, || hide_translator_surface(&window))
+            .map(|_| ())
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -133,6 +158,93 @@ pub(crate) fn force_hide_window(_window: &WebviewWindow) {}
 fn force_hide_hwnd(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
     let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+}
+
+pub(crate) fn capture_without_reference_peer<T>(
+    peer: Option<&WebviewWindow>,
+    capture: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let Some(peer) = peer else {
+        return capture();
+    };
+    #[cfg(target_os = "windows")]
+    let hwnd = peer.hwnd().map_err(|error| error.to_string())?;
+    capture_after_withdrawal(
+        || {
+            #[cfg(target_os = "windows")]
+            disable_capture_window_transitions(hwnd)?;
+            force_hide_window(peer);
+            peer.hide().map_err(|error| error.to_string())
+        },
+        || {
+            #[cfg(target_os = "windows")]
+            {
+                capture_window_is_withdrawn(hwnd)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                peer.is_visible()
+                    .map(|visible| !visible)
+                    .map_err(|error| error.to_string())
+            }
+        },
+        || {
+            #[cfg(target_os = "windows")]
+            unsafe {
+                windows::Win32::Graphics::Dwm::DwmFlush().map_err(|error| {
+                    format!("Reference window compositor flush failed: {error}")
+                })?;
+            }
+            Ok(())
+        },
+        capture,
+    )
+}
+
+fn capture_after_withdrawal<T>(
+    withdraw: impl FnOnce() -> Result<(), String>,
+    mut is_withdrawn: impl FnMut() -> Result<bool, String>,
+    flush: impl FnOnce() -> Result<(), String>,
+    capture: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    withdraw()?;
+    if !is_withdrawn()? {
+        return Err("Reference window is still visible; capture aborted".to_string());
+    }
+    flush()?;
+    if !is_withdrawn()? {
+        return Err("Reference window became visible before capture".to_string());
+    }
+    capture()
+}
+
+#[cfg(target_os = "windows")]
+fn disable_capture_window_transitions(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Result<(), String> {
+    use windows::core::BOOL;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+    let disabled = BOOL::from(true);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disabled as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        )
+        .map_err(|error| format!("Disable reference window transitions failed: {error}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn capture_window_is_withdrawn(hwnd: windows::Win32::Foundation::HWND) -> Result<bool, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return Err("Reference window is unavailable; capture aborted".to_string());
+        }
+        Ok(!IsWindowVisible(hwnd).as_bool())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -171,12 +283,6 @@ fn normalize_translator_window(window: &WebviewWindow) -> Result<(), String> {
     window
         .set_size(tauri::LogicalSize::new(TRANSLATOR_WIDTH, TRANSLATOR_HEIGHT))
         .map_err(|error| error.to_string())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MainRoute {
-    Settings,
-    PromptOptimizer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,6 +331,7 @@ pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
     window
         .emit("screenpilot:reset", route.name())
         .map_err(|error| error.to_string())?;
+    app.state::<AppState>().set_main_route(route)?;
     window
         .set_fullscreen(false)
         .map_err(|error| error.to_string())?;
@@ -249,6 +356,55 @@ pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
         .emit("screenpilot:route", route.name())
         .map_err(|error| error.to_string())?;
     show_and_focus(&window)
+}
+
+fn toggle_optimizer_with(
+    state: &AppState,
+    visible: bool,
+    hide: impl FnOnce() -> Result<(), String>,
+    show: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !state.current()?.prompt_optimizer.enabled {
+        return Err("Prompt optimizer is disabled in settings".into());
+    }
+    if visible && state.main_route()? == MainRoute::PromptOptimizer {
+        state.cancel_active_optimizer_request();
+        hide()
+    } else {
+        show()
+    }
+}
+
+fn toggle_optimizer_window(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main window is unavailable")?;
+    toggle_optimizer_with(
+        &app.state::<AppState>(),
+        window.is_visible().map_err(|error| error.to_string())?,
+        || hide_main_window(&window),
+        || show_main(app, MainRoute::PromptOptimizer),
+    )
+}
+
+fn hide_main_window(window: &WebviewWindow) -> Result<(), String> {
+    force_hide_window(window);
+    window.hide().map_err(|error| error.to_string())
+}
+
+pub(crate) fn close_main_window(
+    window: WebviewWindow,
+) -> tauri::async_runtime::JoinHandle<Result<(), String>> {
+    let generation = window.state::<AppState>().begin_surface_action();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = window.state::<AppState>();
+        state
+            .with_current_surface_action(generation, || {
+                state.cancel_active_optimizer_request();
+                hide_main_window(&window)
+            })
+            .map(|_| ())
+    })
 }
 
 pub fn show_translator(app: &AppHandle) -> Result<(), String> {
@@ -454,7 +610,7 @@ fn hide_visible_translator_for_toggle(app: &AppHandle) -> Result<bool, String> {
     if !window.is_visible().unwrap_or(false) {
         return Ok(false);
     }
-    window.hide().map_err(|error| error.to_string())?;
+    hide_translator_surface(&window)?;
     normalize_translator_window(&window)?;
     Ok(true)
 }
@@ -599,9 +755,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                 .map(|_| ()),
             HotkeyAction::PromptOptimizer => app
                 .state::<AppState>()
-                .with_current_surface_action(generation, || {
-                    show_main(&app, MainRoute::PromptOptimizer)
-                })
+                .with_current_surface_action(generation, || toggle_optimizer_window(&app))
                 .map(|_| ()),
         };
         if let Err(error) = result {
@@ -846,10 +1000,21 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
                 }
             });
         } else {
-            if window.label() == "translator" {
-                let _ = run_surface_action(window.app_handle(), || {
-                    window.hide().map_err(|error| error.to_string())
-                });
+            if matches!(window.label(), "translator" | "main") {
+                if let Some(window) = window.app_handle().get_webview_window(window.label()) {
+                    let close = if window.label() == "translator" {
+                        close_translator_window(window)
+                    } else {
+                        close_main_window(window)
+                    };
+                    tauri::async_runtime::spawn(async move {
+                        match close.await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => eprintln!("Window close failed: {error}"),
+                            Err(error) => eprintln!("Window close task failed: {error}"),
+                        }
+                    });
+                }
                 return;
             }
             let _ = window.hide();
@@ -1010,24 +1175,235 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use tempfile::TempDir;
 
+    #[test]
+    fn reference_capture_waits_for_withdrawal_and_composition() {
+        let stages = RefCell::new(Vec::new());
+        let withdrawn = Cell::new(false);
+        let result = super::capture_after_withdrawal(
+            || {
+                stages.borrow_mut().push("hide without transitions");
+                withdrawn.set(true);
+                Ok(())
+            },
+            || {
+                stages.borrow_mut().push("confirm hidden");
+                Ok(withdrawn.get())
+            },
+            || {
+                stages.borrow_mut().push("compositor presented");
+                Ok(())
+            },
+            || {
+                stages.borrow_mut().push("sample screen");
+                Ok("frozen bitmap")
+            },
+        );
+        assert_eq!(result, Ok("frozen bitmap"));
+        assert_eq!(
+            *stages.borrow(),
+            [
+                "hide without transitions",
+                "confirm hidden",
+                "compositor presented",
+                "confirm hidden",
+                "sample screen",
+            ]
+        );
+    }
+
+    #[test]
+    fn reference_capture_aborts_on_withdrawal_or_compositor_failure() {
+        for failure in [
+            "hide",
+            "visible",
+            "missing",
+            "flush",
+            "reshown",
+            "destroyed",
+        ] {
+            let sampled = Cell::new(false);
+            let flushed = Cell::new(false);
+            let result = super::capture_after_withdrawal(
+                || {
+                    if failure == "hide" {
+                        Err("disable transitions or hide failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || match (failure, flushed.get()) {
+                    ("missing", _) | ("destroyed", true) => Err("invalid HWND".to_string()),
+                    ("visible", _) | ("reshown", true) => Ok(false),
+                    _ => Ok(true),
+                },
+                || {
+                    flushed.set(true);
+                    if failure == "flush" {
+                        Err("DwmFlush failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    sampled.set(true);
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "{failure}");
+            assert!(!sampled.get(), "{failure}");
+            assert_eq!(
+                flushed.get(),
+                matches!(failure, "flush" | "reshown" | "destroyed"),
+                "{failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_capture_without_a_peer_preserves_capture_result() {
+        assert_eq!(
+            super::capture_without_reference_peer(None, || Ok(42)),
+            Ok(42)
+        );
+        assert_eq!(
+            super::capture_without_reference_peer(None, || Err::<(), _>("capture failed".into())),
+            Err("capture failed".to_string())
+        );
+    }
+
+    #[test]
+    fn reference_withdrawal_failure_keeps_both_vision_entry_sessions_restorable() {
+        use crate::application::state::ReferenceSurface;
+        for has_screenshot in [false, true] {
+            for fail_during_flush in [false, true] {
+                let (state, _directory) = state();
+                let peer = ReferenceSurface::Vision;
+                let capturing = ReferenceSurface::Ocr;
+                let generation = state.begin_reference_surface_action(peer).unwrap();
+                state.begin_reference_surface(peer, generation);
+                let session = state.begin_reference_image_session(peer).unwrap();
+                let image_id = if has_screenshot {
+                    let image_id = state
+                        .images
+                        .save_temporary(&image::RgbaImage::new(2, 2))
+                        .unwrap();
+                    state
+                        .register_reference_temporary_image(peer, session, &image_id)
+                        .unwrap();
+                    Some(image_id)
+                } else {
+                    None
+                };
+                assert!(state.finish_reference_capture(peer, session));
+                let stream = state.begin_active_reference_stream(peer).unwrap();
+                let capturing_generation = state.begin_reference_surface_action(capturing).unwrap();
+                state.begin_reference_surface(capturing, capturing_generation);
+                state.claim_native_freeze(capturing);
+                state.suspend_reference_surface(peer);
+                let failure = "withdrawal failed".to_string();
+                let result = super::capture_after_withdrawal(
+                    || {
+                        if fail_during_flush {
+                            Ok(())
+                        } else {
+                            Err(failure.clone())
+                        }
+                    },
+                    || Ok(true),
+                    || Err(failure.clone()),
+                    || panic!("failed withdrawal must not sample the desktop"),
+                );
+                assert_eq!(result, Err::<(), _>(failure));
+                assert!(state.release_native_freeze(capturing));
+                state.cancel_reference_stream(capturing);
+                state.close_reference_image_session(capturing).unwrap();
+                state.release_reference_surface(capturing);
+                assert_eq!(
+                    state.take_suspended_reference_surface(capturing),
+                    Some(peer)
+                );
+                assert!(state.reference_surface_active(peer));
+                assert!(state.reference_stream_current(peer, stream));
+                assert_eq!(state.reference_image_session(peer), Ok(session));
+                if let Some(image_id) = image_id {
+                    assert!(state.images.read_data_url(&image_id).is_ok());
+                }
+                assert!(!state.reference_surface_active(capturing));
+                assert_eq!(
+                    state.with_current_reference_surface(peer, generation, || Ok(())),
+                    Ok(Some(()))
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reference_withdrawal_barrier_uses_a_hidden_hwnd_without_activation() {
+        use super::{
+            capture_window_is_withdrawn, disable_capture_window_transitions, force_hide_hwnd,
+        };
+        use windows::core::w;
+        use windows::Win32::Graphics::Dwm::DwmFlush;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetForegroundWindow, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("ScreenPilot hidden withdrawal test"),
+                WS_POPUP,
+                -32000,
+                -32000,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("hidden HWND creation failed");
+            let result = super::capture_after_withdrawal(
+                || {
+                    disable_capture_window_transitions(hwnd)?;
+                    force_hide_hwnd(hwnd);
+                    Ok(())
+                },
+                || capture_window_is_withdrawn(hwnd),
+                || DwmFlush().map_err(|error| error.to_string()),
+                || {
+                    assert_ne!(GetForegroundWindow(), hwnd);
+                    Ok(())
+                },
+            );
+            DestroyWindow(hwnd).expect("hidden HWND cleanup failed");
+            assert_eq!(result, Ok(()));
+            assert!(capture_window_is_withdrawn(Default::default()).is_err());
+            assert!(disable_capture_window_transitions(Default::default()).is_err());
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn force_hide_withdraws_a_raw_visible_window_after_framework_hide_state() {
-        use super::force_hide_hwnd;
+        use super::{force_hide_hwnd, hide_translator_with};
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, IsWindowVisible, ShowWindow, SW_SHOWNOACTIVATE,
-            WS_POPUP,
+            CreateWindowExW, DestroyWindow, GetForegroundWindow, IsWindowVisible, ShowWindow,
+            SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
         };
 
+        let (state, _directory) = state();
         unsafe {
             let hwnd = CreateWindowExW(
-                Default::default(),
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 w!("STATIC"),
                 w!("ScreenPilot hide state test"),
                 WS_POPUP,
-                0,
-                0,
+                -32000,
+                -32000,
                 10,
                 10,
                 None,
@@ -1037,13 +1413,32 @@ mod tests {
             )
             .expect("raw hide test window creation failed");
             let framework_visible_snapshot = IsWindowVisible(hwnd).as_bool();
+            let foreground = GetForegroundWindow();
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             assert!(!framework_visible_snapshot);
             assert!(IsWindowVisible(hwnd).as_bool());
 
-            force_hide_hwnd(hwnd);
+            let request = state.begin_translator_request(1).unwrap();
+            let framework_hide_called = Cell::new(false);
+            hide_translator_with(
+                &state,
+                || {
+                    assert!(request.is_cancelled());
+                    force_hide_hwnd(hwnd);
+                },
+                || {
+                    framework_hide_called.set(true);
+                    if framework_visible_snapshot {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
 
+            assert!(framework_hide_called.get());
             assert!(!IsWindowVisible(hwnd).as_bool());
+            assert_eq!(GetForegroundWindow(), foreground);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -1124,6 +1519,177 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_hotkey_toggles_hidden_visible_hidden_visible_and_cancels_pending_work() {
+        let (state, _directory) = state();
+        let visible = Cell::new(false);
+        let actions = RefCell::new(Vec::new());
+        assert_eq!(state.main_route(), Ok(super::MainRoute::Settings));
+        let toggle = || {
+            super::toggle_optimizer_with(
+                &state,
+                visible.get(),
+                || {
+                    actions.borrow_mut().push("hide");
+                    visible.set(false);
+                    Ok(())
+                },
+                || {
+                    actions.borrow_mut().push("reset and show");
+                    state.set_main_route(super::MainRoute::PromptOptimizer)?;
+                    visible.set(true);
+                    Ok(())
+                },
+            )
+        };
+
+        let opening = state.begin_surface_action();
+        assert_eq!(
+            state.with_current_surface_action(opening, toggle),
+            Ok(Some(()))
+        );
+        assert!(visible.get());
+        let request = state.begin_optimizer_request(100).unwrap();
+        let closing = state.begin_surface_action();
+        assert_eq!(
+            state.with_current_surface_action(closing, toggle),
+            Ok(Some(()))
+        );
+        assert!(!visible.get());
+        assert!(request.is_cancelled());
+        assert!(!state.optimizer_request_current(100));
+        assert_eq!(state.main_route(), Ok(super::MainRoute::PromptOptimizer));
+        assert_eq!(
+            state.with_current_surface_action(opening, || {
+                panic!("queued entrance must not reopen the closed optimizer")
+            }),
+            Ok::<Option<()>, String>(None)
+        );
+
+        let reopened = state.begin_surface_action();
+        assert_eq!(
+            state.with_current_surface_action(reopened, toggle),
+            Ok(Some(()))
+        );
+        let current_request = state.begin_optimizer_request(101).unwrap();
+        assert_eq!(state.with_current_surface_action(closing, toggle), Ok(None));
+        assert!(visible.get());
+        assert!(!current_request.is_cancelled());
+        assert_eq!(
+            *actions.borrow(),
+            ["reset and show", "hide", "reset and show"]
+        );
+    }
+
+    #[test]
+    fn optimizer_hotkey_switches_visible_settings_instead_of_hiding_them() {
+        let (state, _directory) = state();
+        let shows = Cell::new(0);
+        for _ in 0..2 {
+            state.set_main_route(super::MainRoute::Settings).unwrap();
+            super::toggle_optimizer_with(
+                &state,
+                true,
+                || panic!("visible settings must switch to optimizer, not close"),
+                || {
+                    shows.set(shows.get() + 1);
+                    state.set_main_route(super::MainRoute::PromptOptimizer)
+                },
+            )
+            .unwrap();
+            assert_eq!(state.main_route(), Ok(super::MainRoute::PromptOptimizer));
+        }
+        assert_eq!(shows.get(), 2);
+    }
+
+    #[test]
+    fn optimizer_hotkey_reopens_a_hidden_optimizer_after_explicit_close() {
+        let (state, _directory) = state();
+        state
+            .set_main_route(super::MainRoute::PromptOptimizer)
+            .unwrap();
+        let pending_open = state.begin_surface_action();
+        let request = state.begin_optimizer_request(100).unwrap();
+        let close = state.begin_surface_action();
+        state
+            .with_current_surface_action(close, || {
+                state.cancel_active_optimizer_request();
+                Ok(())
+            })
+            .unwrap();
+        assert!(request.is_cancelled());
+        assert_eq!(
+            state.with_current_surface_action(pending_open, || {
+                panic!("explicit close must invalidate a queued open")
+            }),
+            Ok::<Option<()>, String>(None)
+        );
+        let reopened = state.begin_surface_action();
+        let shows = Cell::new(0);
+        assert_eq!(
+            state.with_current_surface_action(reopened, || {
+                super::toggle_optimizer_with(
+                    &state,
+                    false,
+                    || panic!("hidden optimizer must reopen"),
+                    || {
+                        shows.set(shows.get() + 1);
+                        Ok(())
+                    },
+                )
+            }),
+            Ok(Some(()))
+        );
+        assert_eq!(shows.get(), 1);
+        assert!(state.begin_optimizer_request(101).is_some());
+    }
+
+    #[test]
+    fn disabled_optimizer_hotkey_neither_shows_nor_hides_the_main_window() {
+        let (state, _directory) = state();
+        let mut settings = state.current().unwrap();
+        settings.prompt_optimizer.enabled = false;
+        state.replace(&settings).unwrap();
+        for route in [
+            super::MainRoute::Settings,
+            super::MainRoute::PromptOptimizer,
+        ] {
+            state.set_main_route(route).unwrap();
+            for visible in [false, true] {
+                assert_eq!(
+                    super::toggle_optimizer_with(
+                        &state,
+                        visible,
+                        || panic!("disabled hotkey must not hide a window"),
+                        || panic!("disabled hotkey must not show a window"),
+                    ),
+                    Err("Prompt optimizer is disabled in settings".to_string())
+                );
+                assert_eq!(state.main_route(), Ok(route));
+            }
+        }
+    }
+
+    #[test]
+    fn optimizer_toggle_close_cancels_even_if_hiding_fails_and_does_not_reset() {
+        let (state, _directory) = state();
+        state
+            .set_main_route(super::MainRoute::PromptOptimizer)
+            .unwrap();
+        let request = state.begin_optimizer_request(100).unwrap();
+        assert_eq!(
+            super::toggle_optimizer_with(
+                &state,
+                true,
+                || Err("hide failed".to_string()),
+                || panic!("toggle close must never reset the optimizer"),
+            ),
+            Err("hide failed".to_string())
+        );
+        assert!(request.is_cancelled());
+        assert_eq!(state.main_route(), Ok(super::MainRoute::PromptOptimizer));
+    }
+
+    #[test]
     fn a_cancelled_or_failed_translator_reveal_never_captures_external_selection() {
         for reveal in [Ok(false), Err("window unavailable".to_string())] {
             let result = capture_before_surface_transition(
@@ -1165,6 +1731,140 @@ mod tests {
         );
         assert!(!delivered.get());
         assert!(state.surface_action_is_current(newer_intent));
+    }
+
+    #[test]
+    fn translator_toggle_then_explicit_close_discard_captures_without_blocking_reopen() {
+        let (state, _directory) = state();
+        let native_visible = Cell::new(false);
+        let framework_visible = Cell::new(false);
+        let deliveries = Cell::new(0);
+
+        for _ in 0..2 {
+            let capture_generation = state.begin_surface_action();
+            let request = state.begin_translator_request(capture_generation).unwrap();
+            state
+                .with_current_surface_action(capture_generation, || {
+                    native_visible.set(true);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(!framework_visible.get());
+            let close_generation = state.begin_surface_action();
+            assert_eq!(
+                state.with_current_surface_action(close_generation, || {
+                    super::hide_translator_with(
+                        &state,
+                        || native_visible.set(false),
+                        || {
+                            if framework_visible.replace(false) {
+                                native_visible.set(false);
+                            }
+                            Ok(())
+                        },
+                    )
+                }),
+                Ok(Some(()))
+            );
+            assert!(request.is_cancelled());
+            assert_eq!(
+                state.with_current_surface_action(capture_generation, || {
+                    deliveries.set(deliveries.get() + 1);
+                    native_visible.set(true);
+                    state.set_translator_selection("late selection".to_string());
+                    Ok(())
+                }),
+                Ok(None)
+            );
+            assert!(!native_visible.get());
+            assert_eq!(state.take_translator_selection(), "");
+        }
+
+        let reopened = state.begin_surface_action();
+        assert_eq!(
+            state.with_current_surface_action(reopened, || {
+                native_visible.set(true);
+                state.set_translator_selection("new selection".to_string());
+                Ok(())
+            }),
+            Ok(Some(()))
+        );
+        assert!(native_visible.get());
+        assert_eq!(state.take_translator_selection(), "new selection");
+        assert_eq!(deliveries.get(), 0);
+    }
+
+    #[test]
+    fn translator_close_follows_an_already_admitted_reveal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::channel;
+        use std::sync::Arc;
+
+        let (state, _directory) = state();
+        let state = Arc::new(state);
+        let native_visible = Arc::new(AtomicBool::new(false));
+        let reveal_generation = state.begin_surface_action();
+        let (admitted, admission) = channel();
+        let (finish, finish_reveal) = channel();
+        let revealing = {
+            let state = Arc::clone(&state);
+            let native_visible = Arc::clone(&native_visible);
+            std::thread::spawn(move || {
+                state.with_current_surface_action(reveal_generation, || {
+                    admitted.send(()).unwrap();
+                    finish_reveal
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    native_visible.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        admission
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let close_generation = state.begin_surface_action();
+        let closing = {
+            let state = Arc::clone(&state);
+            let native_visible = Arc::clone(&native_visible);
+            std::thread::spawn(move || {
+                state.with_current_surface_action(close_generation, || {
+                    assert!(native_visible.load(Ordering::SeqCst));
+                    super::hide_translator_with(
+                        &state,
+                        || native_visible.store(false, Ordering::SeqCst),
+                        || Ok(()),
+                    )
+                })
+            })
+        };
+        finish.send(()).unwrap();
+        assert_eq!(revealing.join().unwrap(), Ok(Some(())));
+        assert_eq!(closing.join().unwrap(), Ok(Some(())));
+        assert!(!native_visible.load(Ordering::SeqCst));
+        assert_eq!(
+            state.with_current_surface_action(reveal_generation, || {
+                panic!("late selection must not refocus or reopen the translator")
+            }),
+            Ok::<Option<()>, String>(None)
+        );
+    }
+
+    #[test]
+    fn translator_native_hide_and_cancellation_survive_framework_hide_failure() {
+        let (state, _directory) = state();
+        let request = state.begin_translator_request(1).unwrap();
+        let native_visible = Cell::new(true);
+        assert_eq!(
+            super::hide_translator_with(
+                &state,
+                || native_visible.set(false),
+                || Err("framework hide failed".to_string()),
+            ),
+            Err("framework hide failed".to_string())
+        );
+        assert!(!native_visible.get());
+        assert!(request.is_cancelled());
     }
 
     #[test]

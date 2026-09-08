@@ -330,11 +330,18 @@ fn position_vision_fullscreen(window: &WebviewWindow, screen: crate::vision::Scr
 fn show_native_freeze(
     window: &WebviewWindow,
     screen: crate::vision::ScreenSpace,
+    peer: Option<WebviewWindow>,
 ) -> Result<(), String> {
     let (sender, receiver) = std::sync::mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_cancelled = Arc::clone(&cancelled);
     window
         .run_on_main_thread(move || {
-            let result = crate::native_freeze::show(screen);
+            let result = with_live_freeze_task(&task_cancelled, || {
+                crate::application::lifecycle::capture_without_reference_peer(peer.as_ref(), || {
+                    with_live_freeze_task(&task_cancelled, || crate::native_freeze::show(screen))
+                })
+            });
             if result.is_ok() {
                 crate::platform::windows::overlay_identity::apply(
                     screen.left,
@@ -343,12 +350,46 @@ fn show_native_freeze(
                     screen.bottom,
                 );
             }
-            let _ = sender.send(result);
+            complete_native_freeze_task(
+                &task_cancelled,
+                sender,
+                result,
+                crate::native_freeze::close,
+            );
         })
         .map_err(|error| format!("schedule native freeze overlay failed: {error}"))?;
-    receiver
-        .recv_timeout(Duration::from_millis(1200))
-        .map_err(|error| format!("native freeze overlay timed out on main thread: {error}"))?
+    match receiver.recv_timeout(Duration::from_millis(1200)) {
+        Ok(result) => result,
+        Err(error) => {
+            cancelled.store(true, Ordering::Release);
+            Err(format!(
+                "native freeze overlay timed out on main thread: {error}"
+            ))
+        }
+    }
+}
+
+fn with_live_freeze_task<T>(
+    cancelled: &AtomicBool,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Native freeze task was cancelled".to_string());
+    }
+    action()
+}
+
+fn complete_native_freeze_task(
+    cancelled: &AtomicBool,
+    sender: std::sync::mpsc::Sender<Result<(), String>>,
+    result: Result<(), String>,
+    close: impl FnOnce(),
+) {
+    let captured = result.is_ok();
+    let delivered = sender.send(result).is_ok();
+    if captured && (!delivered || cancelled.load(Ordering::Acquire)) {
+        close();
+    }
 }
 
 fn close_native_freeze(app: &AppHandle) {
@@ -504,16 +545,17 @@ pub(crate) fn open_reference_vision(
         .region_locked
         .store(false, Ordering::Release);
     let result = (|| {
-        if state.reference_surface_active(surface.peer()) {
-            if let Some(peer) = app.get_webview_window(surface.peer().window_label()) {
-                if peer.is_visible().unwrap_or(false) {
+        let peer = if state.reference_surface_active(surface.peer()) {
+            let peer = app.get_webview_window(surface.peer().window_label());
+            if let Some(peer) = &peer {
+                if peer.is_visible().map_err(|error| error.to_string())? {
                     state.suspend_reference_surface(surface.peer());
-                    crate::application::lifecycle::force_hide_window(&peer);
-                    peer.hide().map_err(|error| error.to_string())?;
-                    crate::application::lifecycle::flush_windows_compositor();
                 }
             }
-        }
+            peer
+        } else {
+            None
+        };
         let window = ensure_reference_vision_window(app, surface, mode)?;
         let screen = current_screen_space(app).ok_or("No display is available")?;
         window
@@ -525,7 +567,7 @@ pub(crate) fn open_reference_vision(
             .map_err(|error| error.to_string())?;
         apply_vision_window_region(&window, None)?;
         state.claim_native_freeze(surface);
-        show_native_freeze(&window, screen)?;
+        show_native_freeze(&window, screen, peer)?;
         state.begin_reference_image_session(surface)?;
         let script = format!("window.location.hash = '#vision?mode={mode}'; window.dispatchEvent(new HashChangeEvent('hashchange')); window.dispatchEvent(new CustomEvent('vision:reset'));");
         let _ = window.eval(&script);
@@ -3089,6 +3131,57 @@ pub fn permissions_status() -> PermissionStatus {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn cancelled_native_freeze_task_skips_withdrawal_and_sampling() {
+        for cancelled_before_withdrawal in [false, true] {
+            let cancelled = AtomicBool::new(cancelled_before_withdrawal);
+            let withdrawn = Cell::new(false);
+            let sampled = Cell::new(false);
+            let result = with_live_freeze_task(&cancelled, || {
+                withdrawn.set(true);
+                cancelled.store(true, Ordering::Release);
+                with_live_freeze_task(&cancelled, || {
+                    sampled.set(true);
+                    Ok(())
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(withdrawn.get(), !cancelled_before_withdrawal);
+            assert!(!sampled.get());
+        }
+    }
+
+    #[test]
+    fn native_freeze_task_cleans_only_its_abandoned_successful_capture() {
+        for timed_out in [false, true] {
+            for receiver_dropped in [false, true] {
+                for captured in [false, true] {
+                    let cancelled = AtomicBool::new(timed_out);
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let receiver = if receiver_dropped {
+                        drop(receiver);
+                        None
+                    } else {
+                        Some(receiver)
+                    };
+                    let closed = Cell::new(false);
+                    let result = if captured {
+                        Ok(())
+                    } else {
+                        Err("capture failed".into())
+                    };
+                    complete_native_freeze_task(&cancelled, sender, result.clone(), || {
+                        closed.set(true);
+                    });
+                    assert_eq!(closed.get(), captured && (timed_out || receiver_dropped));
+                    if let Some(receiver) = receiver {
+                        assert_eq!(receiver.try_recv(), Ok(result));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn vision_closing_notification_is_stable_and_emit_failures_do_not_block_cleanup() {

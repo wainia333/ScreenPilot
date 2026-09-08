@@ -59,6 +59,7 @@ pub struct AppState {
     reference_ocr: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
     optimizer_request: Mutex<TranslatorRequestState>,
+    main_route: Mutex<MainRoute>,
     reference_vision_images: Mutex<ReferenceVisionImages>,
     reference_ocr_images: Mutex<ReferenceVisionImages>,
     surface_generation: AtomicU64,
@@ -71,6 +72,12 @@ pub struct AppState {
     startup_notice: Mutex<Option<String>>,
     native_freeze_owner: Mutex<Option<ReferenceSurface>>,
     suspended_reference_surface: Mutex<Option<ReferenceSurface>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MainRoute {
+    Settings,
+    PromptOptimizer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +178,7 @@ impl AppState {
                 cancelled: false,
                 signal: Arc::new(CancellationSignal::new()),
             }),
+            main_route: Mutex::new(MainRoute::Settings),
             reference_vision_images: Mutex::new(ReferenceVisionImages {
                 generation: 0,
                 active: false,
@@ -774,6 +782,21 @@ impl AppState {
                 failures.join("; ")
             ))
         }
+    }
+
+    pub fn main_route(&self) -> Result<MainRoute, String> {
+        self.main_route
+            .lock()
+            .map(|route| *route)
+            .map_err(|_| "Main window route is unavailable".to_string())
+    }
+
+    pub fn set_main_route(&self, route: MainRoute) -> Result<(), String> {
+        *self
+            .main_route
+            .lock()
+            .map_err(|_| "Main window route is unavailable".to_string())? = route;
+        Ok(())
     }
 
     pub fn begin_surface_action(&self) -> u64 {
