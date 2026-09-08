@@ -471,10 +471,10 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await page.getByRole('switch', { name: '开启大模型 OCR' }).click()
   await expect(page.getByRole('combobox', { name: 'OCR 模型' })).toBeVisible()
   await expect(page.getByRole('option', { name: 'AI 视觉 OCR' })).toHaveCount(0)
-  await expect(page.getByRole('combobox', { name: '截图翻译接口' })).toHaveValue('microsoft')
-  await expect(page.getByRole('combobox', { name: '截图翻译模型' })).toHaveCount(0)
+  await expect(page.getByRole('combobox', { name: 'OCR翻译接口' })).toHaveValue('microsoft')
+  await expect(page.getByRole('combobox', { name: 'OCR翻译模型' })).toHaveCount(0)
   await page.getByRole('switch', { name: '开启大模型翻译' }).click()
-  await expect(page.getByRole('combobox', { name: '截图翻译模型' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'OCR翻译模型' })).toBeVisible()
   await expect(page.getByRole('option', { name: 'AI', exact: true })).toHaveCount(0)
   const credentialRows = page.locator('.adapter-credentials > section')
   await expect(credentialRows).toHaveCount(4)
@@ -541,7 +541,7 @@ test('thinking effort controls use lowercase values and persist without legacy l
 
   await page.getByRole('button', { name: 'OCR', exact: true }).click()
   await page.getByRole('switch', { name: '显示思考过程', exact: true }).click()
-  const screenshot = page.getByRole('combobox', { name: '截图翻译思考强度', exact: true })
+  const screenshot = page.getByRole('combobox', { name: 'OCR翻译思考强度', exact: true })
   await assertOptions(screenshot, screenshotEfforts)
   await screenshot.selectOption('xhigh')
   await expect(screenshot).toHaveValue('xhigh')
@@ -1182,7 +1182,7 @@ test('settings prompt fields match the provider focus frame in both themes', asy
   const promptFields = [
     { section: '翻译', label: '大模型翻译系统提示词' },
     { section: 'OCR', label: 'OCR 提示词' },
-    { section: 'OCR', label: '截图翻译提示词' },
+    { section: 'OCR', label: 'OCR翻译提示词' },
     { section: 'Vision', label: 'Vision 系统提示词' },
     { section: 'Vision', label: 'Vision 问答提示词' },
     { section: '提示词优化', label: '优化器系统提示词' },
@@ -4937,3 +4937,82 @@ test('long OCR source scrolls independently without pushing translation below th
   if (headingBox === null || cardBox === null) throw new Error('Translation card geometry is missing')
   expect(headingBox.y + headingBox.height).toBeLessThanOrEqual(cardBox.y + cardBox.height)
 })
+
+for (const entry of ['screenshot', 'text'] as const) {
+  for (const firstClosed of ['vision', 'ocr'] as const) {
+    test(`independent Vision/OCR routes preserve ${entry} conversation when ${firstClosed} closes first`, async ({ page, context }) => {
+      await installVisionTauriMock(page, undefined, false)
+      await page.setViewportSize({ width: 1280, height: 720 })
+      await page.goto('/?window=vision#vision?mode=chat')
+      await page.bringToFront()
+      await waitForVisionSelection(page)
+      if (entry === 'screenshot') {
+        await page.mouse.move(100, 140)
+        await page.mouse.down()
+        await page.mouse.move(560, 430, { steps: 8 })
+        await page.mouse.up()
+      }
+      const question = `Keep the ${entry} Vision conversation.`
+      await page.getByPlaceholder('问点什么...').fill(question)
+      await page.getByPlaceholder('问点什么...').press('Enter')
+      await expect(page.locator('[data-screenpilot-floating-layout="true"]')).toBeVisible()
+      await expect(page.getByText(question, { exact: true })).toBeVisible()
+      await expect(page.getByText('The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.')).toBeVisible()
+
+      const ocrPage = await context.newPage()
+      await installVisionTauriMock(ocrPage, 'Independent OCR source', false, '独立 OCR 结果')
+      await ocrPage.setViewportSize({ width: 1280, height: 720 })
+      await ocrPage.goto('/?window=ocr#vision?mode=translate')
+      await ocrPage.bringToFront()
+      await waitForVisionSelection(ocrPage)
+      await ocrPage.mouse.move(120, 160)
+      await ocrPage.mouse.down()
+      await ocrPage.mouse.move(620, 460, { steps: 8 })
+      await ocrPage.mouse.up()
+      await expect(ocrPage.getByText('Independent OCR source')).toBeVisible()
+      await expect(ocrPage.getByText('独立 OCR 结果')).toBeVisible()
+      await expect(ocrPage).toHaveTitle('ScreenPilot — OCR翻译')
+      await expect(page.getByText(question, { exact: true })).toBeVisible()
+
+      for (const [targetPage, peer] of [[page, 'ocr'], [ocrPage, 'vision']] as const) {
+        await targetPage.evaluate((peerLabel) => {
+          const state = (window as typeof window & {
+            __SCREENPILOT_TEST__: { emitWindowEvent: (label: string, event: string, payload: unknown) => void }
+          }).__SCREENPILOT_TEST__
+          state.emitWindowEvent(peerLabel, 'screenpilot:reset', 'vision')
+          state.emitWindowEvent(peerLabel, 'screenpilot:vision-closing', null)
+          state.emitWindowEvent(peerLabel, 'vision-translate-stream', {
+            imageId: 'foreign-image', generation: 999, kind: 'original', delta: 'Foreign OCR content',
+          })
+        }, peer)
+      }
+      await expect(page.getByText(question, { exact: true })).toBeVisible()
+      await expect(ocrPage.getByText('Independent OCR source')).toBeVisible()
+      const closingPage = firstClosed === 'vision' ? page : ocrPage
+      const survivingPage = firstClosed === 'vision' ? ocrPage : page
+      await closingPage.bringToFront()
+      await closingPage.keyboard.press('Escape')
+      await expect.poll(() => closingPage.evaluate(() => (
+        window as typeof window & { __SCREENPILOT_TEST__: { closeCalls: number } }
+      ).__SCREENPILOT_TEST__.closeCalls)).toBe(1)
+      await expect.poll(() => survivingPage.evaluate(() => (
+        window as typeof window & { __SCREENPILOT_TEST__: { closeCalls: number } }
+      ).__SCREENPILOT_TEST__.closeCalls)).toBe(0)
+      await survivingPage.bringToFront()
+      if (firstClosed === 'ocr') {
+        await expect(page.getByText(question, { exact: true })).toBeVisible()
+        await page.getByPlaceholder('问点什么...').fill('Continue after OCR.')
+        await page.getByPlaceholder('问点什么...').press('Enter')
+        await expect(page.getByText('Continue after OCR.', { exact: true })).toBeVisible()
+        await expect(page.getByText(question, { exact: true })).toBeVisible()
+      } else {
+        await expect(ocrPage.getByText('Independent OCR source')).toBeVisible()
+      }
+      await survivingPage.keyboard.press('Escape')
+      await expect.poll(() => survivingPage.evaluate(() => (
+        window as typeof window & { __SCREENPILOT_TEST__: { closeCalls: number } }
+      ).__SCREENPILOT_TEST__.closeCalls)).toBe(1)
+      await ocrPage.close()
+    })
+  }
+}

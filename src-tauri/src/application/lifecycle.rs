@@ -1,4 +1,4 @@
-use crate::application::state::AppState;
+use crate::application::state::{AppState, ReferenceSurface};
 use crate::domain::settings::AppSettings;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -17,6 +17,7 @@ enum FeatureSurface {
     Main,
     Translator,
     Vision,
+    Ocr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -58,9 +59,19 @@ fn accept_hotkey_trigger(action: HotkeyAction) -> bool {
 
 fn hidden_surfaces_for(target: FeatureSurface) -> &'static [FeatureSurface] {
     match target {
-        FeatureSurface::Main => &[FeatureSurface::Translator, FeatureSurface::Vision],
-        FeatureSurface::Translator => &[FeatureSurface::Main, FeatureSurface::Vision],
-        FeatureSurface::Vision => &[FeatureSurface::Main, FeatureSurface::Translator],
+        FeatureSurface::Main => &[
+            FeatureSurface::Translator,
+            FeatureSurface::Vision,
+            FeatureSurface::Ocr,
+        ],
+        FeatureSurface::Translator => &[
+            FeatureSurface::Main,
+            FeatureSurface::Vision,
+            FeatureSurface::Ocr,
+        ],
+        FeatureSurface::Vision | FeatureSurface::Ocr => {
+            &[FeatureSurface::Main, FeatureSurface::Translator]
+        }
     }
 }
 
@@ -76,31 +87,30 @@ fn prepare_feature_surface(app: &AppHandle, target: FeatureSurface) -> Result<()
                 if let Some(window) = app.get_webview_window("translator") {
                     hide_translator_surface(&window)?;
                     normalize_translator_window(&window)?;
-                    if target == FeatureSurface::Vision {
-                        window.destroy().map_err(|error| error.to_string())?;
-                        wait_for_translator_withdrawn(&window);
-                    }
                 }
             }
             FeatureSurface::Vision => {
                 crate::application::commands::close_reference_vision_surface(app)?;
             }
+            FeatureSurface::Ocr => {
+                crate::application::commands::close_reference_surface(app, ReferenceSurface::Ocr)?;
+            }
         }
     }
-    if target == FeatureSurface::Vision {
+    if matches!(target, FeatureSurface::Vision | FeatureSurface::Ocr) {
         flush_windows_compositor();
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn flush_windows_compositor() {
+pub(crate) fn flush_windows_compositor() {
     use windows::Win32::Graphics::Dwm::DwmFlush;
     let _ = unsafe { DwmFlush() };
 }
 
 #[cfg(not(target_os = "windows"))]
-fn flush_windows_compositor() {}
+pub(crate) fn flush_windows_compositor() {}
 
 fn hide_translator_surface(window: &WebviewWindow) -> Result<(), String> {
     force_hide_window(window);
@@ -110,15 +120,20 @@ fn hide_translator_surface(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn force_hide_window(window: &WebviewWindow) {
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+pub(crate) fn force_hide_window(window: &WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
-        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+        force_hide_hwnd(hwnd);
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn force_hide_window(_window: &WebviewWindow) {}
+pub(crate) fn force_hide_window(_window: &WebviewWindow) {}
+
+#[cfg(target_os = "windows")]
+fn force_hide_hwnd(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+}
 
 #[cfg(target_os = "windows")]
 fn wait_for_translator_withdrawn(window: &WebviewWindow) {
@@ -246,6 +261,18 @@ fn show_translator_window(
     reset_existing: bool,
 ) -> Result<(), String> {
     prepare_feature_surface(app, FeatureSurface::Translator)?;
+    let window = prepare_translator_window(app, reset_existing)?;
+    if activate {
+        show_and_focus(&window)
+    } else {
+        show_without_activation(&window)
+    }
+}
+
+fn prepare_translator_window(
+    app: &AppHandle,
+    reset_existing: bool,
+) -> Result<WebviewWindow, String> {
     let (window, created) = ensure_translator_window(app)?;
     if !created && reset_existing {
         window
@@ -264,15 +291,11 @@ fn show_translator_window(
     window
         .emit("screenpilot:route", "translator")
         .map_err(|error| error.to_string())?;
-    if activate {
-        show_and_focus(&window)
-    } else {
-        show_without_activation(&window)
-    }
+    Ok(window)
 }
 
 #[cfg(target_os = "windows")]
-fn show_without_activation(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn show_without_activation(window: &WebviewWindow) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
@@ -296,7 +319,7 @@ fn show_without_activation(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_without_activation(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn show_without_activation(window: &WebviewWindow) -> Result<(), String> {
     window.show().map_err(|error| error.to_string())
 }
 
@@ -382,13 +405,26 @@ pub fn show_vision(
     let _settings_write = state.lock_settings_write()?;
     let settings = state.current()?;
     crate::application::commands::ensure_reference_mode_enabled(&settings, mode)?;
-    prepare_feature_surface(app, FeatureSurface::Vision)?;
+    if !state.accept_reference_surface_action(ReferenceSurface::for_mode(mode), surface_generation)
+    {
+        return Ok(());
+    }
+    prepare_feature_surface(
+        app,
+        if mode == "translate" {
+            FeatureSurface::Ocr
+        } else {
+            FeatureSurface::Vision
+        },
+    )?;
     crate::application::commands::open_reference_vision(app, mode, surface_generation)
 }
 
 pub fn request_vision(app: &AppHandle, mode: &'static str) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let generation = state.begin_surface_action();
+    let Some(generation) = state.begin_vision_surface_action(mode) else {
+        return Ok(());
+    };
     state
         .with_current_surface_action(generation, || show_vision(app, mode, generation))
         .map(|_| ())
@@ -400,19 +436,6 @@ fn run_surface_action(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let generation = state.begin_surface_action();
-    state
-        .with_current_surface_action(generation, action)
-        .map(|_| ())
-}
-
-fn run_vision_surface_cleanup(
-    app: &AppHandle,
-    action: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let Some(generation) = state.vision_surface_generation() else {
-        return Ok(());
-    };
     state
         .with_current_surface_action(generation, action)
         .map(|_| ())
@@ -437,9 +460,13 @@ fn hide_visible_translator_for_toggle(app: &AppHandle) -> Result<bool, String> {
 }
 
 fn capture_before_surface_transition<C, T>(
+    reveal: impl FnOnce() -> Result<bool, String>,
     capture: impl FnOnce() -> C,
-    transition: impl FnOnce(C) -> T,
-) -> T {
+    transition: impl FnOnce(C) -> Result<Option<T>, String>,
+) -> Result<Option<T>, String> {
+    if !reveal()? {
+        return Ok(None);
+    }
     transition(capture())
 }
 
@@ -463,7 +490,22 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
         return;
     }
     let state = app.state::<AppState>();
-    let generation = state.begin_surface_action();
+    let generation = if matches!(
+        action,
+        HotkeyAction::ScreenshotTranslation | HotkeyAction::Vision
+    ) {
+        let mode = if action == HotkeyAction::Vision {
+            "chat"
+        } else {
+            "translate"
+        };
+        let Some(generation) = state.begin_vision_surface_action(mode) else {
+            return;
+        };
+        generation
+    } else {
+        state.begin_surface_action()
+    };
     if action == HotkeyAction::Translator {
         let app = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -477,6 +519,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                     // It runs behind the previous surface transition, while the
                     // capture guard below repeats it after queued F2 work drains.
                     state.cancel_reference_vision_stream();
+                    state.cancel_reference_stream(ReferenceSurface::Ocr);
                     Ok(false)
                 }
             }) {
@@ -488,6 +531,15 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                 }
             }
             let result = capture_before_surface_transition(
+                || {
+                    state
+                        .with_current_surface_action(generation, || {
+                            let window = prepare_translator_window(&app, false)?;
+                            show_without_activation(&window)?;
+                            Ok(true)
+                        })
+                        .map(|revealed| revealed.unwrap_or(false))
+                },
                 || {
                     state.with_current_selection_capture(generation, || {
                         crate::platform::windows::selection::selected_text(true)
@@ -502,7 +554,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                             selection,
                             |value| state.set_translator_selection(value.to_owned()),
                             |selection| {
-                                show_translator_window(&app, false, false)?;
+                                prepare_feature_surface(&app, FeatureSurface::Translator)?;
                                 let window = app
                                     .get_webview_window("translator")
                                     .ok_or("Translator window is unavailable")?;
@@ -526,7 +578,11 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
         let result = match action {
             HotkeyAction::Translator => Ok(()),
             HotkeyAction::Vision => {
-                let selection = crate::platform::windows::selection::selected_text(false);
+                let selection = if app.state::<AppState>().vision_active() {
+                    String::new()
+                } else {
+                    crate::platform::windows::selection::selected_text(false)
+                };
                 let state = app.state::<AppState>();
                 state
                     .with_current_surface_action(generation, || {
@@ -583,7 +639,7 @@ fn active_shortcuts(settings: &AppSettings) -> Vec<(&'static str, &str, HotkeyAc
     }
     if settings.screenshot_translation.enabled {
         shortcuts.push((
-            "截图翻译",
+            "OCR翻译",
             settings.shortcuts.screenshot_translation.as_str(),
             HotkeyAction::ScreenshotTranslation,
         ));
@@ -664,7 +720,7 @@ fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str
         items.push(("vision", "Vision"));
     }
     if settings.screenshot_translation.enabled {
-        items.push(("screenshot", "截图翻译"));
+        items.push(("screenshot", "OCR翻译"));
     }
     if settings.prompt_optimizer.enabled {
         items.push(("optimizer", "提示词优化"));
@@ -759,21 +815,36 @@ pub fn update_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String
 }
 
 pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
-    if window.label() == "vision" && matches!(event, tauri::WindowEvent::Moved(_)) {
+    if matches!(window.label(), "vision" | "ocr") && matches!(event, tauri::WindowEvent::Moved(_)) {
         #[cfg(target_os = "windows")]
-        if !crate::application::commands::safe_drag_active() {
+        if !crate::application::commands::safe_drag_active(ReferenceSurface::for_window(
+            window.label(),
+        )) {
             reinforce_vision_topmost(window);
         }
     }
 
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
-        if window.label() == "vision" {
-            if let Err(error) = run_vision_surface_cleanup(window.app_handle(), || {
-                crate::application::commands::close_reference_vision_surface(window.app_handle())
-            }) {
-                eprintln!("Vision close cleanup failed: {error}");
-            }
+        if matches!(window.label(), "vision" | "ocr") {
+            let surface = ReferenceSurface::for_window(window.label());
+            let app = window.app_handle().clone();
+            let Some(generation) = app
+                .state::<AppState>()
+                .reference_surface_generation(surface)
+            else {
+                return;
+            };
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<AppState>();
+                if let Err(error) =
+                    state.with_current_reference_surface(surface, generation, || {
+                        crate::application::commands::close_reference_surface(&app, surface)
+                    })
+                {
+                    eprintln!("Reference window close cleanup failed: {error}");
+                }
+            });
         } else {
             if window.label() == "translator" {
                 let _ = run_surface_action(window.app_handle(), || {
@@ -939,6 +1010,44 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use tempfile::TempDir;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn force_hide_withdraws_a_raw_visible_window_after_framework_hide_state() {
+        use super::force_hide_hwnd;
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, IsWindowVisible, ShowWindow, SW_SHOWNOACTIVATE,
+            WS_POPUP,
+        };
+
+        unsafe {
+            let hwnd = CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("ScreenPilot hide state test"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("raw hide test window creation failed");
+            let framework_visible_snapshot = IsWindowVisible(hwnd).as_bool();
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            assert!(!framework_visible_snapshot);
+            assert!(IsWindowVisible(hwnd).as_bool());
+
+            force_hide_hwnd(hwnd);
+
+            assert!(!IsWindowVisible(hwnd).as_bool());
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     fn state() -> (AppState, TempDir) {
         let directory = TempDir::new().expect("temp dir");
         let store = SettingsStore::new(directory.path());
@@ -969,7 +1078,11 @@ mod tests {
         );
         assert_eq!(
             hidden_surfaces_for(FeatureSurface::Translator),
-            &[FeatureSurface::Main, FeatureSurface::Vision]
+            &[
+                FeatureSurface::Main,
+                FeatureSurface::Vision,
+                FeatureSurface::Ocr
+            ]
         );
     }
 
@@ -985,22 +1098,41 @@ mod tests {
     }
 
     #[test]
-    fn translator_hotkey_captures_before_starting_a_surface_transition() {
+    fn translator_hotkey_reveals_before_capture_and_defers_the_surface_transition() {
         let stages = RefCell::new(Vec::new());
 
         let result = capture_before_surface_transition(
+            || {
+                stages.borrow_mut().push("reveal without activation");
+                Ok(true)
+            },
             || {
                 stages.borrow_mut().push("capture");
                 "selected text".to_string()
             },
             |selection| {
                 stages.borrow_mut().push("transition");
-                selection
+                Ok(Some(selection))
             },
         );
 
-        assert_eq!(result, "selected text");
-        assert_eq!(*stages.borrow(), ["capture", "transition"]);
+        assert_eq!(result, Ok(Some("selected text".to_string())));
+        assert_eq!(
+            *stages.borrow(),
+            ["reveal without activation", "capture", "transition"]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_or_failed_translator_reveal_never_captures_external_selection() {
+        for reveal in [Ok(false), Err("window unavailable".to_string())] {
+            let result = capture_before_surface_transition(
+                || reveal.clone(),
+                || panic!("capture must not start"),
+                |_: String| Ok(Some("transition must not start")),
+            );
+            assert_eq!(result, reveal.map(|_| None));
+        }
     }
 
     #[test]
@@ -1066,7 +1198,7 @@ mod tests {
         let result = merge_shortcut_results([
             ("文本翻译 F2".into(), Ok(())),
             ("Vision F3".into(), Err("occupied".into())),
-            ("截图翻译 F4".into(), Ok(())),
+            ("OCR翻译 F4".into(), Ok(())),
             ("提示词优化 Control+Alt+P".into(), Err("occupied".into())),
         ]);
         let error = result.expect_err("conflicts must remain visible");

@@ -36,6 +36,19 @@ npm run audit:rust
 
 `scripts/smoke-windows.ps1` 会先按目标路径、产品元数据和 ScreenPilot 发布文件名检测同产品进程。默认情况下，只要已有实例就以 `SMOKE_PRECONDITION_FAILED` 失败，避免 Tauri 单实例转交被误报为本次构建崩溃；脚本不会终止用户已有进程。只有明确接受“本次没有执行 smoke”的人工调用方才可传入 `-AllowExistingInstanceSkip`，并会得到 `SMOKE_SKIPPED`，CI 不使用该选项。在无已有实例时，脚本启动实际 release EXE，并按 `ParentProcessId` 递归确认本次 ScreenPilot 进程树稳定创建了 WebView2 子进程。它验证原生进程与 WebView2 初始化边界，不伪装成真实 Tauri IPC、快捷键、剪贴板、截图或凭据业务集成测试；这些系统级路径仍需专门的 Windows 集成环境。
 
+## Windows 快捷键回归
+
+- 文本翻译快捷键先显示不抢焦点的窗口，再读取外部选区，最后填入文本并激活。无选区、复制响应慢时，窗口出现不应等待剪贴板超时；外部选区和剪贴板恢复仍需验证。
+- 选区读取未完成时再次按翻译快捷键或关闭窗口，迟到的结果不得重新打开窗口；提前输入的内容不得被迟到的选区覆盖。
+- Vision 截图后保留预加载的文本翻译窗口，再次打开文本翻译不应重新创建 WebView。
+- Vision 正在框选或截图弹窗尚未飞行结束时，OCR 快捷键不启动第二层截图，也不破坏 Esc。截图或纯文字对话弹窗落位后可以打开独立的 OCR翻译窗口；框选期间仅暂时隐藏 Vision，OCR 落位或取消后恢复原对话，不重置输入、截图或请求流。
+- Vision 与 OCR 同时显示时，Esc 只关闭有焦点的窗口；先关闭任一窗口，再关闭另一窗口都应成功。点击切换焦点后，Vision 的延迟输入聚焦不得抢回焦点。
+- OCR 框选中取消、截图失败后按 Esc、OCR 正在识别时关闭，都不得清理 Vision 的图片或取消 Vision 回答；关闭 Vision 也不得取消 OCR 请求或灰幕。
+- OCR 新会话中重复按快捷键仍复用当前窗口；Esc 后能够重新截图。旧会话迟到的飞行完成通知不得解锁新会话的 OCR 切换。
+- 分别以截图、纯文字进入 Vision，并在 OCR 框选中取消或 OCR 结果页按 Esc 关闭，然后关闭 Vision；等待流式回答、窗口动画或拖动回调结束后，屏幕不得残留窄条灰幕或重新出现已关闭窗口。再次启动 Vision/OCR 后仍可正常截图和关闭。
+
+以上窗口、焦点、剪贴板和全局快捷键行为需要真实 Windows 桌面回归；Rust 状态与调用顺序测试、前端事件测试不代替原生交互验证。
+
 ## Vendor 完整性基线
 
 `npm run scan` 只读取仓库内 `scripts/vendor-integrity.json` 和明确的生产接入文件，不依赖开发机绝对路径、同级目录或外部规范文件，也不限制 README、审查报告等 Markdown。清单对受控 UTF-8 文本统一换行到 LF 后计算 SHA-256，因此不受 Windows `core.autocrlf` 影响。

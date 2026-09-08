@@ -314,6 +314,33 @@ describe('TranslatorPage', () => {
     expect(desktop.translations.at(-1)?.text).toBe('delayed selection')
   })
 
+  it('preserves typing in the revealed window when capture finishes later', async () => {
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    await act(async () => {
+      desktop.emitTranslatorPrepare()
+      await Promise.resolve()
+    })
+    const input = screen.getByLabelText('原文')
+    fireEvent.change(input, { target: { value: 'typed while capture was pending' } })
+
+    await act(async () => {
+      desktop.selection = 'late selection'
+      desktop.emitTranslatorSelection(desktop.selection)
+      fireEvent.focus(window)
+      await Promise.resolve()
+    })
+    expect(input).toHaveValue('typed while capture was pending')
+
+    await act(async () => {
+      desktop.emitTranslatorPrepare()
+      desktop.emitTranslatorSelection('next hotkey selection')
+      await Promise.resolve()
+    })
+    expect(screen.getByLabelText('原文')).toHaveValue('next hotkey selection')
+  })
+
   it('starts a new translation when consecutive selection events contain the same text', async () => {
     vi.useFakeTimers()
     const desktop = new RecordingDesktop()

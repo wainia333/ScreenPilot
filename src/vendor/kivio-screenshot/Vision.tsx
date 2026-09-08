@@ -1924,6 +1924,7 @@ export default function Vision() {
     const requestId = ++focusReqIdRef.current
     const canFocus = () => (
       requestId === focusReqIdRef.current
+      && document.hasFocus()
       && modeRef.current === 'chat'
       && !historyOpenRef.current
       && !capturingRef.current

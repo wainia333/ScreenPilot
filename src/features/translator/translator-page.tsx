@@ -229,6 +229,7 @@ export function TranslatorPage() {
       selection: null,
     }
     componentActive.current = true
+    let pendingCaptureRevision: number | null = manualInputRevision.current
 
     const focusInput = () => {
       queueMicrotask(() => {
@@ -240,6 +241,11 @@ export function TranslatorPage() {
       delivery: TranslatorSelectionDelivery,
     ) => {
       if (!lifecycle.active) return
+      if (
+        pendingCaptureRevision !== null
+        && pendingCaptureRevision !== manualInputRevision.current
+      ) return
+      if (delivery === 'event' || selected.trim().length > 0) pendingCaptureRevision = null
       const lastApplied = lastAppliedSelection.current
       if (lastApplied?.text === selected) {
         if (delivery === 'snapshot') return
@@ -303,6 +309,7 @@ export function TranslatorPage() {
     }
     const onPrepare = () => {
       if (!lifecycle.active) return
+      pendingCaptureRevision = manualInputRevision.current
       inputRevision.current += 1
       cancelTranslation()
       selectionRequest.current += 1

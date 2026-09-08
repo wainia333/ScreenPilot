@@ -7,6 +7,7 @@ const tauriMocks = vi.hoisted(() => ({
   listen: vi.fn<(
     event: string,
     listener: (event: { payload: unknown }) => void,
+    options?: { target: string },
   ) => Promise<() => void>>(),
   setTitle: vi.fn<(title: string) => Promise<void>>(),
   unlisten: vi.fn<() => void>(),
@@ -23,7 +24,7 @@ const vendorApi = vi.hoisted(() => {
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriMocks.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: tauriMocks.listen }))
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ setTitle: tauriMocks.setTitle }),
+  getCurrentWindow: () => ({ label: 'vision', setTitle: tauriMocks.setTitle }),
 }))
 
 vi.mock('../../vendor/kivio-screenshot/api/tauri', () => ({ api: vendorApi.api }))
@@ -156,6 +157,7 @@ describe('ReferenceVisionAdapter mount contract', () => {
       expect(tauriMocks.listen).toHaveBeenCalledWith(
         'vision-translate-stream',
         expect.any(Function),
+        { target: 'vision' },
       )
     })
 

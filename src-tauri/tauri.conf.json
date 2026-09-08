@@ -54,7 +54,7 @@
     "publisher": "Wainia",
     "category": "Productivity",
     "shortDescription": "ScreenPilot desktop screen assistant",
-    "longDescription": "ScreenPilot provides fast text translation, screen analysis, screenshot translation and prompt refinement.",
+    "longDescription": "ScreenPilot provides fast text translation, screen analysis, OCR translation and prompt refinement.",
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico"

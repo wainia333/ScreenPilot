@@ -469,13 +469,13 @@ impl AppSettings {
             self.screenshot_translation.source_language.as_str(),
             "auto" | "zh-CN" | "en" | "ja" | "ko"
         ) {
-            return Err("Screenshot translation source language is unsupported".into());
+            return Err("OCR translation source language is unsupported".into());
         }
         if !matches!(
             self.screenshot_translation.target_language.as_str(),
             "auto" | "zh-CN" | "en" | "ja" | "ko"
         ) {
-            return Err("Screenshot translation target language is unsupported".into());
+            return Err("OCR translation target language is unsupported".into());
         }
         let mut shortcuts = vec![self.shortcuts.translator.as_str()];
         if self.vision.enabled {

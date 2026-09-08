@@ -52,18 +52,61 @@ pub struct AppState {
     pub images: ImageStore,
     pub webview_data_directory: PathBuf,
     pub vision_busy: AtomicBool,
+    pub ocr_busy: AtomicBool,
     vision_surface_generation: AtomicU64,
+    ocr_surface_generation: AtomicU64,
     reference_vision: Mutex<ReferenceVisionState>,
+    reference_ocr: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
     optimizer_request: Mutex<TranslatorRequestState>,
     reference_vision_images: Mutex<ReferenceVisionImages>,
+    reference_ocr_images: Mutex<ReferenceVisionImages>,
     surface_generation: AtomicU64,
+    reference_intent_generation: AtomicU64,
     surface_transition: Mutex<()>,
     selection_capture: Mutex<()>,
     settings_write: Mutex<()>,
     translator_selection: Mutex<String>,
     vision_selection: Mutex<String>,
     startup_notice: Mutex<Option<String>>,
+    native_freeze_owner: Mutex<Option<ReferenceSurface>>,
+    suspended_reference_surface: Mutex<Option<ReferenceSurface>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceSurface {
+    Vision,
+    Ocr,
+}
+
+impl ReferenceSurface {
+    pub fn for_mode(mode: &str) -> Self {
+        if mode == "translate" {
+            Self::Ocr
+        } else {
+            Self::Vision
+        }
+    }
+    pub fn for_window(label: &str) -> Self {
+        if label == "ocr" {
+            Self::Ocr
+        } else {
+            Self::Vision
+        }
+    }
+    pub fn peer(self) -> Self {
+        match self {
+            Self::Vision => Self::Ocr,
+            Self::Ocr => Self::Vision,
+        }
+    }
+
+    pub fn window_label(self) -> &'static str {
+        match self {
+            Self::Vision => "vision",
+            Self::Ocr => "ocr",
+        }
+    }
 }
 
 struct ReferenceVisionState {
@@ -81,6 +124,7 @@ struct TranslatorRequestState {
 struct ReferenceVisionImages {
     generation: u64,
     active: bool,
+    capture_ready: bool,
     temporary_ids: HashSet<String>,
 }
 
@@ -98,8 +142,15 @@ impl AppState {
             images,
             webview_data_directory,
             vision_busy: AtomicBool::new(false),
+            ocr_busy: AtomicBool::new(false),
             vision_surface_generation: AtomicU64::new(0),
+            ocr_surface_generation: AtomicU64::new(0),
             reference_vision: Mutex::new(ReferenceVisionState {
+                generation: 0,
+                cancelled: false,
+                signal: Arc::new(CancellationSignal::new()),
+            }),
+            reference_ocr: Mutex::new(ReferenceVisionState {
                 generation: 0,
                 cancelled: false,
                 signal: Arc::new(CancellationSignal::new()),
@@ -109,6 +160,12 @@ impl AppState {
                 cancelled: false,
                 signal: Arc::new(CancellationSignal::new()),
             }),
+            reference_ocr_images: Mutex::new(ReferenceVisionImages {
+                generation: 0,
+                active: false,
+                capture_ready: false,
+                temporary_ids: HashSet::new(),
+            }),
             optimizer_request: Mutex::new(TranslatorRequestState {
                 generation: 0,
                 cancelled: false,
@@ -117,41 +174,216 @@ impl AppState {
             reference_vision_images: Mutex::new(ReferenceVisionImages {
                 generation: 0,
                 active: false,
+                capture_ready: false,
                 temporary_ids: HashSet::new(),
             }),
             surface_generation: AtomicU64::new(0),
+            reference_intent_generation: AtomicU64::new(0),
             surface_transition: Mutex::new(()),
             selection_capture: Mutex::new(()),
             settings_write: Mutex::new(()),
             translator_selection: Mutex::new(String::new()),
             vision_selection: Mutex::new(String::new()),
             startup_notice: Mutex::new(None),
+            native_freeze_owner: Mutex::new(None),
+            suspended_reference_surface: Mutex::new(None),
         }
     }
 
-    pub fn begin_vision(&self, surface_generation: u64) -> bool {
-        let already_active = self.vision_busy.swap(true, Ordering::SeqCst);
-        self.vision_surface_generation
-            .store(surface_generation, Ordering::SeqCst);
-        already_active
+    pub fn reference_surface_can_open(&self, surface: ReferenceSurface) -> bool {
+        !self.reference_surface_active(surface.peer())
+            || self.reference_capture_ready(surface.peer())
     }
 
+    pub fn begin_reference_surface_action(&self, surface: ReferenceSurface) -> Option<u64> {
+        self.reference_surface_can_open(surface)
+            .then(|| self.begin_surface_action())
+    }
+
+    pub fn accept_reference_surface_action(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+    ) -> bool {
+        if !self.surface_action_is_current(generation) {
+            return false;
+        }
+        self.reference_intent_generation
+            .store(generation, Ordering::SeqCst);
+        self.reference_surface_can_open(surface)
+    }
+
+    pub fn begin_vision_surface_action(&self, mode: &str) -> Option<u64> {
+        self.begin_reference_surface_action(ReferenceSurface::for_mode(mode))
+    }
+
+    #[cfg(test)]
+    pub fn begin_vision(&self, surface_generation: u64) -> bool {
+        self.begin_reference_surface(ReferenceSurface::Vision, surface_generation)
+    }
+
+    #[cfg(test)]
     pub fn release_vision(&self) {
-        self.vision_surface_generation.store(0, Ordering::SeqCst);
-        self.vision_busy.store(false, Ordering::SeqCst);
+        self.release_reference_surface(ReferenceSurface::Vision);
     }
 
     pub fn vision_active(&self) -> bool {
         self.vision_busy.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
     pub fn vision_surface_generation(&self) -> Option<u64> {
-        let generation = self.vision_surface_generation.load(Ordering::SeqCst);
+        self.reference_surface_generation(ReferenceSurface::Vision)
+    }
+
+    pub fn reference_surface_generation(&self, surface: ReferenceSurface) -> Option<u64> {
+        let generation = self.surface_generation_for(surface).load(Ordering::SeqCst);
         (generation != 0).then_some(generation)
     }
 
+    fn surface_generation_for(&self, surface: ReferenceSurface) -> &AtomicU64 {
+        match surface {
+            ReferenceSurface::Vision => &self.vision_surface_generation,
+            ReferenceSurface::Ocr => &self.ocr_surface_generation,
+        }
+    }
+
+    fn busy_for(&self, surface: ReferenceSurface) -> &AtomicBool {
+        match surface {
+            ReferenceSurface::Vision => &self.vision_busy,
+            ReferenceSurface::Ocr => &self.ocr_busy,
+        }
+    }
+
+    fn stream_for(&self, surface: ReferenceSurface) -> &Mutex<ReferenceVisionState> {
+        match surface {
+            ReferenceSurface::Vision => &self.reference_vision,
+            ReferenceSurface::Ocr => &self.reference_ocr,
+        }
+    }
+
+    fn images_for(&self, surface: ReferenceSurface) -> &Mutex<ReferenceVisionImages> {
+        match surface {
+            ReferenceSurface::Vision => &self.reference_vision_images,
+            ReferenceSurface::Ocr => &self.reference_ocr_images,
+        }
+    }
+
+    pub fn begin_reference_surface(&self, surface: ReferenceSurface, generation: u64) -> bool {
+        self.reference_intent_generation
+            .store(generation, Ordering::SeqCst);
+        let already_active = self.busy_for(surface).swap(true, Ordering::SeqCst);
+        self.surface_generation_for(surface)
+            .store(generation, Ordering::SeqCst);
+        already_active
+    }
+
+    pub fn release_reference_surface(&self, surface: ReferenceSurface) {
+        self.surface_generation_for(surface)
+            .store(0, Ordering::SeqCst);
+        self.busy_for(surface).store(false, Ordering::SeqCst);
+    }
+
+    pub fn reference_surface_active(&self, surface: ReferenceSurface) -> bool {
+        self.busy_for(surface).load(Ordering::SeqCst)
+    }
+
+    pub fn reference_surface_action_is_current(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+    ) -> bool {
+        self.reference_surface_generation(surface) == Some(generation)
+            && self
+                .surface_action_is_current(self.reference_intent_generation.load(Ordering::SeqCst))
+    }
+
+    pub fn with_current_reference_surface<T>(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        if !self.reference_surface_action_is_current(surface, generation) {
+            return Ok(None);
+        }
+        let _guard = self
+            .surface_transition
+            .lock()
+            .map_err(|_| "Surface transition state is unavailable".to_string())?;
+        if !self.reference_surface_action_is_current(surface, generation) {
+            return Ok(None);
+        }
+        action().map(Some)
+    }
+
+    pub fn claim_native_freeze(&self, surface: ReferenceSurface) {
+        *self
+            .native_freeze_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(surface);
+    }
+
+    pub fn owns_native_freeze(&self, surface: ReferenceSurface) -> bool {
+        *self
+            .native_freeze_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            == Some(surface)
+    }
+
+    pub fn release_native_freeze(&self, surface: ReferenceSurface) -> bool {
+        let mut owner = self
+            .native_freeze_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *owner != Some(surface) {
+            return false;
+        }
+        *owner = None;
+        true
+    }
+
+    pub fn suspend_reference_surface(&self, surface: ReferenceSurface) {
+        *self
+            .suspended_reference_surface
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(surface);
+    }
+
+    pub fn take_suspended_reference_surface(
+        &self,
+        capturing: ReferenceSurface,
+    ) -> Option<ReferenceSurface> {
+        let mut suspended = self
+            .suspended_reference_surface
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *suspended == Some(capturing.peer()) {
+            suspended.take()
+        } else {
+            None
+        }
+    }
+
+    #[cfg(test)]
     pub fn begin_reference_vision_stream(&self) -> u64 {
-        let Ok(mut state) = self.reference_vision.lock() else {
+        self.begin_reference_stream(ReferenceSurface::Vision)
+    }
+
+    pub fn begin_active_reference_stream(&self, surface: ReferenceSurface) -> Result<u64, String> {
+        let session = self
+            .images_for(surface)
+            .lock()
+            .map_err(|_| "Image session is unavailable".to_string())?;
+        if !session.active {
+            return Err("Reference window is no longer active".into());
+        }
+        Ok(self.begin_reference_stream(surface))
+    }
+
+    pub fn begin_reference_stream(&self, surface: ReferenceSurface) -> u64 {
+        let Ok(mut state) = self.stream_for(surface).lock() else {
             return 0;
         };
         // Invalidate the old generation before waking it. This ordering closes
@@ -165,15 +397,23 @@ impl AppState {
     }
 
     pub fn cancel_reference_vision_stream(&self) {
-        if let Ok(mut state) = self.reference_vision.lock() {
+        self.cancel_reference_stream(ReferenceSurface::Vision);
+    }
+
+    pub fn cancel_reference_stream(&self, surface: ReferenceSurface) {
+        if let Ok(mut state) = self.stream_for(surface).lock() {
             state.generation = state.generation.wrapping_add(1).max(1);
             state.cancelled = true;
             state.signal.cancel();
         }
     }
 
-    pub fn cancel_reference_vision_stream_for_surface(&self, surface_generation: u64) -> bool {
-        let Ok(mut state) = self.reference_vision.lock() else {
+    pub fn cancel_reference_stream_for_surface(
+        &self,
+        surface: ReferenceSurface,
+        surface_generation: u64,
+    ) -> bool {
+        let Ok(mut state) = self.stream_for(surface).lock() else {
             return false;
         };
         if !self.surface_action_is_current(surface_generation) {
@@ -190,43 +430,83 @@ impl AppState {
         surface_generation: u64,
         capture: impl FnOnce() -> T,
     ) -> Result<Option<T>, String> {
+        self.with_current_selection_capture_for_surface(
+            ReferenceSurface::Vision,
+            surface_generation,
+            capture,
+        )
+    }
+
+    pub fn with_current_selection_capture_for_surface<T>(
+        &self,
+        surface: ReferenceSurface,
+        surface_generation: u64,
+        capture: impl FnOnce() -> T,
+    ) -> Result<Option<T>, String> {
         let _guard = self
             .selection_capture
             .lock()
             .map_err(|_| "Selection capture state is unavailable".to_string())?;
-        if !self.cancel_reference_vision_stream_for_surface(surface_generation) {
+        if !self.cancel_reference_stream_for_surface(surface, surface_generation) {
             return Ok(None);
         }
+        self.cancel_reference_stream(surface.peer());
         Ok(Some(capture()))
     }
 
     pub fn reference_vision_signal(&self, generation: u64) -> Option<Arc<CancellationSignal>> {
-        let state = self.reference_vision.lock().ok()?;
+        self.reference_signal(ReferenceSurface::Vision, generation)
+    }
+
+    pub fn reference_signal(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+    ) -> Option<Arc<CancellationSignal>> {
+        let state = self.stream_for(surface).lock().ok()?;
         (state.generation == generation && !state.cancelled).then(|| Arc::clone(&state.signal))
     }
 
     #[allow(dead_code)]
     pub fn reference_vision_stream_cancelled(&self) -> bool {
-        self.reference_vision
+        self.reference_stream_cancelled(ReferenceSurface::Vision)
+    }
+
+    pub fn reference_stream_cancelled(&self, surface: ReferenceSurface) -> bool {
+        self.stream_for(surface)
             .lock()
             .map(|state| state.cancelled)
             .unwrap_or(true)
     }
 
     pub fn reference_vision_stream_current(&self, generation: u64) -> bool {
-        self.reference_vision
+        self.reference_stream_current(ReferenceSurface::Vision, generation)
+    }
+
+    pub fn reference_stream_current(&self, surface: ReferenceSurface, generation: u64) -> bool {
+        self.stream_for(surface)
             .lock()
             .map(|state| state.generation == generation && !state.cancelled)
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub fn with_current_reference_vision_stream<T>(
         &self,
         generation: u64,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<Option<T>, String> {
+        self.with_current_reference_stream(ReferenceSurface::Vision, generation, action)
+    }
+
+    pub fn with_current_reference_stream<T>(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
         let state = self
-            .reference_vision
+            .stream_for(surface)
             .lock()
             .map_err(|_| "Reference Vision stream state is unavailable".to_string())?;
         if state.generation != generation || state.cancelled {
@@ -313,35 +593,87 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub fn begin_reference_vision_image_session(&self) -> Result<u64, String> {
+        self.begin_reference_image_session(ReferenceSurface::Vision)
+    }
+
+    pub fn begin_reference_image_session(&self, surface: ReferenceSurface) -> Result<u64, String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
-            .map_err(|_| "Vision image session is unavailable".to_string())?;
+            .map_err(|_| format!("{} image session is unavailable", surface.window_label()))?;
         session.generation = session.generation.wrapping_add(1).max(1);
         session.active = true;
+        session.capture_ready = false;
         Ok(session.generation)
     }
 
-    pub fn reference_vision_image_session(&self) -> Result<u64, String> {
-        let session = self
-            .reference_vision_images
+    #[cfg(test)]
+    pub fn reference_vision_capture_ready(&self) -> bool {
+        self.reference_capture_ready(ReferenceSurface::Vision)
+    }
+
+    pub fn reference_capture_ready(&self, surface: ReferenceSurface) -> bool {
+        self.images_for(surface)
             .lock()
-            .map_err(|_| "Vision image session is unavailable".to_string())?;
+            .map(|session| session.active && session.capture_ready)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn finish_reference_vision_capture(&self, generation: u64) -> bool {
+        self.finish_reference_capture(ReferenceSurface::Vision, generation)
+    }
+
+    pub fn finish_reference_capture(&self, surface: ReferenceSurface, generation: u64) -> bool {
+        let Ok(mut session) = self.images_for(surface).lock() else {
+            return false;
+        };
+        if !session.active || session.generation != generation {
+            return false;
+        }
+        session.capture_ready = true;
+        true
+    }
+
+    #[cfg(test)]
+    pub fn reference_vision_image_session(&self) -> Result<u64, String> {
+        self.reference_image_session(ReferenceSurface::Vision)
+    }
+
+    pub fn reference_image_session(&self, surface: ReferenceSurface) -> Result<u64, String> {
+        let session = self
+            .images_for(surface)
+            .lock()
+            .map_err(|_| format!("{} image session is unavailable", surface.window_label()))?;
         if session.active {
             Ok(session.generation)
         } else {
-            Err("Vision surface is no longer active".into())
+            Err(format!(
+                "{} surface is no longer active",
+                surface.window_label()
+            ))
         }
     }
 
+    #[cfg(test)]
     pub fn register_reference_vision_temporary_image(
         &self,
         generation: u64,
         image_id: &str,
     ) -> Result<(), String> {
+        self.register_reference_temporary_image(ReferenceSurface::Vision, generation, image_id)
+    }
+
+    pub fn register_reference_temporary_image(
+        &self,
+        surface: ReferenceSurface,
+        generation: u64,
+        image_id: &str,
+    ) -> Result<(), String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
             .map_err(|_| "Vision image session is unavailable".to_string())?;
         if session.active && session.generation == generation {
@@ -354,9 +686,18 @@ impl AppState {
         Err("Vision surface is no longer active".into())
     }
 
+    #[cfg(test)]
     pub fn commit_reference_vision_image(&self, image_id: &str) -> Result<(), String> {
+        self.commit_reference_image(ReferenceSurface::Vision, image_id)
+    }
+
+    pub fn commit_reference_image(
+        &self,
+        surface: ReferenceSurface,
+        image_id: &str,
+    ) -> Result<(), String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
             .map_err(|_| "Vision image session is unavailable".to_string())?;
         self.images.commit(image_id)?;
@@ -364,9 +705,13 @@ impl AppState {
         Ok(())
     }
 
-    pub fn delete_reference_vision_temporary_image(&self, image_id: &str) -> Result<(), String> {
+    pub fn delete_reference_temporary_image(
+        &self,
+        surface: ReferenceSurface,
+        image_id: &str,
+    ) -> Result<(), String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
             .map_err(|_| "Vision image session is unavailable".to_string())?;
         self.images.delete_temporary(image_id)?;
@@ -374,22 +719,40 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn close_reference_vision_image_session(&self) -> Result<Vec<String>, String> {
+        self.close_reference_image_session(ReferenceSurface::Vision)
+    }
+
+    pub fn close_reference_image_session(
+        &self,
+        surface: ReferenceSurface,
+    ) -> Result<Vec<String>, String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
             .map_err(|_| "Vision image session is unavailable".to_string())?;
         session.generation = session.generation.wrapping_add(1).max(1);
         session.active = false;
+        session.capture_ready = false;
         Ok(session.temporary_ids.iter().cloned().collect())
     }
 
+    #[cfg(test)]
     pub fn cleanup_reference_vision_temporary_images(
         &self,
         image_ids: &[String],
     ) -> Result<(), String> {
+        self.cleanup_reference_temporary_images(ReferenceSurface::Vision, image_ids)
+    }
+
+    pub fn cleanup_reference_temporary_images(
+        &self,
+        surface: ReferenceSurface,
+        image_ids: &[String],
+    ) -> Result<(), String> {
         let mut session = self
-            .reference_vision_images
+            .images_for(surface)
             .lock()
             .map_err(|_| "Vision image session is unavailable".to_string())?;
         let mut failures = Vec::new();
@@ -511,7 +874,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{AppState, ReferenceSurface};
     use crate::domain::settings::AppSettings;
     use crate::infrastructure::images::ImageStore;
     use crate::infrastructure::settings_store::SettingsStore;
@@ -531,6 +894,234 @@ mod tests {
             ),
             directory,
         )
+    }
+
+    #[test]
+    fn ocr_preserves_vision_stream_images_and_close_generation() {
+        let (state, _directory) = state();
+        let vision = ReferenceSurface::Vision;
+        let ocr = ReferenceSurface::Ocr;
+        let vision_generation = state.begin_vision_surface_action("chat").unwrap();
+        state.begin_reference_surface(vision, vision_generation);
+        let vision_images = state.begin_reference_image_session(vision).unwrap();
+        let vision_stream = state.begin_reference_stream(vision);
+        let signal = state.reference_signal(vision, vision_stream).unwrap();
+        assert!(state.finish_reference_capture(vision, vision_images));
+        let ocr_generation = state.begin_vision_surface_action("translate").unwrap();
+        state.begin_reference_surface(ocr, ocr_generation);
+        state.begin_reference_image_session(ocr).unwrap();
+        let ocr_stream = state.begin_reference_stream(ocr);
+        state.cancel_reference_stream(ocr);
+        state.close_reference_image_session(ocr).unwrap();
+        state.release_reference_surface(ocr);
+        assert!(!state.reference_stream_current(ocr, ocr_stream));
+        assert!(!signal.is_cancelled());
+        assert!(state.reference_stream_current(vision, vision_stream));
+        assert_eq!(state.reference_image_session(vision), Ok(vision_images));
+        assert!(state.reference_capture_ready(vision));
+        assert_eq!(
+            state.with_current_reference_surface(vision, vision_generation, || Ok(true)),
+            Ok(Some(true))
+        );
+        state.begin_surface_action();
+        assert_eq!(
+            state.with_current_reference_surface(vision, vision_generation, || Ok(true)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn closing_vision_does_not_cancel_ocr_or_its_freeze_overlay() {
+        let (state, _directory) = state();
+        let vision_generation = state.begin_surface_action();
+        state.begin_reference_surface(ReferenceSurface::Vision, vision_generation);
+        let ocr_generation = state.begin_surface_action();
+        state.begin_reference_surface(ReferenceSurface::Ocr, ocr_generation);
+        let ocr_images = state
+            .begin_reference_image_session(ReferenceSurface::Ocr)
+            .unwrap();
+        let ocr_stream = state.begin_reference_stream(ReferenceSurface::Ocr);
+        state.claim_native_freeze(ReferenceSurface::Ocr);
+        state.cancel_reference_stream(ReferenceSurface::Vision);
+        state
+            .close_reference_image_session(ReferenceSurface::Vision)
+            .unwrap();
+        state.release_reference_surface(ReferenceSurface::Vision);
+        assert!(!state.release_native_freeze(ReferenceSurface::Vision));
+        assert!(state.owns_native_freeze(ReferenceSurface::Ocr));
+        assert!(state.reference_stream_current(ReferenceSurface::Ocr, ocr_stream));
+        assert_eq!(
+            state.reference_image_session(ReferenceSurface::Ocr),
+            Ok(ocr_images)
+        );
+        assert!(state.reference_surface_action_is_current(ReferenceSurface::Ocr, ocr_generation));
+        assert!(state.release_native_freeze(ReferenceSurface::Ocr));
+        assert!(!state.release_native_freeze(ReferenceSurface::Ocr));
+    }
+
+    #[test]
+    fn direct_text_flight_unlocks_ocr_without_a_registered_screenshot() {
+        let (state, _directory) = state();
+        let generation = state.begin_vision_surface_action("chat").unwrap();
+        state.begin_reference_surface(ReferenceSurface::Vision, generation);
+        let session = state
+            .begin_reference_image_session(ReferenceSurface::Vision)
+            .unwrap();
+        assert_eq!(state.begin_vision_surface_action("translate"), None);
+        assert!(state.finish_reference_capture(ReferenceSurface::Vision, session));
+        assert!(state.begin_vision_surface_action("translate").is_some());
+    }
+
+    #[test]
+    fn closing_ocr_only_cleans_its_images_and_rejects_queued_requests() {
+        let (state, _directory) = state();
+        let vision = ReferenceSurface::Vision;
+        let ocr = ReferenceSurface::Ocr;
+        let vision_session = state.begin_reference_image_session(vision).unwrap();
+        let ocr_session = state.begin_reference_image_session(ocr).unwrap();
+        let image = image::RgbaImage::new(2, 2);
+        let vision_image = state.images.save_temporary(&image).unwrap();
+        let ocr_image = state.images.save_temporary(&image).unwrap();
+        state
+            .register_reference_temporary_image(vision, vision_session, &vision_image)
+            .unwrap();
+        state
+            .register_reference_temporary_image(ocr, ocr_session, &ocr_image)
+            .unwrap();
+        let vision_stream = state.begin_active_reference_stream(vision).unwrap();
+        let cleanup = state.close_reference_image_session(ocr).unwrap();
+        assert_eq!(cleanup, vec![ocr_image.clone()]);
+        state
+            .cleanup_reference_temporary_images(ocr, &cleanup)
+            .unwrap();
+        assert!(state.images.read_data_url(&vision_image).is_ok());
+        assert!(state.images.read_data_url(&ocr_image).is_err());
+        assert!(state.begin_active_reference_stream(ocr).is_err());
+        assert!(state.reference_stream_current(vision, vision_stream));
+    }
+
+    #[test]
+    fn suspended_window_is_restored_only_by_its_capturing_peer() {
+        let (state, _directory) = state();
+        state.suspend_reference_surface(ReferenceSurface::Vision);
+        assert_eq!(
+            state.take_suspended_reference_surface(ReferenceSurface::Vision),
+            None
+        );
+        assert_eq!(
+            state.take_suspended_reference_surface(ReferenceSurface::Ocr),
+            Some(ReferenceSurface::Vision)
+        );
+        assert_eq!(
+            state.take_suspended_reference_surface(ReferenceSurface::Ocr),
+            None
+        );
+    }
+
+    #[test]
+    fn vision_is_blocked_while_ocr_is_selecting_or_flying() {
+        let (state, _directory) = state();
+        let generation = state.begin_vision_surface_action("translate").unwrap();
+        state.begin_reference_surface(ReferenceSurface::Ocr, generation);
+        let session = state
+            .begin_reference_image_session(ReferenceSurface::Ocr)
+            .unwrap();
+        assert_eq!(state.begin_vision_surface_action("chat"), None);
+        assert!(state.finish_reference_capture(ReferenceSurface::Ocr, session));
+        assert!(state.begin_vision_surface_action("chat").is_some());
+    }
+
+    #[test]
+    fn both_vision_entries_restore_after_each_ocr_cancel_stage() {
+        for has_screenshot in [true, false] {
+            for landed_before_cancel in [false, true] {
+                let (state, _directory) = state();
+                let vision_generation = state.begin_vision_surface_action("chat").unwrap();
+                state.begin_reference_surface(ReferenceSurface::Vision, vision_generation);
+                let vision_session = state
+                    .begin_reference_image_session(ReferenceSurface::Vision)
+                    .unwrap();
+                if has_screenshot {
+                    let image = image::RgbaImage::new(2, 2);
+                    let image_id = state.images.save_temporary(&image).unwrap();
+                    state
+                        .register_reference_temporary_image(
+                            ReferenceSurface::Vision,
+                            vision_session,
+                            &image_id,
+                        )
+                        .unwrap();
+                }
+                assert!(state.finish_reference_capture(ReferenceSurface::Vision, vision_session));
+
+                let ocr_generation = state.begin_vision_surface_action("translate").unwrap();
+                state.begin_reference_surface(ReferenceSurface::Ocr, ocr_generation);
+                let ocr_session = state
+                    .begin_reference_image_session(ReferenceSurface::Ocr)
+                    .unwrap();
+                let ocr_stream = state.begin_reference_stream(ReferenceSurface::Ocr);
+                state.suspend_reference_surface(ReferenceSurface::Vision);
+                if landed_before_cancel {
+                    assert!(state.finish_reference_capture(ReferenceSurface::Ocr, ocr_session));
+                    assert_eq!(
+                        state.take_suspended_reference_surface(ReferenceSurface::Ocr),
+                        Some(ReferenceSurface::Vision)
+                    );
+                }
+
+                state.cancel_reference_stream(ReferenceSurface::Ocr);
+                state
+                    .close_reference_image_session(ReferenceSurface::Ocr)
+                    .unwrap();
+                state.release_reference_surface(ReferenceSurface::Ocr);
+                assert_eq!(
+                    state.take_suspended_reference_surface(ReferenceSurface::Ocr),
+                    (!landed_before_cancel).then_some(ReferenceSurface::Vision)
+                );
+
+                assert!(state.reference_surface_active(ReferenceSurface::Vision));
+                assert!(!state.reference_surface_active(ReferenceSurface::Ocr));
+                assert!(!state.reference_stream_current(ReferenceSurface::Ocr, ocr_stream));
+                assert_eq!(
+                    state.with_current_reference_surface(
+                        ReferenceSurface::Vision,
+                        vision_generation,
+                        || {
+                            state.close_reference_image_session(ReferenceSurface::Vision)?;
+                            state.release_reference_surface(ReferenceSurface::Vision);
+                            Ok(())
+                        }
+                    ),
+                    Ok(Some(()))
+                );
+                assert!(!state.reference_surface_active(ReferenceSurface::Vision));
+                assert!(!state.reference_surface_active(ReferenceSurface::Ocr));
+
+                let reopened_generation = state.begin_vision_surface_action("chat").unwrap();
+                state.begin_reference_surface(ReferenceSurface::Vision, reopened_generation);
+                assert!(state.reference_surface_active(ReferenceSurface::Vision));
+                state.release_reference_surface(ReferenceSurface::Vision);
+            }
+        }
+    }
+
+    #[test]
+    fn queued_ocr_intent_cannot_cover_a_vision_capture_that_started_first() {
+        let (state, _directory) = state();
+        let vision_generation = state.begin_vision_surface_action("chat").unwrap();
+        let queued_ocr = state.begin_vision_surface_action("translate").unwrap();
+        state.begin_reference_surface(ReferenceSurface::Vision, vision_generation);
+        state
+            .begin_reference_image_session(ReferenceSurface::Vision)
+            .unwrap();
+        assert!(!state.accept_reference_surface_action(ReferenceSurface::Ocr, queued_ocr));
+        assert!(!state.reference_surface_active(ReferenceSurface::Ocr));
+        assert!(
+            state.reference_surface_action_is_current(ReferenceSurface::Vision, vision_generation)
+        );
+        let newer = state.begin_surface_action();
+        assert!(!state.accept_reference_surface_action(ReferenceSurface::Ocr, queued_ocr));
+        assert!(state.surface_action_is_current(newer));
     }
 
     #[test]
@@ -583,6 +1174,53 @@ mod tests {
             state.with_current_surface_action(newer, || Ok::<_, String>("newer")),
             Ok(Some("newer"))
         );
+    }
+
+    #[test]
+    fn ocr_shortcut_is_blocked_until_the_current_capture_has_landed() {
+        let (state, _directory) = state();
+        let vision_generation = state.begin_surface_action();
+        state.begin_vision(vision_generation);
+        assert_eq!(state.begin_vision_surface_action("translate"), None);
+        assert!(state.surface_action_is_current(vision_generation));
+
+        let image_session = state
+            .begin_reference_vision_image_session()
+            .expect("image session");
+        assert_eq!(state.begin_vision_surface_action("translate"), None);
+        assert!(state.surface_action_is_current(vision_generation));
+        assert!(state.finish_reference_vision_capture(image_session));
+
+        let ocr_generation = state
+            .begin_vision_surface_action("translate")
+            .expect("OCR intent");
+        assert!(state.surface_action_is_current(ocr_generation));
+        assert_ne!(ocr_generation, vision_generation);
+    }
+
+    #[test]
+    fn a_late_flight_cannot_unlock_ocr_for_a_closed_or_replaced_capture() {
+        let (state, _directory) = state();
+        let first = state
+            .begin_reference_vision_image_session()
+            .expect("first image session");
+        assert!(!state.reference_vision_capture_ready());
+        assert!(state.finish_reference_vision_capture(first));
+        assert!(state.reference_vision_capture_ready());
+
+        state
+            .close_reference_vision_image_session()
+            .expect("close session");
+        assert!(!state.finish_reference_vision_capture(first));
+        assert!(!state.reference_vision_capture_ready());
+
+        let next = state
+            .begin_reference_vision_image_session()
+            .expect("next image session");
+        assert!(!state.finish_reference_vision_capture(first));
+        assert!(!state.reference_vision_capture_ready());
+        assert!(state.finish_reference_vision_capture(next));
+        assert!(state.reference_vision_capture_ready());
     }
 
     #[test]

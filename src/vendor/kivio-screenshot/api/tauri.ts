@@ -185,7 +185,7 @@ export type PermissionStatus = {
 type Unlisten = () => void
 
 async function on<T>(event: string, handler: (payload: T) => void): Promise<Unlisten> {
-  const unlisten = await listen<T>(event, (event) => handler(event.payload))
+  const unlisten = await listen<T>(event, (event) => handler(event.payload), { target: getCurrentWindow().label })
   return () => {
     unlisten()
   }

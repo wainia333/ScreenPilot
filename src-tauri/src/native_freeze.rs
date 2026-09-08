@@ -273,10 +273,7 @@ pub fn show(space: ScreenSpace) -> Result<(), String> {
     Ok(())
 }
 
-pub fn place_vision_above(window: &WebviewWindow) {
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
+fn place_vision_above_hwnd(hwnd: HWND) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -285,9 +282,16 @@ pub fn place_vision_above(window: &WebviewWindow) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
+}
+
+pub fn place_vision_above(window: &WebviewWindow) {
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    place_vision_above_hwnd(hwnd);
 }
 
 pub fn close() {
@@ -453,4 +457,74 @@ unsafe fn crop_bitmap_to_rgba(
         px[3] = 255;
     }
     Ok(pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{place_vision_above_hwnd, register_class, CLASS_NAME};
+    use windows::core::w;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, IsWindowVisible, ShowWindow, SW_SHOWNOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+
+    #[test]
+    fn placing_vision_above_does_not_reveal_a_hidden_window() {
+        register_class().expect("freeze overlay class registration failed");
+        unsafe {
+            let hinstance = GetModuleHandleW(None).expect("module handle unavailable");
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                CLASS_NAME,
+                w!("ScreenPilot hidden window test"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .expect("hidden freeze test window creation failed");
+
+            assert!(!IsWindowVisible(hwnd).as_bool());
+            place_vision_above_hwnd(hwnd);
+            assert!(!IsWindowVisible(hwnd).as_bool());
+
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[test]
+    fn placing_vision_above_keeps_a_visible_window_visible() {
+        register_class().expect("freeze overlay class registration failed");
+        unsafe {
+            let hinstance = GetModuleHandleW(None).expect("module handle unavailable");
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                CLASS_NAME,
+                w!("ScreenPilot visible window test"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .expect("visible freeze test window creation failed");
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            assert!(IsWindowVisible(hwnd).as_bool());
+
+            place_vision_above_hwnd(hwnd);
+
+            assert!(IsWindowVisible(hwnd).as_bool());
+            let _ = DestroyWindow(hwnd);
+        }
+    }
 }

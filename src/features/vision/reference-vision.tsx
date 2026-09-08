@@ -245,7 +245,8 @@ export default function ReferenceVisionAdapter() {
       const loadedLanguage = settings.settingsLanguage === 'en' ? 'en' : 'zh'
       setInterfaceLanguage(loadedLanguage)
       document.documentElement.lang = loadedLanguage === 'zh' ? 'zh-CN' : 'en'
-      document.title = 'ScreenPilot — Vision'
+      const ocrWindow = new URLSearchParams(window.location.search).get('window') === 'ocr'
+      document.title = ocrWindow ? (loadedLanguage === 'zh' ? 'ScreenPilot — OCR翻译' : 'ScreenPilot — OCR Translation') : 'ScreenPilot — Vision'
       if ('__TAURI_INTERNALS__' in window) {
         void getCurrentWindow().setTitle(document.title).catch((error: unknown) => {
           console.error('Failed to set the Vision window title', error)
@@ -321,7 +322,7 @@ export default function ReferenceVisionAdapter() {
         text: payload.delta,
       }
       if (!overrideLockedRef.current) clearOverride()
-    }).then((unlisten) => {
+    }, { target: getCurrentWindow().label }).then((unlisten) => {
       if (active) dispose = unlisten
       else unlisten()
     }).catch((error: unknown) => console.error('Failed to observe screenshot translation', error))

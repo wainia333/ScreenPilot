@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
   "description": "ScreenPilot desktop window permissions",
-  "windows": ["main", "translator", "vision"],
+  "windows": ["main", "translator", "vision", "ocr"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

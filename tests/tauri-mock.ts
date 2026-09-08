@@ -20,6 +20,8 @@ export async function installVisionTauriMock(
   await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
+    const listenerTargets = new Map<number, { kind: string; label?: string }>()
+    const windowLabel = new URLSearchParams(window.location.search).get('window') ?? 'vision'
     let callbackSequence = 0
     let listenerSequence = 0
     let imageSequence = 0
@@ -40,6 +42,11 @@ export async function installVisionTauriMock(
     const floatingInset = floatingPadding * 2
     const visionTestState = {
       showCount: 0,
+      emitWindowEvent: (label: string, event: string, payload: unknown): void => {
+        void label
+        void event
+        void payload
+      },
       translationRequests: [] as { text: string; sourceLanguage: string; targetLanguage: string; method: string }[],
       translationMethodUpdates: [] as string[],
       translationSettingsDelayMs: 0,
@@ -234,10 +241,15 @@ export async function installVisionTauriMock(
       resolve()
       return true
     }
-    const emit = (event: string, payload: unknown) => {
+    visionTestState.emitWindowEvent = (label: string, event: string, payload: unknown) => {
       for (const [eventId, callbackId] of listeners.get(event) ?? []) {
+        const target = listenerTargets.get(eventId)
+        if (target?.kind !== 'Any' && target?.label !== label) continue
         callbacks.get(callbackId)?.({ event, id: eventId, payload })
       }
+    }
+    const emit = (event: string, payload: unknown) => {
+      visionTestState.emitWindowEvent(windowLabel, event, payload)
     }
     visionTestState.emitVisionAnswerDelta = (delta: string) => {
       const eventListeners = listeners.get('vision-stream')
@@ -266,6 +278,7 @@ export async function installVisionTauriMock(
     }
     const unregisterListener = (event: string, eventId: number) => {
       listeners.get(event)?.delete(eventId)
+      listenerTargets.delete(eventId)
     }
     const stringArgument = (value: unknown) => typeof value === 'string' ? value : ''
     const invoke = async (command: string, args: Record<string, unknown> = {}) => {
@@ -279,6 +292,7 @@ export async function installVisionTauriMock(
           throw new Error(`synthetic ${event} listener failure`)
         }
         const eventId = ++listenerSequence
+        listenerTargets.set(eventId, args.target as { kind: string; label?: string } | undefined ?? { kind: 'Any' })
         const handlers = listeners.get(event) ?? new Map<number, number>()
         handlers.set(eventId, Number(args.handler))
         listeners.set(event, handlers)
@@ -685,7 +699,10 @@ export async function installVisionTauriMock(
       __SCREENPILOT_TEST__: visionTestState,
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener },
       __TAURI_INTERNALS__: {
-        metadata: { currentWindow: { label: 'vision' }, currentWebview: { label: 'vision' } },
+        metadata: {
+          currentWindow: { label: new URLSearchParams(window.location.search).get('window') ?? 'vision' },
+          currentWebview: { label: new URLSearchParams(window.location.search).get('window') ?? 'vision' },
+        },
         plugins: { path: { sep: '\\', delimiter: ';' } },
         convertFileSrc: (path: string) => path,
         invoke,

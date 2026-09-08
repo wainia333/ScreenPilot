@@ -696,7 +696,7 @@ describe('SettingsPage', () => {
     const fields = [
       { section: '翻译', label: '大模型翻译系统提示词', value: DEFAULT_SETTINGS.translation.prompt },
       { section: 'OCR', label: 'OCR 提示词', value: DEFAULT_SETTINGS.screenshotTranslation.ocrPrompt },
-      { section: 'OCR', label: '截图翻译提示词', value: DEFAULT_SETTINGS.screenshotTranslation.translationPrompt },
+      { section: 'OCR', label: 'OCR翻译提示词', value: DEFAULT_SETTINGS.screenshotTranslation.translationPrompt },
       { section: 'Vision', label: 'Vision 系统提示词', value: DEFAULT_SETTINGS.vision.systemPrompt },
       { section: 'Vision', label: 'Vision 问答提示词', value: DEFAULT_SETTINGS.vision.questionPrompt },
       { section: '提示词优化', label: '优化器系统提示词', value: DEFAULT_SETTINGS.promptOptimizer.systemPrompt },
@@ -838,7 +838,7 @@ describe('SettingsPage', () => {
     render(<DesktopProvider port={new ClosingDesktop()}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
     expect(screen.getByRole('button', { name: 'OCR' })).toBeVisible()
-    expect(screen.queryByRole('button', { name: 'OCR/截图翻译' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'OCR/OCR翻译' })).not.toBeInTheDocument()
   })
 
   it('uses lowercase thinking effort options for Vision, OCR and prompt optimization', async () => {
@@ -865,7 +865,7 @@ describe('SettingsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
     fireEvent.click(screen.getByRole('switch', { name: '显示思考过程' }))
-    const screenshot = screen.getByRole('combobox', { name: '截图翻译思考强度' })
+    const screenshot = screen.getByRole('combobox', { name: 'OCR翻译思考强度' })
     assertEfforts(screenshot, screenshotEfforts)
     fireEvent.change(screenshot, { target: { value: 'xhigh' } })
 
@@ -908,13 +908,13 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('option', { name: 'AI' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
     expect(screen.queryByRole('combobox', { name: 'OCR 模型' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: '截图翻译模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'OCR翻译模型' })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'AI 视觉 OCR' })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'AI' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('switch', { name: '开启大模型 OCR' }))
     fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
     const ocrModel = screen.getByRole('combobox', { name: 'OCR 模型' })
-    const screenshotTranslationModel = screen.getByRole('combobox', { name: '截图翻译模型' })
+    const screenshotTranslationModel = screen.getByRole('combobox', { name: 'OCR翻译模型' })
     fireEvent.change(ocrModel, { target: { value: JSON.stringify({ providerId: 'local', model: 'local:model' }) } })
     fireEvent.change(screenshotTranslationModel, { target: { value: JSON.stringify({ providerId: 'local', model: 'local:model' }) } })
     expect(screen.getByRole('option', { name: 'AI 视觉 OCR' })).toBeInTheDocument()
@@ -959,7 +959,7 @@ describe('SettingsPage', () => {
     expect(translationModelRow?.nextElementSibling).toBe(translationInterfaceRow)
 
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
-    let screenshotGroup = activeGroup('截图翻译')
+    let screenshotGroup = activeGroup('OCR翻译')
     let ocrToggleRow = rowFor(screenshotGroup, '开启大模型 OCR')
     let ocrInterfaceRow = rowFor(screenshotGroup, 'OCR 接口')
     let screenshotTranslationToggleRow = rowFor(screenshotGroup, '开启大模型翻译')
@@ -967,10 +967,10 @@ describe('SettingsPage', () => {
     expect(ocrToggleRow.nextElementSibling).toBe(ocrInterfaceRow)
     expect(screenshotTranslationToggleRow.nextElementSibling).toBe(screenshotTranslationInterfaceRow)
     expect(screen.queryByRole('combobox', { name: 'OCR 模型' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: '截图翻译模型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'OCR翻译模型' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('switch', { name: '开启大模型 OCR' }))
-    screenshotGroup = activeGroup('截图翻译')
+    screenshotGroup = activeGroup('OCR翻译')
     ocrToggleRow = rowFor(screenshotGroup, '开启大模型 OCR')
     ocrInterfaceRow = rowFor(screenshotGroup, 'OCR 接口')
     const ocrModelRow = screen.getByRole('combobox', { name: 'OCR 模型' }).closest<HTMLElement>('.setting-row')
@@ -979,11 +979,11 @@ describe('SettingsPage', () => {
     expect(ocrModelRow?.nextElementSibling).toBe(ocrInterfaceRow)
 
     fireEvent.click(screen.getByRole('switch', { name: '开启大模型翻译' }))
-    screenshotGroup = activeGroup('截图翻译')
+    screenshotGroup = activeGroup('OCR翻译')
     screenshotTranslationToggleRow = rowFor(screenshotGroup, '开启大模型翻译')
     screenshotTranslationInterfaceRow = rowFor(screenshotGroup, '翻译接口')
     const screenshotTranslationModelRow = screen
-      .getByRole('combobox', { name: '截图翻译模型' })
+      .getByRole('combobox', { name: 'OCR翻译模型' })
       .closest<HTMLElement>('.setting-row')
     expect(screenshotTranslationModelRow).not.toBeNull()
     expect(screenshotTranslationToggleRow.nextElementSibling).toBe(screenshotTranslationModelRow)

@@ -13,7 +13,7 @@ export type TauriApi = {
 
 export const defaultTauriApi: TauriApi = {
   invoke,
-  listen,
+  listen: (event, handler) => listen(event, handler, { target: getCurrentWindow().label }),
   resizeCurrentWindow: (width, height) => getCurrentWindow().setSize(new LogicalSize(width, height)),
   startDraggingCurrentWindow: () => getCurrentWindow().startDragging(),
 }

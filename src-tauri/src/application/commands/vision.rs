@@ -1,5 +1,5 @@
 use crate::application::lifecycle::TRANSLATOR_HEIGHT;
-use crate::application::state::{AppState, CancellationSignal};
+use crate::application::state::{AppState, CancellationSignal, ReferenceSurface};
 use crate::domain::settings::{AppSettings, ModelSelection, OcrMethod, TranslationMethod};
 use crate::infrastructure::ai_http::{
     complete_text, complete_text_cancelled, complete_text_with_effort,
@@ -95,11 +95,33 @@ const VISION_TRANSLATION_POSITIONED_MAX_HEIGHT: f64 = 224.0;
 // height. Reserve them in the native minimum and treat the same delta as
 // layout feedback rather than a user resize.
 const VISION_DIALOG_FRAME_COMPENSATION: f64 = 2.0;
-static VISION_FLOATING_RESIZABLE: AtomicBool = AtomicBool::new(false);
-static VISION_FLOATING_HAS_SCREENSHOT: AtomicBool = AtomicBool::new(true);
-static VISION_FLOATING_REGION_LOCKED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "windows")]
-static VISION_SAFE_DRAG_STATE: AtomicU64 = AtomicU64::new(0);
+struct FloatingState {
+    resizable: AtomicBool,
+    has_screenshot: AtomicBool,
+    region_locked: AtomicBool,
+    #[cfg(target_os = "windows")]
+    safe_drag: AtomicU64,
+}
+
+impl FloatingState {
+    const fn new() -> Self {
+        Self {
+            resizable: AtomicBool::new(false),
+            has_screenshot: AtomicBool::new(true),
+            region_locked: AtomicBool::new(false),
+            #[cfg(target_os = "windows")]
+            safe_drag: AtomicU64::new(0),
+        }
+    }
+}
+static VISION_FLOATING: FloatingState = FloatingState::new();
+static OCR_FLOATING: FloatingState = FloatingState::new();
+fn floating_state(surface: ReferenceSurface) -> &'static FloatingState {
+    match surface {
+        ReferenceSurface::Vision => &VISION_FLOATING,
+        ReferenceSurface::Ocr => &OCR_FLOATING,
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn next_safe_drag_generation(current: u64) -> u64 {
@@ -151,26 +173,26 @@ fn reset_token_if_current(state: &AtomicU64, token: u64) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn reset_safe_drag_if_current(token: u64) -> bool {
-    reset_token_if_current(&VISION_SAFE_DRAG_STATE, token)
+fn reset_safe_drag_if_current(surface: ReferenceSurface, token: u64) -> bool {
+    reset_token_if_current(&floating_state(surface).safe_drag, token)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cancel_safe_drag() {}
+fn cancel_safe_drag(_surface: ReferenceSurface) {}
 
 #[cfg(target_os = "windows")]
-fn cancel_safe_drag() {
-    cancel_safe_drag_state(&VISION_SAFE_DRAG_STATE);
+fn cancel_safe_drag(surface: ReferenceSurface) {
+    cancel_safe_drag_state(&floating_state(surface).safe_drag);
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn safe_drag_active() -> bool {
+pub(crate) fn safe_drag_active(_surface: ReferenceSurface) -> bool {
     false
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn safe_drag_active() -> bool {
-    VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) & 1 != 0
+pub(crate) fn safe_drag_active(surface: ReferenceSurface) -> bool {
+    floating_state(surface).safe_drag.load(Ordering::Acquire) & 1 != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,13 +359,8 @@ fn close_native_freeze(app: &AppHandle) {
     if !should_schedule_native_freeze_close(crate::native_freeze::is_active()) {
         return;
     }
-    let Some(window) = app.get_webview_window("vision") else {
-        crate::native_freeze::close();
-        request_native_freeze_close();
-        return;
-    };
     let (sender, receiver) = std::sync::mpsc::channel();
-    if window
+    if app
         .run_on_main_thread(move || {
             crate::native_freeze::close();
             let _ = sender.send(());
@@ -431,7 +448,7 @@ fn ensure_screenshot_translation_enabled(settings: &AppSettings) -> Result<(), S
     if settings.screenshot_translation.enabled {
         Ok(())
     } else {
-        Err("Screenshot translation is disabled in settings".into())
+        Err("OCR translation is disabled in settings".into())
     }
 }
 
@@ -439,7 +456,7 @@ fn ensure_capture_enabled(settings: &AppSettings) -> Result<(), String> {
     if settings.vision.enabled || settings.screenshot_translation.enabled {
         Ok(())
     } else {
-        Err("Vision and screenshot translation are disabled in settings".into())
+        Err("Vision and OCR translation are disabled in settings".into())
     }
 }
 
@@ -467,23 +484,37 @@ pub(crate) fn open_reference_vision(
     mode: &str,
     surface_generation: u64,
 ) -> Result<(), String> {
+    let surface = ReferenceSurface::for_mode(mode);
     let state = app.state::<AppState>();
-    let existing_visible_window = app
-        .get_webview_window("vision")
-        .filter(|window| window.is_visible().unwrap_or(false));
-    if state.begin_vision(surface_generation) {
-        if let Some(window) = existing_visible_window.as_ref() {
-            return window.set_focus().map_err(|error| error.to_string());
+    if state.begin_reference_surface(surface, surface_generation) {
+        if let Some(window) = app.get_webview_window(surface.window_label()) {
+            if window.is_visible().unwrap_or(false) {
+                window.set_focus().map_err(|error| error.to_string())?;
+            }
         }
+        return Ok(());
     }
-    VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
-    VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
-    VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
-    if existing_visible_window.is_none() {
-        close_native_freeze(app);
-    }
+    floating_state(surface)
+        .resizable
+        .store(false, Ordering::Release);
+    floating_state(surface)
+        .has_screenshot
+        .store(true, Ordering::Release);
+    floating_state(surface)
+        .region_locked
+        .store(false, Ordering::Release);
     let result = (|| {
-        let window = ensure_reference_vision_window(app, mode)?;
+        if state.reference_surface_active(surface.peer()) {
+            if let Some(peer) = app.get_webview_window(surface.peer().window_label()) {
+                if peer.is_visible().unwrap_or(false) {
+                    state.suspend_reference_surface(surface.peer());
+                    crate::application::lifecycle::force_hide_window(&peer);
+                    peer.hide().map_err(|error| error.to_string())?;
+                    crate::application::lifecycle::flush_windows_compositor();
+                }
+            }
+        }
+        let window = ensure_reference_vision_window(app, surface, mode)?;
         let screen = current_screen_space(app).ok_or("No display is available")?;
         window
             .set_resizable(false)
@@ -493,19 +524,12 @@ pub(crate) fn open_reference_vision(
             .set_ignore_cursor_events(false)
             .map_err(|error| error.to_string())?;
         apply_vision_window_region(&window, None)?;
+        state.claim_native_freeze(surface);
         show_native_freeze(&window, screen)?;
-        state.begin_reference_vision_image_session()?;
-        let mode = if mode == "translate" {
-            "translate"
-        } else {
-            "chat"
-        };
-        let script = format!(
-            "window.location.hash = '#vision?mode={mode}'; window.dispatchEvent(new HashChangeEvent('hashchange')); window.dispatchEvent(new CustomEvent('vision:reset'));"
-        );
+        state.begin_reference_image_session(surface)?;
+        let script = format!("window.location.hash = '#vision?mode={mode}'; window.dispatchEvent(new HashChangeEvent('hashchange')); window.dispatchEvent(new CustomEvent('vision:reset'));");
         let _ = window.eval(&script);
-        window
-            .emit("screenpilot:reset", "vision")
+        app.emit_to(surface.window_label(), "screenpilot:reset", "vision")
             .map_err(|error| error.to_string())?;
         position_vision_fullscreen(&window, screen);
         window.show().map_err(|error| error.to_string())?;
@@ -518,28 +542,55 @@ pub(crate) fn open_reference_vision(
         Ok(())
     })();
     if result.is_err() {
-        close_native_freeze(app);
-        schedule_reference_vision_image_cleanup(app, &state);
-        state.release_vision();
+        let _ = close_reference_surface(app, surface);
     }
     result
 }
 
-fn ensure_reference_vision_window(app: &AppHandle, mode: &str) -> Result<WebviewWindow, String> {
-    if let Some(window) = app.get_webview_window("vision") {
+fn restore_suspended_reference_surface(
+    app: &AppHandle,
+    capturing: ReferenceSurface,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if let Some(surface) = state.take_suspended_reference_surface(capturing) {
+        if state.reference_surface_active(surface) {
+            if let Some(window) = app.get_webview_window(surface.window_label()) {
+                if let Err(error) = crate::application::lifecycle::show_without_activation(&window)
+                {
+                    state.suspend_reference_surface(surface);
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn close_surface_native_freeze(app: &AppHandle, surface: ReferenceSurface) {
+    if app.state::<AppState>().release_native_freeze(surface) {
+        close_native_freeze(app);
+    }
+}
+
+fn ensure_reference_vision_window(
+    app: &AppHandle,
+    surface: ReferenceSurface,
+    mode: &str,
+) -> Result<WebviewWindow, String> {
+    let label = surface.window_label();
+    if let Some(window) = app.get_webview_window(label) {
         return Ok(window);
     }
-    let mode = if mode == "translate" {
-        "translate"
-    } else {
-        "chat"
-    };
     WebviewWindowBuilder::new(
         app,
-        "vision",
-        WebviewUrl::App(format!("index.html?window=vision#vision?mode={mode}").into()),
+        label,
+        WebviewUrl::App(format!("index.html?window={label}#vision?mode={mode}").into()),
     )
-    .title("ScreenPilot Vision")
+    .title(if surface == ReferenceSurface::Ocr {
+        "ScreenPilot OCR翻译"
+    } else {
+        "ScreenPilot Vision"
+    })
     .visible(false)
     .decorations(false)
     .transparent(true)
@@ -603,9 +654,49 @@ pub fn vision_capture_window(state: State<'_, AppState>, window_id: u32) -> Valu
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn vision_capture_region(
+pub async fn vision_capture_region(
+    window: WebviewWindow,
     app: AppHandle,
-    state: State<'_, AppState>,
+    absolute_x: i32,
+    absolute_y: i32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+) -> Value {
+    let surface = ReferenceSurface::for_window(window.label());
+    let state = app.state::<AppState>();
+    let Some(generation) = state.reference_surface_generation(surface) else {
+        return json!({ "success": false, "error": "Capture session is no longer active" });
+    };
+    state
+        .with_current_reference_surface(surface, generation, || {
+            Ok(capture_reference_region(
+                &app,
+                &state,
+                surface,
+                absolute_x,
+                absolute_y,
+                x,
+                y,
+                width,
+                height,
+                scale_factor,
+            ))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(
+            || json!({ "success": false, "error": "Capture session is no longer active" }),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_reference_region(
+    app: &AppHandle,
+    state: &AppState,
+    surface: ReferenceSurface,
     absolute_x: i32,
     absolute_y: i32,
     x: i32,
@@ -620,19 +711,22 @@ pub fn vision_capture_region(
     {
         return json!({ "success": false, "error": error });
     }
-    let session_generation = match state.reference_vision_image_session() {
+    let session_generation = match state.reference_image_session(surface) {
         Ok(generation) => generation,
         Err(error) => return json!({ "success": false, "error": error }),
     };
+    if !state.owns_native_freeze(surface) {
+        return json!({ "success": false, "error": "Capture session is no longer active" });
+    }
     let result = match crate::native_freeze::capture_active_region_to_png(
         absolute_x, absolute_y, width, height,
     ) {
         Ok(path) => {
-            close_native_freeze(&app);
+            close_surface_native_freeze(app, surface);
             Ok(path)
         }
         Err(_) => {
-            close_native_freeze(&app);
+            close_surface_native_freeze(app, surface);
             capture_region_image(
                 absolute_x,
                 absolute_y,
@@ -645,7 +739,9 @@ pub fn vision_capture_region(
             )
         }
     };
-    match result.and_then(|path| register_capture_path(&state, &path, session_generation)) {
+    match result.and_then(|path| {
+        register_capture_path_for_surface(state, surface, &path, session_generation)
+    }) {
         Ok(capture) => capture_registration_response(capture),
         Err(error) => json!({ "success": false, "error": error }),
     }
@@ -665,8 +761,18 @@ fn capture_registration_response(capture: RegisteredCapture) -> Value {
     response
 }
 
+#[cfg(test)]
 fn register_capture_path(
     state: &AppState,
+    path: &Path,
+    session_generation: u64,
+) -> Result<RegisteredCapture, String> {
+    register_capture_path_for_surface(state, ReferenceSurface::Vision, path, session_generation)
+}
+
+fn register_capture_path_for_surface(
+    state: &AppState,
+    surface: ReferenceSurface,
     path: &Path,
     session_generation: u64,
 ) -> Result<RegisteredCapture, String> {
@@ -677,7 +783,7 @@ fn register_capture_path(
     let image = image?;
     let settings = state.current()?;
     let image_id = state.images.save_temporary(&image)?;
-    state.register_reference_vision_temporary_image(session_generation, &image_id)?;
+    state.register_reference_temporary_image(surface, session_generation, &image_id)?;
     let archive_warning = if settings.general.image_archive_enabled {
         let archive_directory = Path::new(settings.general.image_archive_path.trim());
         match state.images.archive(&image, archive_directory) {
@@ -795,7 +901,12 @@ pub fn explain_read_image(state: State<'_, AppState>, image_id: String) -> Value
 }
 
 #[tauri::command]
-pub fn vision_register_annotated_image(state: State<'_, AppState>, base64_png: String) -> Value {
+pub fn vision_register_annotated_image(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    base64_png: String,
+) -> Value {
+    let surface = ReferenceSurface::for_window(window.label());
     if let Err(error) = state
         .current()
         .and_then(|settings| ensure_capture_enabled(&settings))
@@ -803,7 +914,7 @@ pub fn vision_register_annotated_image(state: State<'_, AppState>, base64_png: S
         return json!({ "success": false, "error": error });
     }
     let result = state
-        .reference_vision_image_session()
+        .reference_image_session(surface)
         .and_then(|generation| {
             STANDARD
                 .decode(base64_png)
@@ -813,7 +924,7 @@ pub fn vision_register_annotated_image(state: State<'_, AppState>, base64_png: S
                 })
                 .and_then(|image| state.images.save_temporary(&image.into_rgba8()))
                 .and_then(|image_id| {
-                    state.register_reference_vision_temporary_image(generation, &image_id)?;
+                    state.register_reference_temporary_image(surface, generation, &image_id)?;
                     Ok(image_id)
                 })
         });
@@ -825,10 +936,12 @@ pub fn vision_register_annotated_image(state: State<'_, AppState>, base64_png: S
 
 #[tauri::command]
 pub fn vision_commit_image_to_history(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     image_id: String,
 ) -> Result<(), String> {
-    state.commit_reference_vision_image(&image_id)
+    let surface = ReferenceSurface::for_window(window.label());
+    state.commit_reference_image(surface, &image_id)
 }
 
 #[tauri::command]
@@ -841,10 +954,12 @@ pub fn vision_delete_history_image(
 
 #[tauri::command]
 pub fn vision_delete_temporary_image(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     image_id: String,
 ) -> Result<(), String> {
-    state.delete_reference_vision_temporary_image(&image_id)
+    let surface = ReferenceSurface::for_window(window.label());
+    state.delete_reference_temporary_image(surface, &image_id)
 }
 
 #[tauri::command]
@@ -872,32 +987,24 @@ pub fn vision_export_markdown(
     Ok(true)
 }
 
+#[cfg(test)]
 fn should_process_vision_close(vision_active: bool, visible: bool, freeze_active: bool) -> bool {
     vision_active || visible || freeze_active
 }
 
 #[tauri::command]
-pub fn vision_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // Use the generation that opened this Vision session. Reading the current
-    // generation here would let a delayed Esc join a newer F2 intent and close
-    // surfaces while its external selection capture is already in flight.
-    let Some(generation) = state.vision_surface_generation() else {
+pub async fn vision_close(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    let Some(generation) = state.reference_surface_generation(surface) else {
         return Ok(());
     };
     state
-        .with_current_surface_action(generation, || {
-            let visible = app
-                .get_webview_window("vision")
-                .and_then(|window| window.is_visible().ok())
-                .unwrap_or(false);
-            if !should_process_vision_close(
-                state.vision_active(),
-                visible,
-                crate::native_freeze::is_active(),
-            ) {
-                return Ok(());
-            }
-            close_reference_vision_surface(&app)
+        .with_current_reference_surface(surface, generation, || {
+            close_reference_surface(&app, surface)
         })
         .map(|_| ())
 }
@@ -916,23 +1023,34 @@ where
 }
 
 pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
-    cancel_safe_drag();
-    VISION_FLOATING_RESIZABLE.store(false, Ordering::Release);
-    VISION_FLOATING_HAS_SCREENSHOT.store(true, Ordering::Release);
-    VISION_FLOATING_REGION_LOCKED.store(false, Ordering::Release);
+    close_reference_surface(app, ReferenceSurface::Vision)
+}
+
+pub fn close_reference_surface(app: &AppHandle, surface: ReferenceSurface) -> Result<(), String> {
+    cancel_safe_drag(surface);
+    floating_state(surface)
+        .resizable
+        .store(false, Ordering::Release);
+    floating_state(surface)
+        .has_screenshot
+        .store(true, Ordering::Release);
+    floating_state(surface)
+        .region_locked
+        .store(false, Ordering::Release);
     let mut failures = Vec::new();
     let state = app.state::<AppState>();
     // Invalidate OCR/translation before any potentially blocking window
     // cleanup. A late OCR result must not overwrite the user's new selection
     // in the clipboard after Esc.
-    state.cancel_reference_vision_stream();
-    let vision_window = app.get_webview_window("vision");
-    if let Some(window) = vision_window.as_ref() {
-        notify_vision_closing(|event| window.emit(event, ()));
+    state.cancel_reference_stream(surface);
+    let vision_window = app.get_webview_window(surface.window_label());
+    if vision_window.is_some() {
+        notify_vision_closing(|event| app.emit_to(surface.window_label(), event, ()));
     }
-    schedule_reference_vision_image_cleanup(app, &state);
-    close_native_freeze(app);
+    schedule_reference_vision_image_cleanup(app, &state, surface);
+    close_surface_native_freeze(app, surface);
     if let Some(window) = vision_window {
+        crate::application::lifecycle::force_hide_window(&window);
         if let Err(error) = window.set_ignore_cursor_events(false) {
             failures.push(error.to_string());
         }
@@ -949,12 +1067,15 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
             failures.push(error);
         }
     }
-    close_native_freeze(app);
+    close_surface_native_freeze(app, surface);
     // Close can overlap a request that was queued before the closing event but
     // called begin_reference_vision_stream after the cancellation above. Seal
     // that window before marking the Vision surface inactive.
-    state.cancel_reference_vision_stream();
-    state.release_vision();
+    state.cancel_reference_stream(surface);
+    state.release_reference_surface(surface);
+    if let Err(error) = restore_suspended_reference_surface(app, surface) {
+        failures.push(error);
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -962,8 +1083,12 @@ pub fn close_reference_vision_surface(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-fn schedule_reference_vision_image_cleanup(app: &AppHandle, state: &AppState) {
-    let image_ids = match state.close_reference_vision_image_session() {
+fn schedule_reference_vision_image_cleanup(
+    app: &AppHandle,
+    state: &AppState,
+    surface: ReferenceSurface,
+) {
+    let image_ids = match state.close_reference_image_session(surface) {
         Ok(image_ids) => image_ids,
         Err(error) => {
             eprintln!("{error}; cleanup will be retried by a later targeted close or delete");
@@ -978,7 +1103,7 @@ fn schedule_reference_vision_image_cleanup(app: &AppHandle, state: &AppState) {
         tokio::time::sleep(VISION_IMAGE_CLEANUP_GRACE).await;
         if let Err(error) = app
             .state::<AppState>()
-            .cleanup_reference_vision_temporary_images(&image_ids)
+            .cleanup_reference_temporary_images(surface, &image_ids)
         {
             eprintln!("{error}; cleanup can be retried by a targeted delete");
         }
@@ -1290,69 +1415,97 @@ fn native_window_is_sizing(_window: &WebviewWindow) -> bool {
 }
 
 #[tauri::command]
-pub fn vision_set_floating(app: AppHandle, rect: FloatingRect) -> Result<bool, String> {
-    let Some(window) = app.get_webview_window("vision") else {
-        close_native_freeze(&app);
+pub async fn vision_set_floating(
+    window: WebviewWindow,
+    app: AppHandle,
+    rect: FloatingRect,
+) -> Result<bool, String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    let state = app.state::<AppState>();
+    let Some(generation) = state.reference_surface_generation(surface) else {
         return Ok(false);
     };
-    if safe_drag_active() {
-        return Ok(false);
-    }
-    let screenshot_translation = window
-        .url()
-        .map_err(|error| error.to_string())?
-        .fragment()
-        .is_some_and(|fragment| fragment.contains("mode=translate"));
-    let has_screenshot = resolve_floating_screenshot_profile(rect.has_screenshot);
-    let positioned = rect.x.is_some() && rect.y.is_some();
-    let mut rect = FloatingRect {
-        height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
-        ..rect
-    };
-    let resizable = vision_floating_resizable(screenshot_translation, rect.height);
-    VISION_FLOATING_REGION_LOCKED.store(true, Ordering::Release);
-    let already_resizable = VISION_FLOATING_RESIZABLE.load(Ordering::Acquire)
-        || window.is_resizable().map_err(|error| error.to_string())?;
-    let previous_has_screenshot = VISION_FLOATING_HAS_SCREENSHOT.load(Ordering::Acquire);
-    let profile_changed = previous_has_screenshot != has_screenshot;
-    let native_sizing = native_window_is_sizing(&window);
-    if native_sizing {
-        return Ok(false);
-    }
-    if should_defer_floating_resize(false, already_resizable, resizable, positioned)
-        && !profile_changed
-    {
-        return Ok(true);
-    }
-    if should_clear_floating_region(already_resizable, resizable, profile_changed) {
-        apply_vision_window_region(&window, None)?;
-    }
-    close_native_freeze(&app);
-    let mode_changed = profile_changed;
-    let minimum_height = resizable.then(|| vision_chat_min_height(&window, has_screenshot));
-    let initial_height = resizable.then(|| vision_chat_initial_height(&window, has_screenshot));
-    if should_apply_initial_height(resizable, already_resizable, profile_changed, positioned) {
-        rect.height = floating_height_for_initial(rect.height, initial_height);
-    }
-    let resizable_changed = already_resizable != resizable;
-    if resizable_changed {
-        window
-            .set_resizable(resizable)
-            .map_err(|error| error.to_string())?;
-    }
-    if resizable_changed || (resizable && mode_changed) {
-        set_vision_floating_size_constraints(&window, minimum_height)?;
-    }
-    VISION_FLOATING_RESIZABLE.store(resizable, Ordering::Release);
-    apply_floating_window_chrome(&window);
-    apply_floating_rect(&window, &rect)?;
-    VISION_FLOATING_HAS_SCREENSHOT.store(has_screenshot, Ordering::Release);
-    Ok(true)
+    state
+        .with_current_reference_surface(surface, generation, || {
+            let Some(window) = app.get_webview_window(surface.window_label()) else {
+                close_surface_native_freeze(&app, surface);
+                return Ok(false);
+            };
+            if safe_drag_active(surface) {
+                return Ok(false);
+            }
+            let screenshot_translation = window
+                .url()
+                .map_err(|error| error.to_string())?
+                .fragment()
+                .is_some_and(|fragment| fragment.contains("mode=translate"));
+            let has_screenshot = resolve_floating_screenshot_profile(rect.has_screenshot);
+            let positioned = rect.x.is_some() && rect.y.is_some();
+            let mut rect = FloatingRect {
+                height: floating_height_for_stage(rect.height, screenshot_translation, positioned),
+                ..rect
+            };
+            let resizable = vision_floating_resizable(screenshot_translation, rect.height);
+            floating_state(surface)
+                .region_locked
+                .store(true, Ordering::Release);
+            let already_resizable = floating_state(surface).resizable.load(Ordering::Acquire)
+                || window.is_resizable().map_err(|error| error.to_string())?;
+            let previous_has_screenshot = floating_state(surface)
+                .has_screenshot
+                .load(Ordering::Acquire);
+            let profile_changed = previous_has_screenshot != has_screenshot;
+            let native_sizing = native_window_is_sizing(&window);
+            if native_sizing {
+                return Ok(false);
+            }
+            if should_defer_floating_resize(false, already_resizable, resizable, positioned)
+                && !profile_changed
+            {
+                return Ok(true);
+            }
+            if should_clear_floating_region(already_resizable, resizable, profile_changed) {
+                apply_vision_window_region(&window, None)?;
+            }
+            close_surface_native_freeze(&app, surface);
+            let mode_changed = profile_changed;
+            let minimum_height = resizable.then(|| vision_chat_min_height(&window, has_screenshot));
+            let initial_height =
+                resizable.then(|| vision_chat_initial_height(&window, has_screenshot));
+            if should_apply_initial_height(
+                resizable,
+                already_resizable,
+                profile_changed,
+                positioned,
+            ) {
+                rect.height = floating_height_for_initial(rect.height, initial_height);
+            }
+            let resizable_changed = already_resizable != resizable;
+            if resizable_changed {
+                window
+                    .set_resizable(resizable)
+                    .map_err(|error| error.to_string())?;
+            }
+            if resizable_changed || (resizable && mode_changed) {
+                set_vision_floating_size_constraints(&window, minimum_height)?;
+            }
+            floating_state(surface)
+                .resizable
+                .store(resizable, Ordering::Release);
+            apply_floating_window_chrome(&window);
+            apply_floating_rect(&window, &rect)?;
+            floating_state(surface)
+                .has_screenshot
+                .store(has_screenshot, Ordering::Release);
+            Ok(true)
+        })
+        .map(|result| result.unwrap_or(false))
 }
 
 #[tauri::command]
-pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("vision") else {
+pub fn vision_start_safe_drag(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    let Some(window) = app.get_webview_window(surface.window_label()) else {
         return Err("Vision window is unavailable".to_string());
     };
 
@@ -1372,13 +1525,13 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
             SM_SWAPBUTTON, SWP_NOSIZE,
         };
 
-        let Some(token) = begin_safe_drag_token(&VISION_SAFE_DRAG_STATE) else {
+        let Some(token) = begin_safe_drag_token(&floating_state(surface).safe_drag) else {
             return Ok(());
         };
         let hwnd = match window.hwnd() {
             Ok(hwnd) => hwnd,
             Err(error) => {
-                reset_safe_drag_if_current(token);
+                reset_safe_drag_if_current(surface, token);
                 return Err(error.to_string());
             }
         };
@@ -1388,7 +1541,7 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
             GetCursorPos(&mut start_cursor).is_ok() && GetWindowRect(hwnd, &mut start_rect).is_ok()
         };
         if !initialized {
-            reset_safe_drag_if_current(token);
+            reset_safe_drag_if_current(surface, token);
             return Err("Vision window geometry is unavailable".to_string());
         }
         let swapped_buttons = unsafe { GetSystemMetrics(SM_SWAPBUTTON) != 0 };
@@ -1405,7 +1558,7 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
                 let mut last_x = start_rect.left;
                 let mut last_y = start_rect.top;
                 loop {
-                    if VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) != token {
+                    if floating_state(surface).safe_drag.load(Ordering::Acquire) != token {
                         break;
                     }
                     if unsafe { !IsWindow(Some(hwnd)).as_bool() } {
@@ -1426,7 +1579,7 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
                         (cursor.x, cursor.y),
                     );
                     if x != last_x || y != last_y {
-                        if VISION_SAFE_DRAG_STATE.load(Ordering::Acquire) != token {
+                        if floating_state(surface).safe_drag.load(Ordering::Acquire) != token {
                             break;
                         }
                         let moved =
@@ -1444,10 +1597,10 @@ pub fn vision_start_safe_drag(app: AppHandle) -> Result<(), String> {
                         std::thread::sleep(Duration::from_millis(4));
                     }
                 }
-                reset_safe_drag_if_current(token);
+                reset_safe_drag_if_current(surface, token);
             });
         if let Err(error) = spawn {
-            reset_safe_drag_if_current(token);
+            reset_safe_drag_if_current(surface, token);
             return Err(format!("Safe drag thread failed: {error}"));
         }
         Ok(())
@@ -1471,27 +1624,50 @@ fn floating_window_pos_flags() -> windows::Win32::UI::WindowsAndMessaging::SET_W
 }
 
 #[tauri::command]
-pub fn vision_fly_floating(app: AppHandle, rect: FloatingFlyRect) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("vision") {
-        let screenshot_translation = window
-            .url()
-            .map_err(|error| error.to_string())?
-            .fragment()
-            .is_some_and(|fragment| fragment.contains("mode=translate"));
-        if should_skip_floating_fly(
-            screenshot_translation,
-            VISION_FLOATING_RESIZABLE.load(Ordering::Acquire),
-            rect.height,
-        ) {
-            return Ok(());
-        }
-        let rect = FloatingFlyRect {
-            height: floating_height_for_stage(rect.height, screenshot_translation, true),
-            ..rect
-        };
-        apply_floating_fly_rect(&window, &rect)?;
-    }
-    Ok(())
+pub async fn vision_fly_floating(
+    window: WebviewWindow,
+    app: AppHandle,
+    rect: FloatingFlyRect,
+) -> Result<(), String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    let state = app.state::<AppState>();
+    let Some(generation) = state.reference_surface_generation(surface) else {
+        return Ok(());
+    };
+    state
+        .with_current_reference_surface(surface, generation, || {
+            if let Some(window) = app.get_webview_window(surface.window_label()) {
+                let screenshot_translation = window
+                    .url()
+                    .map_err(|error| error.to_string())?
+                    .fragment()
+                    .is_some_and(|fragment| fragment.contains("mode=translate"));
+                let state: tauri::State<'_, AppState> = app.state();
+                let image_session = state.reference_image_session(surface).ok();
+                if !should_skip_floating_fly(
+                    screenshot_translation,
+                    floating_state(surface).resizable.load(Ordering::Acquire),
+                    rect.height,
+                ) {
+                    let rect = FloatingFlyRect {
+                        height: floating_height_for_stage(
+                            rect.height,
+                            screenshot_translation,
+                            true,
+                        ),
+                        ..rect
+                    };
+                    apply_floating_fly_rect(&window, &rect)?;
+                }
+                if let Some(generation) = image_session {
+                    if state.finish_reference_capture(surface, generation) {
+                        restore_suspended_reference_surface(&app, surface)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map(|result| result.unwrap_or(()))
 }
 
 fn apply_vision_window_region(
@@ -1548,10 +1724,17 @@ fn apply_vision_window_region(
 }
 
 #[tauri::command]
-pub fn vision_set_hit_region(app: AppHandle, rect: Option<HitRegionRect>) -> Result<bool, String> {
-    if let Some(window) = app.get_webview_window("vision") {
+pub fn vision_set_hit_region(
+    window: WebviewWindow,
+    app: AppHandle,
+    rect: Option<HitRegionRect>,
+) -> Result<bool, String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    if let Some(window) = app.get_webview_window(surface.window_label()) {
         if should_reject_floating_hit_region(
-            VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire),
+            floating_state(surface)
+                .region_locked
+                .load(Ordering::Acquire),
             rect,
         ) {
             apply_vision_window_region(&window, None)?;
@@ -1564,12 +1747,19 @@ pub fn vision_set_hit_region(app: AppHandle, rect: Option<HitRegionRect>) -> Res
 }
 
 #[tauri::command]
-pub fn vision_set_ignore_cursor_events(app: AppHandle, ignore: bool) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("vision") {
+pub fn vision_set_ignore_cursor_events(
+    window: WebviewWindow,
+    app: AppHandle,
+    ignore: bool,
+) -> Result<(), String> {
+    let surface = ReferenceSurface::for_window(window.label());
+    if let Some(window) = app.get_webview_window(surface.window_label()) {
         window
             .set_ignore_cursor_events(resolve_vision_cursor_passthrough(
                 ignore,
-                VISION_FLOATING_REGION_LOCKED.load(Ordering::Acquire),
+                floating_state(surface)
+                    .region_locked
+                    .load(Ordering::Acquire),
             ))
             .map_err(|error| error.to_string())?;
     }
@@ -1577,8 +1767,13 @@ pub fn vision_set_ignore_cursor_events(app: AppHandle, ignore: bool) -> Result<(
 }
 
 #[tauri::command]
-pub fn take_vision_selection(state: State<'_, AppState>) -> String {
-    state.take_vision_selection()
+pub fn take_vision_selection(window: WebviewWindow, state: State<'_, AppState>) -> String {
+    let surface = ReferenceSurface::for_window(window.label());
+    if surface == ReferenceSurface::Vision {
+        state.take_vision_selection()
+    } else {
+        String::new()
+    }
 }
 
 fn vision_runtime_settings_projection(mut settings: AppSettings) -> Result<Value, String> {
@@ -1879,7 +2074,7 @@ async fn run_vision_request(
         settings.vision.thinking_effort,
         settings.vision.web_search,
     );
-    let stream_generation = state.begin_reference_vision_stream();
+    let stream_generation = state.begin_active_reference_stream(ReferenceSurface::Vision)?;
     let cancellation = state
         .reference_vision_signal(stream_generation)
         .ok_or("Vision request was superseded")?;
@@ -2431,24 +2626,27 @@ fn snapshot_alias_seen(
 }
 
 #[tauri::command]
-pub fn vision_cancel_stream(state: State<'_, AppState>) {
-    state.cancel_reference_vision_stream();
+pub fn vision_cancel_stream(window: WebviewWindow, state: State<'_, AppState>) {
+    let surface = ReferenceSurface::for_window(window.label());
+    state.cancel_reference_stream(surface);
 }
 
 #[tauri::command]
 pub async fn vision_translate(
+    window: WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     image_id: String,
     request_id: String,
 ) -> Result<Value, String> {
-    let generation = begin_screenshot_translation_stream(&state)?;
+    let surface = ReferenceSurface::for_window(window.label());
+    let generation = begin_screenshot_translation_stream(&state, surface)?;
     let emit_translate = |payload: Value| {
-        if state.reference_vision_stream_current(generation) {
-            let _ = app.emit_to("vision", "vision-translate-stream", payload);
+        if state.reference_stream_current(surface, generation) {
+            let _ = app.emit_to(surface.window_label(), "vision-translate-stream", payload);
         }
     };
-    let Some(cancellation) = state.reference_vision_signal(generation) else {
+    let Some(cancellation) = state.reference_signal(surface, generation) else {
         return Ok(json!({
             "success": true,
             "cancelled": true,
@@ -2463,7 +2661,7 @@ pub async fn vision_translate(
     let source = match recognized {
         Ok(source) => source,
         Err(error) => {
-            if !state.reference_vision_stream_current(generation) {
+            if !state.reference_stream_current(surface, generation) {
                 return Ok(json!({
                     "success": true,
                     "cancelled": true,
@@ -2488,7 +2686,7 @@ pub async fn vision_translate(
         }
     };
 
-    let clipboard_committed = state.with_current_reference_vision_stream(generation, || {
+    let clipboard_committed = state.with_current_reference_stream(surface, generation, || {
         let _ =
             arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(source.clone()));
         Ok(())
@@ -2513,7 +2711,7 @@ pub async fn vision_translate(
 
     match translate_source_cancelled(&state, &source, None, None, Some(cancellation)).await {
         Ok(translated) => {
-            if !state.reference_vision_stream_current(generation) {
+            if !state.reference_stream_current(surface, generation) {
                 return Ok(json!({
                     "success": true,
                     "cancelled": true,
@@ -2543,7 +2741,7 @@ pub async fn vision_translate(
             }))
         }
         Err(error) => {
-            if !state.reference_vision_stream_current(generation) {
+            if !state.reference_stream_current(surface, generation) {
                 return Ok(json!({
                     "success": true,
                     "cancelled": true,
@@ -2570,21 +2768,26 @@ pub async fn vision_translate(
     }
 }
 
-fn begin_screenshot_translation_stream(state: &AppState) -> Result<u64, String> {
+fn begin_screenshot_translation_stream(
+    state: &AppState,
+    surface: ReferenceSurface,
+) -> Result<u64, String> {
     let settings = state.current()?;
     ensure_screenshot_translation_enabled(&settings)?;
-    Ok(state.begin_reference_vision_stream())
+    state.begin_active_reference_stream(surface)
 }
 
 #[tauri::command]
 pub async fn vision_translate_text(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     text: String,
     target_language: Option<String>,
     source_language: Option<String>,
 ) -> Result<Value, String> {
-    let generation = begin_screenshot_translation_stream(&state)?;
-    let Some(cancellation) = state.reference_vision_signal(generation) else {
+    let surface = ReferenceSurface::for_window(window.label());
+    let generation = begin_screenshot_translation_stream(&state, surface)?;
+    let Some(cancellation) = state.reference_signal(surface, generation) else {
         return Ok(json!({ "success": true, "cancelled": true }));
     };
     let result = translate_source_cancelled(
@@ -2595,7 +2798,7 @@ pub async fn vision_translate_text(
         Some(cancellation),
     )
     .await;
-    if !state.reference_vision_stream_current(generation) {
+    if !state.reference_stream_current(surface, generation) {
         return Ok(json!({ "success": true, "cancelled": true }));
     }
     Ok(match result {
@@ -2671,7 +2874,7 @@ async fn translate_source_cancelled(
             .translation_model
             .as_ref()
             .or(settings.translation.ai_model.as_ref())
-            .ok_or("Select a screenshot translation model in settings")?;
+            .ok_or("Select a OCR translation model in settings")?;
         let (provider, keys) = provider_and_keys(&settings, selection)?;
         let prompt = build_screenshot_translation_prompt(
             source,
@@ -2768,7 +2971,7 @@ fn validate_screenshot_target_language(target_language: &str) -> Result<(), Stri
     if matches!(target_language, "auto" | "zh-CN" | "en" | "ja" | "ko") {
         Ok(())
     } else {
-        Err("Unsupported screenshot translation target language".into())
+        Err("Unsupported OCR translation target language".into())
     }
 }
 
@@ -2776,7 +2979,7 @@ fn validate_screenshot_source_language(source_language: &str) -> Result<(), Stri
     if matches!(source_language, "auto" | "zh-CN" | "en" | "ja" | "ko") {
         Ok(())
     } else {
-        Err("Unsupported screenshot translation source language".into())
+        Err("Unsupported OCR translation source language".into())
     }
 }
 
@@ -2900,6 +3103,19 @@ mod tests {
         notify_vision_closing(|_| Err::<(), _>("synthetic emit failure"));
         cleanup_continued.set(true);
         assert!(cleanup_continued.get());
+    }
+
+    #[test]
+    fn reference_windows_and_floating_geometry_are_independent() {
+        assert_eq!(ReferenceSurface::for_mode("chat").window_label(), "vision");
+        assert_eq!(
+            ReferenceSurface::for_mode("translate").window_label(),
+            "ocr"
+        );
+        assert!(!std::ptr::eq(
+            floating_state(ReferenceSurface::Vision),
+            floating_state(ReferenceSurface::Ocr)
+        ));
     }
 
     #[test]
@@ -3282,7 +3498,7 @@ mod tests {
         );
         assert_eq!(
             ensure_reference_mode_enabled(&settings, "translate"),
-            Err("Screenshot translation is disabled in settings".into())
+            Err("OCR translation is disabled in settings".into())
         );
         assert!(ensure_capture_enabled(&settings).is_err());
         assert!(ensure_optimizer_enabled(&settings).is_err());
@@ -3310,8 +3526,8 @@ mod tests {
         let current_generation = state.begin_reference_vision_stream();
 
         assert_eq!(
-            begin_screenshot_translation_stream(&state),
-            Err("Screenshot translation is disabled in settings".into())
+            begin_screenshot_translation_stream(&state, ReferenceSurface::Ocr),
+            Err("OCR translation is disabled in settings".into())
         );
         assert!(state.reference_vision_stream_current(current_generation));
     }

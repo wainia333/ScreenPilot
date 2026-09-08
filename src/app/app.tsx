@@ -26,7 +26,8 @@ function routeAllowedInWindow(
 function RouteContent() {
   const parameters = new URLSearchParams(window.location.search)
   const tauriRuntime = '__TAURI_INTERNALS__' in window
-  const visionWindow = parameters.get('window') === 'vision'
+  const windowLabel = tauriRuntime ? getCurrentWindow().label : parameters.get('window')
+  const visionWindow = windowLabel === 'vision' || windowLabel === 'ocr'
   const translatorWindow = tauriRuntime && getCurrentWindow().label === 'translator'
   const requestedRoute = parameters.get('route')
   const initialRoute: WindowRoute = visionWindow

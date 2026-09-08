@@ -336,7 +336,10 @@ pub fn translator_take_selection(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn window_hide(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn window_hide(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    if matches!(window.label(), "vision" | "ocr") {
+        return super::vision::vision_close(window.app_handle().clone(), window, state).await;
+    }
     if window.label() == "translator" {
         state.begin_surface_action();
         state.cancel_active_translator_request();
