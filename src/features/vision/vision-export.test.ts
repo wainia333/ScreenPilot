@@ -28,6 +28,20 @@ describe('Vision Markdown export', () => {
     expect(defaultVisionExportFileName(new Date(2026, 0, 2, 3, 4, 5))).toBe('2026_01_02-03_04_05.md')
   })
 
+  it('places each message image immediately before its message content', () => {
+    const markdown = buildVisionMarkdown({
+      messages: [
+        { role: 'user', content: 'Inspect the pasted image.', imagePreview: 'data:image/png;base64,pasted' },
+        { role: 'assistant', content: 'It contains a diagram.' },
+      ],
+    })
+
+    expect(markdown).toContain('## 提问 1\n\n![截图](data:image/png;base64,pasted)\n\nInspect the pasted image.')
+    expect(markdown.indexOf('![截图](data:image/png;base64,pasted)')).toBeLessThan(
+      markdown.indexOf('Inspect the pasted image.'),
+    )
+  })
+
   it('copies one message as Markdown without adding conversation headings', () => {
     expect(buildVisionMessageMarkdown({ role: 'user', content: '**请解释**' })).toBe('**请解释**')
     expect(buildVisionMessageMarkdown({ role: 'assistant', reasoning: '先分析', content: '`答案`' }))

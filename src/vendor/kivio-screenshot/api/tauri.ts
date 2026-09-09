@@ -3,7 +3,12 @@ import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 
-export type ExplainMessage = { role: 'user' | 'assistant'; content: string; reasoning?: string }
+export type ExplainMessage = {
+  role: 'user' | 'assistant'
+  content: string
+  reasoning?: string
+  imagePreview?: string
+}
 
 export type VisionStreamPayload = {
   imageId: string

@@ -2,6 +2,7 @@ export type VisionExportMessage = {
   role: 'user' | 'assistant'
   content: string
   reasoning?: string
+  imagePreview?: string
 }
 
 export type VisionExportOptions = {
@@ -49,7 +50,8 @@ export function buildVisionMarkdown({
   const sections = [`# ${labels.title}`]
   const source = appLabel.replace(/[\r\n]+/gu, ' ').trim()
   if (source) sections.push(`> ${labels.source}: ${source}`)
-  if (imageDataUrl.trim()) {
+  const hasMessageImages = messages.some(message => !!message.imagePreview?.trim())
+  if (imageDataUrl.trim() && !hasMessageImages) {
     sections.push(`![${labels.screenshot}](${imageDataUrl.trim()})`)
   }
 
@@ -57,12 +59,16 @@ export function buildVisionMarkdown({
   let answerIndex = 0
   messages.forEach((message) => {
     const body = buildVisionMessageMarkdown(message)
-    if (!body) return
+    const image = message.imagePreview?.trim() ?? ''
+    if (!body && !image) return
 
     const heading = message.role === 'user'
       ? `${labels.question} ${++questionIndex}`
       : `${labels.answer} ${++answerIndex}`
-    sections.push(`## ${heading}\n\n${body}`)
+    const content = [image ? `![${labels.screenshot}](${image})` : '', body]
+      .filter(Boolean)
+      .join('\n\n')
+    sections.push(`## ${heading}\n\n${content}`)
   })
 
   return `${sections.join('\n\n').trimEnd()}\n`

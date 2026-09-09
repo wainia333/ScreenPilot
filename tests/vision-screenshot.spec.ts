@@ -143,3 +143,105 @@ test('Vision keeps text-only conversations free of screenshot previews', async (
     window as typeof window & { __SCREENPILOT_TEST__: { activeVisionImageId: string } }
   ).__SCREENPILOT_TEST__.activeVisionImageId)).toBe('')
 })
+
+test('Vision distinguishes text and image paste during a conversation', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, false)
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForSelection(page)
+
+  const prompt = page.locator('[data-screenpilot-vision-prompt="true"]')
+  const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+  await prompt.evaluate((element, base64) => {
+    const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0))
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([bytes], 'pasted.png', { type: 'image/png' }))
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }))
+  }, tinyPng)
+
+  const promptBar = page.locator('[data-screenpilot-prompt-bar="true"]')
+  await expect(promptBar.locator(thumbnailSelector)).toBeVisible()
+  await expect(promptBar.locator(defaultIconSelector)).toHaveCount(0)
+
+  await prompt.fill('Describe the pasted image.')
+  await prompt.press('Enter')
+  const log = page.getByRole('log')
+  const firstQuestion = log.locator('[data-screenpilot-message-shell="true"][data-screenpilot-message-index="0"]')
+  await expect(firstQuestion.locator(screenshotSelector)).toBeVisible()
+  await expect(promptBar.locator(thumbnailSelector)).toHaveCount(0)
+  await expect(promptBar.locator(defaultIconSelector)).toBeVisible()
+
+  await prompt.evaluate((element) => {
+    const transfer = new DataTransfer()
+    transfer.setData('text/plain', 'pasted follow-up text')
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }))
+  })
+  await expect(prompt).toHaveValue('pasted follow-up text')
+
+  await prompt.fill('Ask a text-only follow-up.')
+  await prompt.press('Enter')
+  const textFollowUp = log.locator('[data-screenpilot-message-shell="true"][data-screenpilot-message-index="2"]')
+  await expect(textFollowUp.locator(screenshotSelector)).toHaveCount(0)
+
+  await prompt.evaluate((element, base64) => {
+    const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0))
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([bytes], 'pasted-again.png', { type: 'image/png' }))
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }))
+  }, tinyPng)
+  await expect(promptBar.locator(thumbnailSelector)).toBeVisible()
+  await prompt.fill('Ask about the pasted image again.')
+  await prompt.press('Enter')
+  const imageFollowUp = log.locator('[data-screenpilot-message-shell="true"][data-screenpilot-message-index="4"]')
+  await expect(imageFollowUp.locator(screenshotSelector)).toBeVisible()
+  await expect(promptBar.locator(thumbnailSelector)).toHaveCount(0)
+  await expect(promptBar.locator(defaultIconSelector)).toBeVisible()
+  await expect(imageFollowUp.locator(screenshotSelector)).toHaveAttribute('src', /^data:image\/png;base64,/u)
+  await expect(log.locator(screenshotSelector)).toHaveCount(2)
+})
+
+test('Vision keeps the original screenshot visible when a later question pastes an image', async ({ page }) => {
+  await installVisionTauriMock(page)
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForSelection(page)
+  await page.keyboard.press('Alt+w')
+  await page.keyboard.press('Alt+Enter')
+
+  const prompt = page.locator('[data-screenpilot-vision-prompt="true"]')
+  await prompt.fill('Explain the captured screenshot.')
+  await prompt.press('Enter')
+  const log = page.getByRole('log')
+  const firstQuestion = log.locator('[data-screenpilot-message-shell="true"][data-screenpilot-message-index="0"]')
+  await expect(firstQuestion.locator(screenshotSelector)).toBeVisible()
+
+  const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+  await prompt.evaluate((element, base64) => {
+    const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0))
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([bytes], 'later.png', { type: 'image/png' }))
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }))
+  }, tinyPng)
+  await expect(page.locator('[data-screenpilot-prompt-bar="true"]').locator(thumbnailSelector)).toBeVisible()
+  await prompt.fill('Describe the later pasted image.')
+  await prompt.press('Enter')
+
+  const laterQuestion = log.locator('[data-screenpilot-message-shell="true"][data-screenpilot-message-index="2"]')
+  await expect(firstQuestion.locator(screenshotSelector)).toBeVisible()
+  await expect(laterQuestion.locator(screenshotSelector)).toBeVisible()
+  await expect(log.locator(screenshotSelector)).toHaveCount(2)
+})

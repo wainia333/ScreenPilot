@@ -24,7 +24,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { i18n, type Lang } from './settings/i18n'
-import { copyToClipboard } from './utils/clipboard'
+import { copyToClipboard, dataUrlToBase64, getClipboardImage, readBlobAsDataUrl } from './utils/clipboard'
 import { buildVisionMarkdown, buildVisionMessageMarkdown, defaultVisionExportFileName } from '../../features/vision/vision-export'
 import {
   shouldPromoteVisionBarLayer,
@@ -725,6 +725,11 @@ type BarRect = { x: number; y: number; width: number }
 type CopyTarget = 'answer' | 'original' | 'translated'
 type VisionMessageRole = 'user' | 'assistant'
 type VisionTranslateFailureKind = 'original' | 'translated'
+type PendingVisionImage = { imageId: string; dataUrl: string }
+
+function stripVisionMessageImages(messages: readonly ExplainMessage[]): ExplainMessage[] {
+  return messages.map(({ imagePreview, ...message }) => message)
+}
 
 export function resolveVisionTranslateFailureKind(
   kind: unknown,
@@ -1444,6 +1449,7 @@ export default function Vision() {
   const [selectBarCollapsed, setSelectBarCollapsed] = useState(false)
   const [animatedHoverRect, setAnimatedHoverRect] = useState<Rect | null>(null)
   const [imagePreview, setImagePreview] = useState('')
+  const [pastedImage, setPastedImage] = useState<PendingVisionImage | null>(null)
   const [capturePreparing, setCapturePreparing] = useState(false)
   const [appLabel, setAppLabel] = useState('')
   const [input, setInput] = useState('')
@@ -1578,7 +1584,9 @@ export default function Vision() {
   const modeRef = useRef<Mode>(mode)
   const historyOpenRef = useRef(false)
   const imageIdRef = useRef('')
-  const hasScreenshot = !!imageIdRef.current || capturedFrame !== null
+  const pastedImageRef = useRef<PendingVisionImage | null>(null)
+  const pastedImageSequenceRef = useRef(0)
+  const hasScreenshot = !!imageIdRef.current || capturedFrame !== null || !!pastedImage
   // 纯文字会话的会话 id。多轮对话要落到同一条历史上，所以第一次入库时生成、
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
@@ -1664,6 +1672,7 @@ export default function Vision() {
   translateTextRef.current = translateText
   messagesRef.current = messages
   imagePreviewRef.current = imagePreview
+  pastedImageRef.current = pastedImage
   appLabelRef.current = appLabel
   langRef.current = lang
 
@@ -1765,6 +1774,7 @@ export default function Vision() {
   const invalidateVisionSurface = useCallback(() => {
     visionSurfaceEpochRef.current += 1
     invalidateCapture()
+    pastedImageSequenceRef.current += 1
     selectionReqIdRef.current += 1
     nativeFlySeqRef.current += 1
     focusReqIdRef.current += 1
@@ -1794,6 +1804,86 @@ export default function Vision() {
       console.error('[vision-capture] stale image cleanup failed:', error)
     }
   }, [])
+
+  const clearPastedImage = useCallback((deleteImage = true) => {
+    const image = pastedImageRef.current
+    pastedImageSequenceRef.current += 1
+    pastedImageRef.current = null
+    setPastedImage(null)
+    setCapturePreparing(false)
+    if (deleteImage && image?.imageId) {
+      void api.visionDeleteTemporaryImage(image.imageId).catch(error => {
+        console.error('[vision-paste] temporary cleanup failed:', error)
+      })
+    }
+  }, [])
+
+  const handlePromptPaste = useCallback((event: ClipboardEvent<HTMLInputElement>) => {
+    const file = getClipboardImage(event.clipboardData)
+    if (file) {
+      event.preventDefault()
+
+      const previous = pastedImageRef.current
+      const sequence = ++pastedImageSequenceRef.current
+      setCapturePreparing(true)
+
+      void (async () => {
+        try {
+          const dataUrl = await readBlobAsDataUrl(file)
+          if (sequence !== pastedImageSequenceRef.current || !captureSurfaceActiveRef.current) return
+
+          const loadingPreview = { imageId: '', dataUrl }
+          pastedImageRef.current = loadingPreview
+          setPastedImage(loadingPreview)
+          const result = await api.visionRegisterAnnotatedImage(dataUrlToBase64(dataUrl))
+          if (sequence !== pastedImageSequenceRef.current || !captureSurfaceActiveRef.current) {
+            await deleteStaleCaptureImage(result.success ? result.imageId : undefined)
+            return
+          }
+          if (!result.success || !result.imageId) {
+            console.error('[vision-paste] image registration failed:', result.error)
+            pastedImageRef.current = previous
+            setPastedImage(previous)
+            setA11yAnnouncement(lang === 'zh' ? '图片粘贴失败，请重试。' : 'Pasting the image failed. Please try again.')
+            return
+          }
+          const ready = { imageId: result.imageId, dataUrl }
+          pastedImageRef.current = ready
+          setPastedImage(ready)
+          if (previous?.imageId && previous.imageId !== ready.imageId) {
+            void api.visionDeleteTemporaryImage(previous.imageId).catch(error => {
+              console.error('[vision-paste] replaced image cleanup failed:', error)
+            })
+          }
+          setA11yAnnouncement(lang === 'zh' ? '图片已粘贴。' : 'Image pasted.')
+        } catch (error) {
+          if (sequence !== pastedImageSequenceRef.current) return
+          console.error('[vision-paste] clipboard image read failed:', error)
+          pastedImageRef.current = previous
+          setPastedImage(previous)
+          setA11yAnnouncement(lang === 'zh' ? '图片粘贴失败，请重试。' : 'Pasting the image failed. Please try again.')
+        } finally {
+          if (sequence === pastedImageSequenceRef.current) setCapturePreparing(false)
+        }
+      })()
+      return
+    }
+
+    const text = event.clipboardData.getData('text/plain')
+    if (!text) return
+    event.preventDefault()
+    const target = event.currentTarget
+    const currentValue = target.value
+    const start = target.selectionStart ?? currentValue.length
+    const end = target.selectionEnd ?? start
+    setInput(`${currentValue.slice(0, start)}${text}${currentValue.slice(end)}`)
+    requestAnimationFrame(() => {
+      if (inputRef.current !== target) return
+      target.focus({ preventScroll: true })
+      const caret = start + text.length
+      target.setSelectionRange(caret, caret)
+    })
+  }, [deleteStaleCaptureImage, lang])
 
   const showArchiveWarning = useCallback((warning?: string) => {
     if (!warning) return
@@ -1990,6 +2080,7 @@ export default function Vision() {
     window.dispatchEvent(new Event('screenpilot:vision-session-reset'))
     const previousImageId = imageIdRef.current
     invalidateVisionSurface()
+    clearPastedImage()
     const surfaceEpoch = visionSurfaceEpochRef.current
     captureSurfaceActiveRef.current = true
     const surfaceIsCurrent = () => (
@@ -2215,7 +2306,7 @@ export default function Vision() {
       return
     }
     focusVisionInput()
-  }, [cancelPromptOptimization, focusVisionInput, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, clearPastedImage, focusVisionInput, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, setVisionCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     const startSelection = () => {
@@ -2367,6 +2458,13 @@ export default function Vision() {
     let cancelled = false
     const persistence = (async () => {
       const thumb = textOnly ? '' : await makeThumbnail(imagePreview, HISTORY_THUMB_SIZE)
+      const historyMessages = await Promise.all(messages.map(async (message) => {
+        if (!message.imagePreview) return message
+        return {
+          ...message,
+          imagePreview: await makeThumbnail(message.imagePreview, HISTORY_THUMB_SIZE),
+        }
+      }))
       if (cancelled) return
       if (!textOnly) {
         try {
@@ -2386,7 +2484,7 @@ export default function Vision() {
           id,
           imagePreview: thumb,
           appLabel: textOnly ? '' : appLabel,
-          messages,
+          messages: historyMessages,
           capturedFrame: textOnly ? null : capturedFrame,
           timestamp: Date.now(),
           textOnly,
@@ -2534,6 +2632,7 @@ export default function Vision() {
   const resetBeforeHide = useCallback(() => {
     const previousImageId = imageIdRef.current
     invalidateVisionSurface()
+    clearPastedImage()
     invalidateVisionRequest()
     setVisionCursorPassthrough(false)
     void api.visionSetHitRegion(null).catch(err => console.error('[vision-floating] clear hit region failed:', err))
@@ -2627,7 +2726,7 @@ export default function Vision() {
     // 让任何还没落地的 takeVisionSelection 老 promise 作废，避免关闭后 setSelectionText 拖回来
     selectionReqIdRef.current++
     focusReqIdRef.current++
-  }, [cancelPromptOptimization, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, clearPastedImage, invalidateVisionRequest, invalidateVisionSurface, resetVisionStreamBuffer, viewport, metrics, setVisionCursorPassthrough, stopSpeechPlayback])
 
   const resetAfterClose = useCallback(() => {
     if (closeResetTimerRef.current) clearTimeout(closeResetTimerRef.current)
@@ -3996,10 +4095,21 @@ export default function Vision() {
     }
   }, [barRect, floatingRebased, metrics, startLandingJelly, viewport, winOrigin])
 
-  const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[], requestId: string) => {
+  useEffect(() => {
+    if (stage !== 'select' || !pastedImage?.imageId || !captureSurfaceActiveRef.current) return
+    void flyBarToTopSlot(undefined, undefined, true).catch(error => {
+      console.error('[vision-paste] floating transition failed:', error)
+    })
+  }, [flyBarToTopSlot, pastedImage, stage])
+
+  const enterTextOnlyFloatingAnswer = useCallback(async (
+    nextMessages: ExplainMessage[],
+    requestId: string,
+    hasScreenshot = false,
+  ) => {
     // 先只把输入条飞上去（此时还是单条高度），落地后再置 answering，
     // 让回答面板从落点向下展开 —— 而不是边飞边长高。
-    const ok = await flyBarToTopSlot(requestId)
+    const ok = await flyBarToTopSlot(requestId, undefined, hasScreenshot)
     if (!isVisionRequestCurrent(requestId)) return false
     flushSync(() => {
       setMessages(nextMessages)
@@ -4104,7 +4214,9 @@ export default function Vision() {
                 console.error('[vision-arrow] replaced image cleanup failed:', err)
               })
             }
-            setImagePreview(`data:image/png;base64,${base64}`)
+            const annotatedPreview = `data:image/png;base64,${base64}`
+            imagePreviewRef.current = annotatedPreview
+            setImagePreview(annotatedPreview)
             setArrows([])
             setDraftArrow(null)
             setDrawMode(false)
@@ -4119,7 +4231,7 @@ export default function Vision() {
       }
       if (!isVisionRequestCurrent(requestId)) return
       preparingSendRef.current = false
-      const result = await api.visionAsk(effectiveImageId || '', sendMessages, requestId)
+      const result = await api.visionAsk(effectiveImageId || '', stripVisionMessageImages(sendMessages), requestId)
       if (!isVisionRequestCurrent(requestId) || !visionRequestLifecycleRef.current.matchesResult(requestId, result)) return
       if (!visionRequestLifecycleRef.current.acceptResult(requestId, result.requestId)) return
       clearVisionStreamFlushTimer()
@@ -4168,18 +4280,46 @@ export default function Vision() {
 
   const handleSend = async () => {
     if (streaming || capturePreparing) return
+    const pendingPastedImage = pastedImageRef.current
+    if (pendingPastedImage && !pendingPastedImage.imageId) return
     const question = input.trim()
     const allowBlankImageAnalysis = (
       !question
       && mode === 'chat'
-      && stageRef.current === 'ready'
       && messages.length === 0
-      && !!imageIdRef.current
+      && (stageRef.current === 'ready' || !!pendingPastedImage)
+      && (!!imageIdRef.current || !!pendingPastedImage)
     )
     if (!question && !allowBlankImageAnalysis) return
     if (!await ensureVisionStreamListener()) return
     const requestId = visionRequestLifecycleRef.current.begin()
     visionTerminalErrorRef.current = null
+    let conversationMessages = messages
+    if (pendingPastedImage) {
+      const currentImagePreview = imagePreviewRef.current
+      const currentImageAttached = !!currentImagePreview && messages.some(message => (
+        message.imagePreview === currentImagePreview
+      ))
+      const firstUserIndex = messages.findIndex(message => message.role === 'user')
+      const firstUser = firstUserIndex >= 0 ? messages[firstUserIndex] : undefined
+      if (currentImagePreview && !currentImageAttached && firstUser && !firstUser.imagePreview) {
+        conversationMessages = messages.map((message, index) => (
+          index === firstUserIndex
+            ? { ...message, imagePreview: currentImagePreview }
+            : message
+        ))
+      }
+      const replacedImageId = imageIdRef.current
+      imageIdRef.current = pendingPastedImage.imageId
+      imagePreviewRef.current = pendingPastedImage.dataUrl
+      setImagePreview(pendingPastedImage.dataUrl)
+      clearPastedImage(false)
+      if (messages.length === 0 && replacedImageId && replacedImageId !== pendingPastedImage.imageId) {
+        void api.visionDeleteTemporaryImage(replacedImageId).catch(error => {
+          console.error('[vision-paste] replaced capture cleanup failed:', error)
+        })
+      }
+    }
     const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
     setHistoryOpen(false)
     // 发送即视为放弃这次优化建议：预览卡和答案面板都挂在悬浮条正下方，
@@ -4195,9 +4335,15 @@ export default function Vision() {
           ? `[已选文本]\n${ctx}\n\n[用户问题]\n${effectiveQuestion}`
           : `[Selected Text]\n${ctx}\n\n[Question]\n${effectiveQuestion}`)
       : effectiveQuestion
-    const userMsg: ExplainMessage = { role: 'user', content: userContent }
+    const userMsg: ExplainMessage = {
+      role: 'user',
+      content: userContent,
+      ...(pendingPastedImage?.dataUrl
+        ? { imagePreview: pendingPastedImage.dataUrl }
+        : {}),
+    }
     const placeholder: ExplainMessage = { role: 'assistant', content: '' }
-    const sendMessages: ExplainMessage[] = [...messages, userMsg]
+    const sendMessages: ExplainMessage[] = [...conversationMessages, userMsg]
     const nextMessages = [...sendMessages, placeholder]
     chatAutoFollowRef.current = true
     resetVisionStreamBuffer()
@@ -4209,7 +4355,7 @@ export default function Vision() {
       && !floatingRebased
     )
     if (textOnlyFloating) {
-      await enterTextOnlyFloatingAnswer(nextMessages, requestId)
+      await enterTextOnlyFloatingAnswer(nextMessages, requestId, !!pendingPastedImage)
       if (!isVisionRequestCurrent(requestId)) return
     } else {
       flushSync(() => {
@@ -4219,7 +4365,7 @@ export default function Vision() {
       })
     }
 
-    await executeVisionRequest(sendMessages, requestId, true)
+    await executeVisionRequest(sendMessages, requestId, !pendingPastedImage)
   }
 
   const handleStop = async () => {
@@ -4551,6 +4697,7 @@ export default function Vision() {
     setEditingMessageIndex(null)
     setEditingMessageDraft('')
     setHistoryOpen(false)
+    clearPastedImage()
     cancelPromptOptimization()
     stopSpeechPlayback()
     if (streaming) {
@@ -4578,6 +4725,33 @@ export default function Vision() {
     // question. Keep the answer hidden in `ready` while the one-line bar moves;
     // only expand it after the native promise reaches the shared top slot.
     const expectedFlySeq = nativeFlySeqRef.current + 1
+    const restoredMessages = item.messages.map(message => ({ ...message }))
+    const firstRestoredUserIndex = restoredMessages.findIndex(message => message.role === 'user')
+    const firstRestoredUser = firstRestoredUserIndex >= 0
+      ? restoredMessages[firstRestoredUserIndex]
+      : undefined
+    if (
+      item.imagePreview
+      && firstRestoredUser
+      && !firstRestoredUser.imagePreview
+    ) {
+      restoredMessages[firstRestoredUserIndex] = {
+        ...firstRestoredUser,
+        imagePreview: item.imagePreview,
+      }
+    }
+    const restoredMessageImageIndex = (() => {
+      let messageIndex = -1
+      for (let index = restoredMessages.length - 1; index >= 0; index -= 1) {
+        const message = restoredMessages[index]
+        if (message?.role === 'user' && message.imagePreview === item.imagePreview) {
+          messageIndex = index
+          break
+        }
+      }
+      return messageIndex
+    })()
+    let restoredImagePreview = item.imagePreview
     const flight = flyBarToTopSlot(undefined, () => {
       setMode('chat')
       setImagePreview(item.imagePreview)
@@ -4589,26 +4763,38 @@ export default function Vision() {
       setStreaming(false)
     }, !restoreTextOnly)
 
-    if (!restoreTextOnly) {
-      void api.explainReadImage(item.id).then((result) => {
+    const readImagePromise = restoreTextOnly
+      ? Promise.resolve()
+      : api.explainReadImage(item.id).then((result) => {
         if (
           expectedFlySeq !== nativeFlySeqRef.current
           || imageIdRef.current !== item.id
           || !result.success
           || !result.data
         ) return
-        setImagePreview(result.data)
+        restoredImagePreview = result.data
+        if (restoredMessageImageIndex >= 0) {
+          const message = restoredMessages[restoredMessageImageIndex]
+          if (message) {
+            restoredMessages[restoredMessageImageIndex] = {
+              ...message,
+              imagePreview: result.data,
+            }
+          }
+        }
       }).catch((error) => {
         console.error('[vision-history] full image reload failed:', error)
       })
-    }
 
     const landed = await flight
     const pendingCloseAttempt = closeAttemptPromiseRef.current
     if (pendingCloseAttempt && await pendingCloseAttempt) return
     if (expectedFlySeq !== nativeFlySeqRef.current) return
+    await readImagePromise
+    if (expectedFlySeq !== nativeFlySeqRef.current) return
     flushSync(() => {
-      setMessages(item.messages)
+      setImagePreview(restoredImagePreview)
+      setMessages(restoredMessages)
       setStage('answering')
       setStreaming(false)
     })
@@ -4676,8 +4862,13 @@ export default function Vision() {
   }, [historyOpen])
 
   const firstUserMessageIndex = messages.findIndex(message => message.role === 'user')
-  const showThumb = stage !== 'select' && firstUserMessageIndex === -1 && (imagePreview || appLabel)
-  const canSendBlankImageAnalysis = mode === 'chat' && stage === 'ready' && messages.length === 0 && capturedFrame !== null
+  const barImagePreview = pastedImage?.dataUrl || imagePreview
+  const showThumb = !!pastedImage?.dataUrl
+    || (stage !== 'select' && firstUserMessageIndex === -1 && !!(imagePreview || appLabel))
+  const canSendBlankImageAnalysis = mode === 'chat'
+    && stage === 'ready'
+    && messages.length === 0
+    && (capturedFrame !== null || !!pastedImage?.imageId)
   const canOptimizePrompt = !!input.trim() && !streaming && !promptOptimizing && !capturePreparing
   const sendDisabled = streaming || promptOptimizing || capturePreparing || (!input.trim() && !canSendBlankImageAnalysis)
   const showBar = mode === 'chat'
@@ -5584,7 +5775,7 @@ export default function Vision() {
             data-tauri-drag-region="false"
           >
             <div className="shrink-0 flex items-center gap-2">
-              {capturePreparing ? (
+              {capturePreparing && !pastedImage?.dataUrl ? (
                 <Loader2
                   size={28}
                   role="status"
@@ -5594,9 +5785,9 @@ export default function Vision() {
               ) : showThumb ? (
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center shadow-sm">
-                    {imagePreview ? (
+                    {barImagePreview ? (
                       <img
-                        src={imagePreview}
+                        src={barImagePreview}
                         alt={t.visionScreenshotPreview}
                         data-screenpilot-screenshot-preview="true"
                         className="w-full h-full object-cover"
@@ -5657,6 +5848,7 @@ export default function Vision() {
               autoFocus
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={handlePromptPaste}
               onKeyDown={(e) => {
                 if (e.key !== 'Enter' || e.shiftKey) return
                 // IME 合成中（中/日/韩选词按回车）跳过 — isComposing 官方信号 + keyCode 229 兜底
@@ -5992,9 +6184,13 @@ export default function Vision() {
                           data-screenpilot-message-pair-gap={isCompactPairTail ? 'compact' : 'standard'}
                           className={`${isEditing ? 'mb-3' : 'mb-3 pb-[30px]'} relative ${isCompactPairTail ? '-mt-[6px]' : ''} ${isUser ? 'flex justify-end' : ''}`}
                         >
-                          {imagePreview && origIdx === firstUserMessageIndex && (
+                          {isUser && (m.imagePreview || (
+                            imagePreview
+                            && firstUserMessageIndex === origIdx
+                            && !m.imagePreview
+                          )) && (
                             <img
-                              src={imagePreview}
+                              src={m.imagePreview || imagePreview}
                               alt={t.visionScreenshotPreview}
                               data-screenpilot-message-screenshot="true"
                               className="mb-2 max-h-48 max-w-[88%] rounded-xl object-contain ring-1 ring-black/[0.06] dark:ring-white/[0.06]"

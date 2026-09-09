@@ -88,6 +88,7 @@ function validMessage(value: unknown): value is ExplainMessage {
   return (message.role === 'user' || message.role === 'assistant')
     && typeof message.content === 'string'
     && (message.reasoning === undefined || typeof message.reasoning === 'string')
+    && (message.imagePreview === undefined || typeof message.imagePreview === 'string')
 }
 
 export function isVisionHistoryItem(value: unknown): value is VisionHistoryItem {
