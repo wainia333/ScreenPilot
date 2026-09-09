@@ -1,4 +1,5 @@
 import { useState, type KeyboardEvent } from 'react'
+import { displayShortcut } from './shortcuts'
 
 function shortcutFromEvent(event: KeyboardEvent<HTMLButtonElement>): string | null {
   const modifiers = [
@@ -54,7 +55,7 @@ export function ShortcutRecorder({
         setRecording(false)
       }}
     >
-      {recording ? recordingLabel : value}
+      {recording ? recordingLabel : displayShortcut(value)}
     </button>
   )
 }

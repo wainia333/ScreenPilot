@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -868,24 +868,40 @@ fn register_shortcut(
         .map_err(|error| error.to_string())
 }
 
-fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str)> {
-    let mut items = vec![("translator", "文本翻译")];
+fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str, &str)> {
+    let mut items = vec![(
+        "translator",
+        "文本翻译",
+        settings.shortcuts.translator.as_str(),
+    )];
     if settings.vision.enabled {
-        items.push(("vision", "Vision"));
+        items.push(("vision", "Vision", settings.shortcuts.vision.as_str()));
     }
     if settings.screenshot_translation.enabled {
-        items.push(("screenshot", "OCR翻译"));
+        items.push((
+            "screenshot",
+            "OCR翻译",
+            settings.shortcuts.screenshot_translation.as_str(),
+        ));
     }
     if settings.prompt_optimizer.enabled {
-        items.push(("optimizer", "提示词优化"));
+        items.push((
+            "optimizer",
+            "提示词优化",
+            settings.shortcuts.prompt_optimizer.as_str(),
+        ));
     }
     items
 }
 
 fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri::Wry>, String> {
     let mut builder = MenuBuilder::new(app);
-    for (id, label) in tray_feature_items(settings) {
-        builder = builder.text(id, label);
+    for (id, label, shortcut) in tray_feature_items(settings) {
+        let item = MenuItemBuilder::with_id(id, label)
+            .accelerator(shortcut)
+            .build(app)
+            .map_err(|error| error.to_string())?;
+        builder = builder.item(&item);
     }
     builder
         .separator()
@@ -1925,7 +1941,11 @@ mod tests {
         );
         assert_eq!(
             tray_feature_items(&settings),
-            vec![("translator", "文本翻译")]
+            vec![(
+                "translator",
+                "文本翻译",
+                settings.shortcuts.translator.as_str()
+            )]
         );
     }
 

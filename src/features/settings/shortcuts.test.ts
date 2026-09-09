@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeShortcut } from './shortcuts'
+import { displayShortcut, normalizeShortcut } from './shortcuts'
 
 describe('normalizeShortcut', () => {
   it.each([
@@ -13,3 +13,9 @@ describe('normalizeShortcut', () => {
   })
 })
 
+describe('displayShortcut', () => {
+  it('uses Ctrl for Control in the settings UI', () => {
+    expect(displayShortcut('Control+Alt+P')).toBe('Ctrl+Alt+P')
+    expect(displayShortcut('F2')).toBe('F2')
+  })
+})

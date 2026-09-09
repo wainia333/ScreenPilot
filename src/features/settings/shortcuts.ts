@@ -57,6 +57,13 @@ export function normalizeShortcut(value: string): string {
   return [...modifierOrder.filter((part) => modifiers.has(part)), key].filter(Boolean).join('+')
 }
 
+export function displayShortcut(value: string): string {
+  return normalizeShortcut(value)
+    .split('+')
+    .map((part) => part === 'Control' ? 'Ctrl' : part)
+    .join('+')
+}
+
 export function shortcutIssues(shortcuts: ShortcutSettings): SettingsIssue[] {
   const entries = Object.entries(shortcuts) as [keyof ShortcutSettings, string][]
   const issues: SettingsIssue[] = []
@@ -84,4 +91,3 @@ export function shortcutIssues(shortcuts: ShortcutSettings): SettingsIssue[] {
   }
   return issues
 }
-
