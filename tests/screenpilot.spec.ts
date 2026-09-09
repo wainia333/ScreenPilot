@@ -1815,7 +1815,8 @@ test('Vision preserves the active session when close fails and closes on retry',
   await expect(page.locator('[data-screenpilot-close-error="true"]')).toHaveText('关闭失败，请重试')
   await expect(page.getByText(/synthetic ScreenPilot visual test/u)).toBeVisible()
   await expect(prompt).toHaveValue('Unsaved follow-up draft')
-  await expect(page.locator('[data-screenpilot-screenshot-preview="true"]')).toBeVisible()
+  await expect(page.getByRole('log').locator('[data-screenpilot-message-screenshot="true"]')).toBeVisible()
+  await expect(page.locator('[data-screenpilot-prompt-bar="true"] [data-screenpilot-screenshot-preview="true"]')).toHaveCount(0)
   await expect.poll(async () => page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: {
@@ -2804,6 +2805,9 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await page.getByPlaceholder('问点什么...').fill('What is visible?')
   await page.locator('button:has(svg.lucide-arrow-up)').click()
   await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
+  await expect(page.getByRole('log').locator('[data-screenpilot-message-screenshot="true"]'))
+    .toHaveAttribute('src', /^data:image\/png;base64,/u)
+  await expect(promptBar.locator('[data-screenpilot-screenshot-preview="true"]')).toHaveCount(0)
   const answerPanel = page.locator('[data-screenpilot-answer-panel="true"]')
   const answerActions = page.locator('[data-screenpilot-answer-actions="true"]')
   await expect(answerPanel).toBeVisible()

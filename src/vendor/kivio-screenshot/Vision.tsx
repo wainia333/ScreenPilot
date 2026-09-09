@@ -1444,6 +1444,7 @@ export default function Vision() {
   const [selectBarCollapsed, setSelectBarCollapsed] = useState(false)
   const [animatedHoverRect, setAnimatedHoverRect] = useState<Rect | null>(null)
   const [imagePreview, setImagePreview] = useState('')
+  const [capturePreparing, setCapturePreparing] = useState(false)
   const [appLabel, setAppLabel] = useState('')
   const [input, setInput] = useState('')
   // Vision 启动前 Rust 端抓到的选中文本：作为本次会话的上下文前缀
@@ -1577,7 +1578,7 @@ export default function Vision() {
   const modeRef = useRef<Mode>(mode)
   const historyOpenRef = useRef(false)
   const imageIdRef = useRef('')
-  const hasScreenshot = !!imageIdRef.current
+  const hasScreenshot = !!imageIdRef.current || capturedFrame !== null
   // 纯文字会话的会话 id。多轮对话要落到同一条历史上，所以第一次入库时生成、
   // 之后一直沿用，直到 enterSelect / resetBeforeHide 开启新会话。
   const textSessionIdRef = useRef('')
@@ -1758,6 +1759,7 @@ export default function Vision() {
     captureSequenceRef.current += 1
     captureSurfaceActiveRef.current = false
     capturingRef.current = false
+    setCapturePreparing(false)
   }, [])
 
   const invalidateVisionSurface = useCallback(() => {
@@ -2927,6 +2929,7 @@ export default function Vision() {
     anchorW: number,
     anchorH: number,
     label: string,
+    onLanded?: () => void,
   ) => {
     const target = resolveFloatingAnchor(anchorAbsX, anchorAbsY, anchorW, anchorH)
     const targetX = target.localX
@@ -3032,6 +3035,7 @@ export default function Vision() {
         })
       }
 
+      if (flySeq === nativeFlySeqRef.current) onLanded?.()
       if (mode === 'chat' && flySeq === nativeFlySeqRef.current) {
         focusVisionInput([30, 120, 260])
       }
@@ -3059,6 +3063,7 @@ export default function Vision() {
           setBarNoTransition(false)
           setBarFlyOffset({ x: 0, y: 0 })
           markBarFlight(TRANSITION_MS, () => {
+            if (flySeq === nativeFlySeqRef.current) onLanded?.()
             if (
               flySeq === nativeFlySeqRef.current
               && shouldRunVisionLandingJelly()
@@ -3521,10 +3526,23 @@ export default function Vision() {
     return () => clearInterval(id)
   }, [stage])
 
+  const loadCapturePreview = async (imageId: string, captureSequence: number) => {
+    if (!await captureResultIsCurrent(captureSequence) || imageIdRef.current !== imageId) return
+    try {
+      const image = await api.explainReadImage(imageId)
+      if (image.success && await captureResultIsCurrent(captureSequence) && imageIdRef.current === imageId) {
+        setImagePreview(image.data ?? '')
+      }
+    } catch (error) {
+      console.error('[vision-capture] preview load failed:', error)
+    }
+  }
+
   const handleCaptureWindow = async (info: VisionWindowInfo) => {
     // capturingRef 全程 true，避免 macOS screencapture 短暂让 vision webview 失焦时触发 blur handler 误关
     const captureSequence = ++captureSequenceRef.current
     capturingRef.current = true
+    setCapturePreparing(true)
     try {
       const result = await api.visionCaptureWindow(info.id)
       if (!await captureResultIsCurrent(captureSequence)) {
@@ -3559,17 +3577,10 @@ export default function Vision() {
       imageIdRef.current = newId
 
       setCapturedFrame(frame)
-      void (async () => {
-        try {
-          const img = await api.explainReadImage(newId)
-          if (img.success && await captureResultIsCurrent(captureSequence)) {
-            setImagePreview(img.data ?? '')
-          }
-        } catch (err) { console.error(err) }
-      })()
       await flyBarToAnchor(
         Math.round(info.x), Math.round(info.y), Math.round(info.width), Math.round(info.height),
         info.owner,
+        () => { void loadCapturePreview(newId, captureSequence) },
       )
       if (!await captureResultIsCurrent(captureSequence)) {
         await deleteStaleCaptureImage(newId)
@@ -3581,7 +3592,10 @@ export default function Vision() {
         console.error('[vision-capture] window capture failed:', err)
       }
     } finally {
-      if (captureSequence === captureSequenceRef.current) capturingRef.current = false
+      if (captureSequence === captureSequenceRef.current) {
+        capturingRef.current = false
+        setCapturePreparing(false)
+      }
     }
   }
 
@@ -3598,6 +3612,7 @@ export default function Vision() {
   ) => {
     const gp = clientToGlobal({ x: rect.x, y: rect.y })
     const params = {
+      requestId: crypto.randomUUID(),
       absoluteX: Math.round(gp.x),
       absoluteY: Math.round(gp.y),
       x: Math.round(rect.x),
@@ -3609,7 +3624,43 @@ export default function Vision() {
     // capturingRef 全程 true 直到 flyBarToAnchor 完成（同 handleCaptureWindow 注释）
     const captureSequence = existingCaptureSequence ?? ++captureSequenceRef.current
     capturingRef.current = true
+    setCapturePreparing(true)
+    const frame = { x: params.x, y: params.y, width: params.width, height: params.height, label }
+    let flight: Promise<void> | null = null
+    let landed = false
+    let previewImageId = ''
+    let previewRequested = false
+    let stopCaptureReadyListener: (() => void) | undefined
+    const loadReadyPreview = () => {
+      if (!landed || !previewImageId || previewRequested) return
+      previewRequested = true
+      void loadCapturePreview(previewImageId, captureSequence)
+    }
+    const startFlight = () => {
+      if (flight) return flight
+      flight = (async () => {
+        if (!await captureResultIsCurrent(captureSequence)) return
+        setCapturedFrame(frame)
+        await flyBarToAnchor(
+          params.absoluteX, params.absoluteY, params.width, params.height, label,
+          () => {
+            landed = true
+            loadReadyPreview()
+          },
+        )
+      })()
+      return flight
+    }
     try {
+      try {
+        stopCaptureReadyListener = await api.onVisionCaptureReady((payload) => {
+          if (payload.requestId !== params.requestId) return
+          void startFlight().catch(error => console.error('[vision-capture] early flight failed:', error))
+        })
+      } catch (error) {
+        console.warn('[vision-capture] ready listener unavailable; waiting for capture result:', error)
+      }
+      if (!await captureResultIsCurrent(captureSequence)) return
       const result = await api.visionCaptureRegion(params)
       if (!await captureResultIsCurrent(captureSequence)) {
         await deleteStaleCaptureImage(result.success ? result.imageId : undefined)
@@ -3622,37 +3673,25 @@ export default function Vision() {
         return
       }
       const newId = result.imageId
-      const frame = {
-        x: params.x,
-        y: params.y,
-        width: params.width,
-        height: params.height,
-        label,
-      }
-
       imageIdRef.current = newId
-
-      setCapturedFrame(frame)
-      void (async () => {
-        try {
-          const img = await api.explainReadImage(newId)
-          if (img.success && await captureResultIsCurrent(captureSequence)) {
-            setImagePreview(img.data ?? '')
-          }
-        } catch (err) { console.error(err) }
-      })()
-      await flyBarToAnchor(params.absoluteX, params.absoluteY, params.width, params.height, label)
+      previewImageId = newId
+      await startFlight()
       if (!await captureResultIsCurrent(captureSequence)) {
         await deleteStaleCaptureImage(newId)
         return
       }
+      loadReadyPreview()
       if (mode === 'translate') void runTranslate(newId)
     } catch (err) {
       if (captureSequence === captureSequenceRef.current) {
         console.error('[vision-capture] region capture failed:', err)
       }
     } finally {
-      if (captureSequence === captureSequenceRef.current) capturingRef.current = false
+      stopCaptureReadyListener?.()
+      if (captureSequence === captureSequenceRef.current) {
+        capturingRef.current = false
+        setCapturePreparing(false)
+      }
     }
   }
 
@@ -4128,7 +4167,7 @@ export default function Vision() {
   }
 
   const handleSend = async () => {
-    if (streaming) return
+    if (streaming || capturePreparing) return
     const question = input.trim()
     const allowBlankImageAnalysis = (
       !question
@@ -4636,10 +4675,11 @@ export default function Vision() {
     }
   }, [historyOpen])
 
-  const showThumb = stage !== 'select' && (imagePreview || appLabel)
+  const firstUserMessageIndex = messages.findIndex(message => message.role === 'user')
+  const showThumb = stage !== 'select' && firstUserMessageIndex === -1 && (imagePreview || appLabel)
   const canSendBlankImageAnalysis = mode === 'chat' && stage === 'ready' && messages.length === 0 && capturedFrame !== null
-  const canOptimizePrompt = !!input.trim() && !streaming && !promptOptimizing
-  const sendDisabled = streaming || promptOptimizing || (!input.trim() && !canSendBlankImageAnalysis)
+  const canOptimizePrompt = !!input.trim() && !streaming && !promptOptimizing && !capturePreparing
+  const sendDisabled = streaming || promptOptimizing || capturePreparing || (!input.trim() && !canSendBlankImageAnalysis)
   const showBar = mode === 'chat'
   const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
@@ -5544,7 +5584,14 @@ export default function Vision() {
             data-tauri-drag-region="false"
           >
             <div className="shrink-0 flex items-center gap-2">
-              {showThumb ? (
+              {capturePreparing ? (
+                <Loader2
+                  size={28}
+                  role="status"
+                  aria-label={lang === 'zh' ? '正在准备截图' : 'Preparing screenshot'}
+                  className="animate-spin text-neutral-400"
+                />
+              ) : showThumb ? (
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center shadow-sm">
                     {imagePreview ? (
@@ -5629,6 +5676,7 @@ export default function Vision() {
                 type="button"
                 onClick={() => setHistoryOpen(o => !o)}
                 aria-label={t.visionHistory}
+                disabled={capturePreparing}
                 aria-expanded={historyOpen}
                 aria-haspopup="dialog"
                 aria-controls="vision-history-dialog"
@@ -5944,6 +5992,15 @@ export default function Vision() {
                           data-screenpilot-message-pair-gap={isCompactPairTail ? 'compact' : 'standard'}
                           className={`${isEditing ? 'mb-3' : 'mb-3 pb-[30px]'} relative ${isCompactPairTail ? '-mt-[6px]' : ''} ${isUser ? 'flex justify-end' : ''}`}
                         >
+                          {imagePreview && origIdx === firstUserMessageIndex && (
+                            <img
+                              src={imagePreview}
+                              alt={t.visionScreenshotPreview}
+                              data-screenpilot-message-screenshot="true"
+                              className="mb-2 max-h-48 max-w-[88%] rounded-xl object-contain ring-1 ring-black/[0.06] dark:ring-white/[0.06]"
+                              draggable={false}
+                            />
+                          )}
                           {isEditing ? (
                             <VisionMessageEditor
                               role={m.role}

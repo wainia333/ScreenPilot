@@ -1,12 +1,7 @@
 use std::{
     fs,
-    path::Path,
     time::{Duration, SystemTime},
 };
-
-pub fn cleanup_temp_file(path: &Path) {
-    let _ = fs::remove_file(path);
-}
 
 /// 启动时清理 temp_dir 下遗留的截图文件。
 ///

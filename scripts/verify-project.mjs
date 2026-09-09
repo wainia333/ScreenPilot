@@ -83,7 +83,7 @@ if (!appSource.includes("import('../features/vision/reference-vision')")) {
   failures.push('生产前端未接入受控 Vision 适配层')
 }
 const rustSource = readFileSync(resolve(root, 'src-tauri/src/application/commands/vision.rs'), 'utf8')
-for (const call of ['crate::native_freeze::show', 'crate::native_freeze::capture_active_region_to_png', 'crate::vision::list_windows']) {
+for (const call of ['crate::native_freeze::show', 'crate::native_freeze::capture_active_region', 'crate::vision::list_windows']) {
   if (!rustSource.includes(call)) failures.push(`生产后端未接入受控截图核心：${call}`)
 }
 const lifecycleSource = readFileSync(resolve(root, 'src-tauri/src/application/lifecycle.rs'), 'utf8')

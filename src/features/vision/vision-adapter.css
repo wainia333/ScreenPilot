@@ -140,6 +140,11 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   position: relative;
 }
 
+[data-screenpilot-message-shell="true"][data-screenpilot-message-role="user"] {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
 [data-screenpilot-message-toolbar="true"] {
   opacity: 0;
   pointer-events: none;

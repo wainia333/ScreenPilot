@@ -247,6 +247,8 @@ export const api = {
   explainReadImage: (imageId: string) =>
     invoke<{ success: boolean; data?: string; error?: string }>('explain_read_image', { imageId }),
 
+  onVisionCaptureReady: (listener: (payload: { requestId: string }) => void) =>
+    on('vision-capture-ready', listener),
   onVisionStream: (listener: (payload: VisionStreamPayload) => void) =>
     on<VisionStreamPayload>('vision-stream', (payload) => listener(payload)),
   onVisionTranslateStream: (listener: (payload: VisionTranslateStreamPayload) => void) =>
@@ -259,6 +261,7 @@ export const api = {
   visionCaptureWindow: (windowId: number) =>
     invoke<{ success: boolean; imageId?: string; error?: string; archiveWarning?: string }>('vision_capture_window', { windowId }),
   visionCaptureRegion: (params: {
+    requestId?: string
     absoluteX: number
     absoluteY: number
     x: number

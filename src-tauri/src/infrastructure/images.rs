@@ -1,8 +1,10 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::Utc;
-use image::{ImageFormat, RgbaImage};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
@@ -24,16 +26,22 @@ impl ImageStore {
 
     pub fn save_temporary(&self, image: &RgbaImage) -> Result<String, String> {
         let image_id = Uuid::new_v4().to_string();
-        image
-            .save_with_format(
-                self.temporary.join(format!("{image_id}.png")),
-                ImageFormat::Png,
+        let file = fs::File::create(self.temporary.join(format!("{image_id}.png")))
+            .map_err(|error| error.to_string())?;
+        let mut writer = BufWriter::new(file);
+        PngEncoder::new_with_quality(&mut writer, CompressionType::Fast, FilterType::Sub)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                ExtendedColorType::Rgba8,
             )
             .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
         Ok(image_id)
     }
 
-    pub fn archive(&self, image: &RgbaImage, directory: &Path) -> Result<PathBuf, String> {
+    pub fn archive(&self, image_id: &str, directory: &Path) -> Result<PathBuf, String> {
         if directory.as_os_str().is_empty() {
             return Err("Screenshot archive directory is empty".into());
         }
@@ -58,14 +66,12 @@ impl ImageStore {
             Utc::now().format("%Y%m%d-%H%M%S%.3f"),
             Uuid::new_v4().simple()
         ));
-        image
-            .save_with_format(&path, ImageFormat::Png)
-            .map_err(|error| {
-                format!(
-                    "Unable to archive screenshot to {}: {error}",
-                    path.display()
-                )
-            })?;
+        fs::copy(self.resolve(image_id)?, &path).map_err(|error| {
+            format!(
+                "Unable to archive screenshot to {}: {error}",
+                path.display()
+            )
+        })?;
         Ok(path)
     }
 
@@ -204,6 +210,83 @@ fn validate_id(image_id: &str) -> Result<Uuid, String> {
 mod tests {
     use super::*;
 
+    fn patterned_capture(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |column, row| {
+            image::Rgba([
+                ((column * 13 + row * 3) % 251) as u8,
+                ((column * 5 + row * 17) % 251) as u8,
+                ((column / 16 + row / 12) % 251) as u8,
+                ((column + row) % 256) as u8,
+            ])
+        })
+    }
+
+    #[test]
+    fn fast_capture_encoding_preserves_every_pixel_and_alpha() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let store = ImageStore::new(&root.path().join("data"), &root.path().join("cache"))
+            .expect("image store");
+        let capture = patterned_capture(127, 93);
+        let image_id = store.save_temporary(&capture).expect("save capture");
+        let decoded = image::load_from_memory(&store.read_bytes(&image_id).unwrap())
+            .expect("decode capture")
+            .into_rgba8();
+        assert_eq!(decoded, capture);
+    }
+
+    #[test]
+    #[ignore = "manual comparison of the legacy and single-encode capture pipelines"]
+    fn capture_png_pipeline_latency() {
+        for (width, height) in [(480, 300), (1920, 1080), (3840, 2160)] {
+            let capture = patterned_capture(width, height);
+            for archive_enabled in [false, true] {
+                let root = tempfile::tempdir().expect("temporary root");
+                let store = ImageStore::new(&root.path().join("data"), &root.path().join("cache"))
+                    .expect("image store");
+                let legacy_capture = root.path().join("legacy-capture.png");
+                let legacy_temporary = root.path().join("legacy-temporary.png");
+                let legacy_started = std::time::Instant::now();
+                capture
+                    .save(&legacy_capture)
+                    .expect("legacy capture encode");
+                let decoded = image::open(&legacy_capture)
+                    .expect("legacy capture decode")
+                    .into_rgba8();
+                fs::remove_file(&legacy_capture).expect("legacy capture cleanup");
+                decoded
+                    .save(&legacy_temporary)
+                    .expect("legacy temporary encode");
+                if archive_enabled {
+                    decoded
+                        .save(root.path().join("legacy-archive.png"))
+                        .expect("legacy archive encode");
+                }
+                let legacy_elapsed = legacy_started.elapsed();
+
+                let optimized_started = std::time::Instant::now();
+                let image_id = store.save_temporary(&capture).expect("single encode");
+                if archive_enabled {
+                    store
+                        .archive(&image_id, &root.path().join("archive"))
+                        .expect("archive encoded capture");
+                }
+                let optimized_elapsed = optimized_started.elapsed();
+                let encoded = store.read_bytes(&image_id).expect("read optimized capture");
+                assert_eq!(
+                    image::load_from_memory(&encoded).unwrap().into_rgba8(),
+                    capture
+                );
+                println!(
+                    "{width}x{height} archive={archive_enabled}: legacy={:.1}ms single_encode={:.1}ms legacy_bytes={} optimized_bytes={}",
+                    legacy_elapsed.as_secs_f64() * 1000.0,
+                    optimized_elapsed.as_secs_f64() * 1000.0,
+                    fs::metadata(&legacy_temporary).unwrap().len(),
+                    encoded.len(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn rejects_path_traversal_and_commits_history_images() {
         let data = tempfile::tempdir().expect("data directory");
@@ -315,19 +398,28 @@ mod tests {
         let archive = tempfile::tempdir().expect("archive directory");
         let store = ImageStore::new(data.path(), cache.path()).expect("image store");
         let image = RgbaImage::new(4, 4);
+        let image_id = store.save_temporary(&image).expect("save image");
 
         let first = store
-            .archive(&image, archive.path())
+            .archive(&image_id, archive.path())
             .expect("first archive");
         let second = store
-            .archive(&image, archive.path())
+            .archive(&image_id, archive.path())
             .expect("second archive");
         assert_ne!(first, second);
         assert!(first.exists());
         assert!(second.exists());
+        assert_eq!(
+            fs::read(first).unwrap(),
+            store.read_bytes(&image_id).unwrap()
+        );
+        assert_eq!(
+            fs::read(second).unwrap(),
+            store.read_bytes(&image_id).unwrap()
+        );
 
         let not_a_directory = archive.path().join("file");
         fs::write(&not_a_directory, b"file").expect("write file");
-        assert!(store.archive(&image, &not_a_directory).is_err());
+        assert!(store.archive(&image_id, &not_a_directory).is_err());
     }
 }

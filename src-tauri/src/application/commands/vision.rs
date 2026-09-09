@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +28,6 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
-use uuid::Uuid;
 use xcap::Monitor;
 
 #[derive(Clone, Deserialize)]
@@ -706,32 +705,57 @@ pub async fn vision_capture_region(
     width: u32,
     height: u32,
     scale_factor: f64,
+    request_id: Option<String>,
 ) -> Value {
     let surface = ReferenceSurface::for_window(window.label());
     let state = app.state::<AppState>();
     let Some(generation) = state.reference_surface_generation(surface) else {
         return json!({ "success": false, "error": "Capture session is no longer active" });
     };
-    state
-        .with_current_reference_surface(surface, generation, || {
-            Ok(capture_reference_region(
-                &app,
-                &state,
-                surface,
-                absolute_x,
-                absolute_y,
-                x,
-                y,
-                width,
-                height,
-                scale_factor,
-            ))
-        })
-        .ok()
-        .flatten()
-        .unwrap_or_else(
-            || json!({ "success": false, "error": "Capture session is no longer active" }),
+    let capture_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = capture_app.state();
+        let capture = state
+            .with_current_reference_surface(surface, generation, || {
+                capture_reference_region(
+                    &capture_app,
+                    &state,
+                    surface,
+                    absolute_x,
+                    absolute_y,
+                    x,
+                    y,
+                    width,
+                    height,
+                    scale_factor,
+                )
+            })?
+            .ok_or_else(|| "Capture session is no longer active".to_string())?;
+        if let Some(request_id) = request_id {
+            let _ = capture_app.emit_to(
+                surface.window_label(),
+                "vision-capture-ready",
+                json!({ "requestId": request_id }),
+            );
+        }
+        register_capture_image_for_surface(
+            &state,
+            surface,
+            &capture.image,
+            capture.session_generation,
         )
+    })
+    .await;
+    match result {
+        Ok(Ok(capture)) => capture_registration_response(capture),
+        Ok(Err(error)) => json!({ "success": false, "error": error }),
+        Err(error) => json!({ "success": false, "error": error.to_string() }),
+    }
+}
+
+struct CapturedRegion {
+    image: image::RgbaImage,
+    session_generation: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -746,47 +770,33 @@ fn capture_reference_region(
     width: u32,
     height: u32,
     scale_factor: f64,
-) -> Value {
-    if let Err(error) = state
+) -> Result<CapturedRegion, String> {
+    state
         .current()
-        .and_then(|settings| ensure_capture_enabled(&settings))
-    {
-        return json!({ "success": false, "error": error });
-    }
-    let session_generation = match state.reference_image_session(surface) {
-        Ok(generation) => generation,
-        Err(error) => return json!({ "success": false, "error": error }),
-    };
+        .and_then(|settings| ensure_capture_enabled(&settings))?;
+    let session_generation = state.reference_image_session(surface)?;
     if !state.owns_native_freeze(surface) {
-        return json!({ "success": false, "error": "Capture session is no longer active" });
+        return Err("Capture session is no longer active".into());
     }
-    let result = match crate::native_freeze::capture_active_region_to_png(
-        absolute_x, absolute_y, width, height,
-    ) {
-        Ok(path) => {
-            close_surface_native_freeze(app, surface);
-            Ok(path)
-        }
-        Err(_) => {
-            close_surface_native_freeze(app, surface);
-            capture_region_image(
-                absolute_x,
-                absolute_y,
-                x,
-                y,
-                width,
-                height,
-                scale_factor,
-                None,
-            )
-        }
-    };
-    match result.and_then(|path| {
-        register_capture_path_for_surface(state, surface, &path, session_generation)
-    }) {
-        Ok(capture) => capture_registration_response(capture),
-        Err(error) => json!({ "success": false, "error": error }),
-    }
+    let frozen_image =
+        crate::native_freeze::capture_active_region(absolute_x, absolute_y, width, height);
+    close_surface_native_freeze(app, surface);
+    let image = frozen_image.or_else(|_| {
+        capture_region_image(
+            absolute_x,
+            absolute_y,
+            x,
+            y,
+            width,
+            height,
+            scale_factor,
+            None,
+        )
+    })?;
+    Ok(CapturedRegion {
+        image,
+        session_generation,
+    })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -804,31 +814,29 @@ fn capture_registration_response(capture: RegisteredCapture) -> Value {
 }
 
 #[cfg(test)]
-fn register_capture_path(
+fn register_capture_image(
     state: &AppState,
-    path: &Path,
+    image: &image::RgbaImage,
     session_generation: u64,
 ) -> Result<RegisteredCapture, String> {
-    register_capture_path_for_surface(state, ReferenceSurface::Vision, path, session_generation)
+    register_capture_image_for_surface(state, ReferenceSurface::Vision, image, session_generation)
 }
 
-fn register_capture_path_for_surface(
+fn register_capture_image_for_surface(
     state: &AppState,
     surface: ReferenceSurface,
-    path: &Path,
+    image: &image::RgbaImage,
     session_generation: u64,
 ) -> Result<RegisteredCapture, String> {
-    let image = image::open(path)
-        .map(image::DynamicImage::into_rgba8)
-        .map_err(|error| error.to_string());
-    crate::screenshot::cleanup_temp_file(path);
-    let image = image?;
+    if state.reference_image_session(surface)? != session_generation {
+        return Err("Vision surface is no longer active".into());
+    }
     let settings = state.current()?;
-    let image_id = state.images.save_temporary(&image)?;
+    let image_id = state.images.save_temporary(image)?;
     state.register_reference_temporary_image(surface, session_generation, &image_id)?;
     let archive_warning = if settings.general.image_archive_enabled {
         let archive_directory = Path::new(settings.general.image_archive_path.trim());
-        match state.images.archive(&image, archive_directory) {
+        match state.images.archive(&image_id, archive_directory) {
             Ok(_) => None,
             Err(error) => {
                 let warning = format!("Screenshot archive failed: {error}");
@@ -855,7 +863,7 @@ fn capture_region_image(
     height: u32,
     scale_factor: f64,
     _exclude_self_pid: Option<i32>,
-) -> Result<PathBuf, String> {
+) -> Result<image::RgbaImage, String> {
     let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
         scale_factor
     } else {
@@ -915,30 +923,30 @@ fn capture_region_image(
     let capture_height = region_height
         .min(monitor_height.saturating_sub(relative_y as u32))
         .max(1);
-    let image = monitor
+    monitor
         .capture_region(
             relative_x as u32,
             relative_y as u32,
             capture_width,
             capture_height,
         )
-        .map_err(|error| error.to_string())?;
-    let path = std::env::temp_dir().join(format!("screenshot-{}.png", Uuid::new_v4()));
-    image.save(&path).map_err(|error| error.to_string())?;
-    Ok(path)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn explain_read_image(state: State<'_, AppState>, image_id: String) -> Value {
+pub async fn explain_read_image(app: AppHandle, image_id: String) -> Value {
+    let state: State<'_, AppState> = app.state();
     if let Err(error) = state
         .current()
         .and_then(|settings| ensure_capture_enabled(&settings))
     {
         return json!({ "success": false, "error": error });
     }
-    match state.images.read_data_url(&image_id) {
-        Ok(data) => json!({ "success": true, "data": data }),
-        Err(error) => json!({ "success": false, "error": error }),
+    let images = state.images.clone();
+    match tauri::async_runtime::spawn_blocking(move || images.read_data_url(&image_id)).await {
+        Ok(Ok(data)) => json!({ "success": true, "data": data }),
+        Ok(Err(error)) => json!({ "success": false, "error": error }),
+        Err(error) => json!({ "success": false, "error": error.to_string() }),
     }
 }
 
@@ -3666,17 +3674,13 @@ mod tests {
         state
             .begin_reference_vision_image_session()
             .expect("begin image session");
-        let capture = root.path().join("capture.png");
-        image::RgbaImage::new(4, 4)
-            .save_with_format(&capture, image::ImageFormat::Png)
-            .expect("write capture");
+        let capture = image::RgbaImage::new(4, 4);
 
         let session_generation = state
             .reference_vision_image_session()
             .expect("active image session");
         let registered =
-            register_capture_path(&state, &capture, session_generation).expect("register capture");
-        assert!(!capture.exists());
+            register_capture_image(&state, &capture, session_generation).expect("register capture");
         assert!(registered.archive_warning.is_none());
         assert!(state.images.read_data_url(&registered.image_id).is_ok());
         assert_eq!(
@@ -3709,12 +3713,9 @@ mod tests {
         let session_generation = state
             .begin_reference_vision_image_session()
             .expect("begin image session");
-        let capture = root.path().join("capture.png");
-        image::RgbaImage::new(4, 4)
-            .save_with_format(&capture, image::ImageFormat::Png)
-            .expect("write capture");
+        let capture = image::RgbaImage::new(4, 4);
         let registered =
-            register_capture_path(&state, &capture, session_generation).expect("register capture");
+            register_capture_image(&state, &capture, session_generation).expect("register capture");
 
         let cleanup = state
             .close_reference_vision_image_session()
@@ -3759,21 +3760,17 @@ mod tests {
         state
             .begin_reference_vision_image_session()
             .expect("begin image session");
-        let capture = root.path().join("capture.png");
-        image::RgbaImage::new(4, 4)
-            .save_with_format(&capture, image::ImageFormat::Png)
-            .expect("write capture");
+        let capture = image::RgbaImage::new(4, 4);
 
         let session_generation = state
             .reference_vision_image_session()
             .expect("active image session");
-        let registered = register_capture_path(&state, &capture, session_generation)
+        let registered = register_capture_image(&state, &capture, session_generation)
             .expect("capture remains usable");
         assert!(registered
             .archive_warning
             .as_deref()
             .is_some_and(|warning| warning.contains("Screenshot archive failed")));
-        assert!(!capture.exists());
         assert!(state.images.read_data_url(&registered.image_id).is_ok());
         assert_eq!(
             std::fs::read_dir(root.path().join("cache/screenpilot-captures"))
@@ -3812,15 +3809,12 @@ mod tests {
         state
             .begin_reference_vision_image_session()
             .expect("begin image session");
-        let capture = root.path().join("capture.png");
-        image::RgbaImage::new(4, 4)
-            .save_with_format(&capture, image::ImageFormat::Png)
-            .expect("write capture");
+        let capture = image::RgbaImage::new(4, 4);
 
         let session_generation = state
             .reference_vision_image_session()
             .expect("active image session");
-        let registered = register_capture_path(&state, &capture, session_generation)
+        let registered = register_capture_image(&state, &capture, session_generation)
             .expect("capture remains usable");
         assert!(state.images.read_data_url(&registered.image_id).is_ok());
         assert!(registered
@@ -3830,7 +3824,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_finishing_after_close_is_rejected_and_cleans_both_temp_layers() {
+    fn capture_finishing_after_close_is_rejected_without_writing_a_temporary_image() {
         let root = tempfile::tempdir().expect("temporary root");
         let store =
             crate::infrastructure::settings_store::SettingsStore::new(&root.path().join("config"));
@@ -3855,16 +3849,12 @@ mod tests {
         state
             .begin_reference_vision_image_session()
             .expect("begin replacement image session");
-        let capture = root.path().join("capture.png");
-        image::RgbaImage::new(4, 4)
-            .save_with_format(&capture, image::ImageFormat::Png)
-            .expect("write capture");
+        let capture = image::RgbaImage::new(4, 4);
 
         assert_eq!(
-            register_capture_path(&state, &capture, stale_generation),
+            register_capture_image(&state, &capture, stale_generation),
             Err("Vision surface is no longer active".into())
         );
-        assert!(!capture.exists());
         assert_eq!(
             std::fs::read_dir(root.path().join("cache/screenpilot-captures"))
                 .expect("read temporary captures")

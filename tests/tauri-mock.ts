@@ -35,6 +35,8 @@ export async function installVisionTauriMock(
       archiveWarning?: string
     }
     const pendingCaptureResolvers: ((result: CaptureResult) => void)[] = []
+    const pendingImageReadResolvers: (() => void)[] = []
+    const pendingCaptureEncodingResolvers: (() => void)[] = []
     const pendingShowResolvers: (() => void)[] = []
     const pendingVisionFlightResolvers: (() => void)[] = []
     const pendingVisionCloseResolvers: (() => void)[] = []
@@ -87,6 +89,14 @@ export async function installVisionTauriMock(
       resolveNextShow: () => false,
       hideCount: 0,
       deferCapture: false,
+      deferCaptureEncoding: false,
+      pendingCaptureEncodingCount: 0,
+      captureEncodingFailuresRemaining: 0,
+      resolveNextCaptureEncoding: () => false,
+      deferImageReads: false,
+      imageReadRequests: [] as { imageId: string; pendingFlights: number; completedFlights: number }[],
+      pendingImageReadCount: 0,
+      resolveNextImageRead: () => false,
       pendingCaptureCount: 0,
       resolveNextCapture: (success?: boolean) => {
         void success
@@ -183,7 +193,7 @@ export async function installVisionTauriMock(
         webSearchEnabled: false,
         systemPrompt: '',
         questionPrompt: '',
-        messageOrder: 'asc',
+        messageOrder: new URLSearchParams(window.location.search).get('visionMessageOrder') === 'desc' ? 'desc' : 'asc',
         keepFullscreenAfterCapture: keepFullscreen,
       },
       promptOptimizer: {
@@ -224,6 +234,20 @@ export async function installVisionTauriMock(
       visionTestState.pendingShowCount = pendingShowResolvers.length
       if (!resolve) return false
       visionTestState.windowVisible = true
+      resolve()
+      return true
+    }
+    visionTestState.resolveNextCaptureEncoding = () => {
+      const resolve = pendingCaptureEncodingResolvers.shift()
+      visionTestState.pendingCaptureEncodingCount = pendingCaptureEncodingResolvers.length
+      if (!resolve) return false
+      resolve()
+      return true
+    }
+    visionTestState.resolveNextImageRead = () => {
+      const resolve = pendingImageReadResolvers.shift()
+      visionTestState.pendingImageReadCount = pendingImageReadResolvers.length
+      if (!resolve) return false
       resolve()
       return true
     }
@@ -363,9 +387,33 @@ export async function installVisionTauriMock(
             visionTestState.pendingCaptureCount = pendingCaptureResolvers.length
           })
         }
+        if (typeof args.requestId === 'string') emit('vision-capture-ready', { requestId: args.requestId })
+        if (visionTestState.deferCaptureEncoding) {
+          await new Promise((resolve) => {
+            pendingCaptureEncodingResolvers.push(() => resolve(undefined))
+            visionTestState.pendingCaptureEncodingCount = pendingCaptureEncodingResolvers.length
+          })
+        }
+        if (visionTestState.captureEncodingFailuresRemaining > 0) {
+          visionTestState.captureEncodingFailuresRemaining -= 1
+          return { success: false, error: 'Synthetic screenshot encoding failure' }
+        }
         return createCaptureSuccess()
       }
-      if (command === 'explain_read_image') return { success: true, data: image }
+      if (command === 'explain_read_image') {
+        visionTestState.imageReadRequests.push({
+          imageId: stringArgument(args.imageId),
+          pendingFlights: visionTestState.pendingVisionFlightCount,
+          completedFlights: visionTestState.completedVisionFlightCount,
+        })
+        if (visionTestState.deferImageReads) {
+          await new Promise((resolve) => {
+            pendingImageReadResolvers.push(() => resolve(undefined))
+            visionTestState.pendingImageReadCount = pendingImageReadResolvers.length
+          })
+        }
+        return { success: true, data: image }
+      }
       if (command === 'vision_register_annotated_image') {
         const imageId = `annotated-${++imageSequence}`
         visionTestState.temporaryImageIds.push(imageId)

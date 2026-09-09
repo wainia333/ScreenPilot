@@ -6,7 +6,6 @@ use std::{
 
 use image::RgbaImage;
 use tauri::WebviewWindow;
-use uuid::Uuid;
 use windows::{
     core::w,
     Win32::{
@@ -315,12 +314,12 @@ pub fn close() {
     }
 }
 
-pub fn capture_active_region_to_png(
+pub fn capture_active_region(
     absolute_x: i32,
     absolute_y: i32,
     width: u32,
     height: u32,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<RgbaImage, String> {
     let guard = overlay_state()
         .lock()
         .map_err(|_| "native freeze overlay lock poisoned".to_string())?;
@@ -345,11 +344,8 @@ pub fn capture_active_region_to_png(
     let crop_h = crop_h.min(state.height.saturating_sub(crop_y));
     let pixels = unsafe { crop_bitmap_to_rgba(state, crop_x, crop_y, crop_w, crop_h)? };
     drop(guard);
-    let image = RgbaImage::from_raw(crop_w as u32, crop_h as u32, pixels)
-        .ok_or_else(|| "failed to build cropped RGBA image".to_string())?;
-    let temp_path = std::env::temp_dir().join(format!("screenshot-{}.png", Uuid::new_v4()));
-    image.save(&temp_path).map_err(|e| e.to_string())?;
-    Ok(temp_path)
+    RgbaImage::from_raw(crop_w as u32, crop_h as u32, pixels)
+        .ok_or_else(|| "failed to build cropped RGBA image".to_string())
 }
 
 unsafe fn crop_bitmap_to_rgba(
