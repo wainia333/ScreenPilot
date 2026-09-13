@@ -90,4 +90,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
     optimizePrompt: DEFAULT_OPTIMIZER_PROMPT,
   },
   providers: [],
+  altSnap: { enabled: true, shortcut: 'Alt' },
 }

@@ -903,6 +903,18 @@ fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri
             .map_err(|error| error.to_string())?;
         builder = builder.item(&item);
     }
+    // Held modifiers / mouse gestures are descriptive text, not menu accelerators.
+    let shortcut = settings
+        .alt_snap
+        .shortcut
+        .replace("Control", "Ctrl")
+        .replace("Meta", "Win");
+    let label = format!("AltSnap\t{shortcut}");
+    let alt_snap = MenuItemBuilder::with_id("altsnap", label)
+        .enabled(settings.alt_snap.enabled)
+        .build(app)
+        .map_err(|error| error.to_string())?;
+    builder = builder.item(&alt_snap);
     builder
         .separator()
         .text("settings", "设置")

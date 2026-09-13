@@ -142,6 +142,10 @@ pub fn run() {
             }
             lifecycle::preload_translator_window(app.handle()).map_err(std::io::Error::other)?;
             lifecycle::create_tray(app.handle(), &settings).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "windows")]
+            if let Err(error) = crate::platform::windows::altsnap::start(&settings.alt_snap) {
+                startup_notices.push(format!("AltSnap 启动失败：{error}"));
+            }
             if let Err(error) = lifecycle::register_shortcuts(app.handle(), &settings) {
                 startup_notices.push(format!(
                     "快捷键冲突：{error}。其他入口仍可通过托盘打开，请修改快捷键后保存。"
@@ -155,6 +159,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(lifecycle::handle_window_event)
-        .run(tauri::generate_context!())
-        .expect("ScreenPilot failed to run");
+        .build(tauri::generate_context!())
+        .expect("ScreenPilot failed to build")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                #[cfg(target_os = "windows")]
+                crate::platform::windows::altsnap::stop();
+            }
+        });
 }

@@ -903,6 +903,60 @@ select:focus-visible {
   line-height: 1.5;
 }
 
+.altsnap-hints {
+  margin: 10px 12px 12px;
+  padding-left: 16px;
+  list-style: disc outside;
+  color: var(--sp-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.altsnap-hints li { margin: 0; }
+
+.altsnap-hints li::marker { color: var(--sp-text-muted); }
+
+.about-credits {
+  margin: 32px 0 8px;
+  padding: 0 2px;
+}
+
+.about-credits h2 {
+  margin: 0 0 12px;
+  color: var(--sp-text);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.about-credits p {
+  margin: 0 0 12px;
+  color: var(--sp-text-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.about-credits ul {
+  margin: 0;
+  padding-left: 17px;
+  list-style: disc outside;
+  color: var(--sp-text-muted);
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.about-credits li + li { margin-top: 7px; }
+.about-credits li::marker { color: var(--sp-text-muted); }
+.about-credits a {
+  color: var(--sp-text);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-decoration-color: var(--sp-border-strong);
+  text-underline-offset: 4px;
+  transition: color 120ms ease, text-decoration-color 120ms ease;
+}
+.about-credits a:hover { color: var(--sp-accent); text-decoration-color: currentColor; }
+
 .validation-banner,
 .status-banner {
   margin: 0 0 12px;

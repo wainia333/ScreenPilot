@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import { displayShortcut } from './shortcuts'
 
 function shortcutFromEvent(event: KeyboardEvent<HTMLButtonElement>): string | null {
@@ -19,13 +19,16 @@ export function ShortcutRecorder({
   label,
   recordingLabel = '请按快捷键',
   onChange,
+  allowModifierOnly = false,
 }: {
   value: string
   label: string
   recordingLabel?: string
   onChange: (value: string) => void
+  allowModifierOnly?: boolean
 }) {
   const [recording, setRecording] = useState(false)
+  const modifiers = useRef('')
   return (
     <button
       type="button"
@@ -33,8 +36,16 @@ export function ShortcutRecorder({
       data-recording={recording}
       aria-pressed={recording}
       aria-label={label}
-      onClick={() => setRecording(true)}
+      onClick={() => { modifiers.current = ''; setRecording(true) }}
       onBlur={() => setRecording(false)}
+      onKeyUp={(event) => {
+        if (!recording || !allowModifierOnly || !modifiers.current) return
+        if (!['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return
+        event.preventDefault()
+        event.stopPropagation()
+        onChange(modifiers.current)
+        setRecording(false)
+      }}
       onKeyDown={(event) => {
         if (!recording) return
         if (event.key === 'Escape') {
@@ -49,6 +60,10 @@ export function ShortcutRecorder({
         }
         event.preventDefault()
         event.stopPropagation()
+        if (allowModifierOnly && ['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) {
+          modifiers.current = [event.ctrlKey && 'Control', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Meta'].filter(Boolean).join('+')
+          return
+        }
         const shortcut = shortcutFromEvent(event)
         if (shortcut === null) return
         onChange(shortcut)

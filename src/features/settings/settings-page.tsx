@@ -6,6 +6,7 @@ import {
   ScanText,
   Settings2,
   Sparkles,
+  Move,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -25,8 +26,9 @@ import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 import { copyFor, type UiCopy } from '../../shared/ui-copy'
 import { syncDocumentTheme } from '../../shared/theme'
 import { ModalDialog } from '../../shared/ui/modal-dialog'
+import { AltSnapSection } from './sections/altsnap-section'
 
-type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'providers' | 'about'
+type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'altsnap' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
 type SettingsOperation = 'directory' | 'export' | 'import'
 type StatusTone = 'status' | 'error'
@@ -46,6 +48,7 @@ const navigation = [
   { id: 'screenshot', label: 'navScreenshot', icon: ScanText },
   { id: 'vision', label: 'navVision', icon: Aperture },
   { id: 'optimizer', label: 'navOptimizer', icon: Sparkles },
+  { id: 'altsnap', label: 'navAltSnap', icon: Move },
   { id: 'providers', label: 'navProviders', icon: Bot },
   { id: 'about', label: 'navAbout', icon: Info },
 ] satisfies { id: Section; label: keyof UiCopy; icon: typeof Settings2 }[]
@@ -490,6 +493,7 @@ export function SettingsPage() {
     screenshot: <ScreenshotSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
     vision: <VisionSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
     optimizer: <OptimizerSection settings={draft} onChange={(next) => setDraft(normalizeAiAvailability(next))} />,
+    altsnap: <AltSnapSection settings={draft} onChange={setDraft} />,
     providers: (
       <ProvidersSection
         settings={draft}

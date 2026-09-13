@@ -111,6 +111,7 @@ export function sanitizeSettings(value: unknown): AppSettings {
   const screenshot = record(root.screenshotTranslation)
   const vision = record(root.vision)
   const optimizer = record(root.promptOptimizer)
+  const altSnap = record(root.altSnap)
   const providers = Array.isArray(root.providers)
     ? root.providers.map(provider).filter((item): item is ProviderSettings => item !== null)
     : []
@@ -123,6 +124,10 @@ export function sanitizeSettings(value: unknown): AppSettings {
   const ocrModel = validModel(modelSelection(screenshot.ocrModel))
   const screenshotTranslationModel = validModel(modelSelection(screenshot.translationModel))
   const sanitized: AppSettings = {
+    altSnap: {
+      enabled: flag(altSnap.enabled, DEFAULT_SETTINGS.altSnap.enabled),
+      shortcut: normalizeShortcut(text(altSnap.shortcut, DEFAULT_SETTINGS.altSnap.shortcut, 80)),
+    },
     schemaVersion: 1,
     theme: choice(root.theme, themes, DEFAULT_SETTINGS.theme),
     language: choice(root.language, languages, DEFAULT_SETTINGS.language),
@@ -292,6 +297,9 @@ export function normalizeAiAvailability(settings: AppSettings): AppSettings {
 
 export function validateSettings(settings: AppSettings): SettingsIssue[] {
   const issues = shortcutIssues(settings.shortcuts)
+  if (settings.altSnap.shortcut.trim().length === 0) {
+    issues.push({ path: 'altSnap.shortcut', code: 'missing', message: 'AltSnap shortcut cannot be empty' })
+  }
   if (settings.general.imageArchiveEnabled && settings.general.imageArchivePath.trim().length === 0) {
     issues.push({
       path: 'general.imageArchivePath',

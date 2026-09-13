@@ -483,7 +483,10 @@ impl SettingsEffects for RuntimeSettingsEffects<'_> {
     }
 
     fn replace_runtime(&mut self, settings: &AppSettings) -> Result<(), String> {
-        self.state.replace(settings)
+        self.state.replace(settings)?;
+        #[cfg(target_os = "windows")]
+        crate::platform::windows::altsnap::update(&settings.alt_snap)?;
+        Ok(())
     }
 
     fn register_shortcuts(

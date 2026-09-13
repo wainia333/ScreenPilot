@@ -36,6 +36,8 @@ pub struct AppSettings {
     pub screenshot_translation: ScreenshotTranslationSettings,
     pub vision: VisionSettings,
     pub prompt_optimizer: PromptOptimizerSettings,
+    #[serde(default)]
+    pub alt_snap: AltSnapSettings,
     pub providers: Vec<ProviderSettings>,
 }
 
@@ -119,6 +121,22 @@ pub struct ShortcutSettings {
     pub vision: String,
     pub screenshot_translation: String,
     pub prompt_optimizer: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AltSnapSettings {
+    pub enabled: bool,
+    pub shortcut: String,
+}
+
+impl Default for AltSnapSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shortcut: "Alt".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -343,6 +361,7 @@ impl Default for AppSettings {
                 optimize_prompt: OPTIMIZER_PROMPT.into(),
             },
             providers: Vec::new(),
+            alt_snap: AltSnapSettings::default(),
         }
     }
 }
@@ -444,6 +463,7 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        crate::domain::altsnap::HeldShortcut::parse(&self.alt_snap.shortcut)?;
         if self.schema_version != SETTINGS_SCHEMA_VERSION {
             return Err("Unsupported settings schema".into());
         }

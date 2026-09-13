@@ -117,6 +117,7 @@ export type AppSettings = {
   screenshotTranslation: ScreenshotTranslationSettings
   vision: VisionSettings
   promptOptimizer: PromptOptimizerSettings
+  altSnap: { enabled: boolean; shortcut: string }
   providers: ProviderSettings[]
 }
 

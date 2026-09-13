@@ -1,3 +1,4 @@
+pub mod altsnap;
 pub mod external;
 pub mod installation;
 pub mod overlay_identity;
