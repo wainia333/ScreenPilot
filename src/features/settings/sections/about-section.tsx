@@ -25,7 +25,7 @@ export function AboutSection({
         <img src="/app-mark.png" alt="ScreenPilot" />
         <div>
           <h1>ScreenPilot</h1>
-          <p>Version 0.1.4 · Wainia</p>
+          <p>Version 0.1.5 · Wainia</p>
         </div>
       </div>
       <SettingGroup title={t.configurationManagement}>

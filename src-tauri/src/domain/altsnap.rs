@@ -63,12 +63,14 @@ pub enum GestureCursor {
     Hand,
     /// Kept as the generic diagonal cursor for callers that do not have a
     /// corner. Resize gestures use one of the directional variants below.
+    #[allow(dead_code)]
     DiagonalResize,
     DiagonalResizeNwse,
     DiagonalResizeNesw,
 }
 
 impl GestureCursor {
+    #[allow(dead_code)]
     pub fn for_resize(resize: bool) -> Self {
         if resize {
             Self::DiagonalResize

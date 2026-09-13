@@ -32,6 +32,7 @@ impl Target {
 #[derive(Clone, Copy)]
 pub(super) struct Motion {
     pub point: POINT,
+    #[allow(dead_code)]
     pub edges: ResizeEdges,
 }
 

@@ -263,7 +263,7 @@ unsafe extern "system" fn cursor_overlay_proc(
 fn cursor_overlay_hwnd() -> Option<HWND> {
     CURSOR_OVERLAY_HWND.with(|handle| {
         let raw = handle.get();
-        (raw != 0).then(|| HWND(raw as *mut c_void))
+        (raw != 0).then_some(HWND(raw as *mut c_void))
     })
 }
 
@@ -687,9 +687,11 @@ unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
         let focus = key_down(0x11);
         mask_menu = true;
         let resize = message == WM_RBUTTONDOWN;
-        let edges = resize
-            .then(|| ResizeEdges::from_grab_point((info.pt.x, info.pt.y), target.rect))
-            .unwrap_or_default();
+        let edges = if resize {
+            ResizeEdges::from_grab_point((info.pt.x, info.pt.y), target.rect)
+        } else {
+            ResizeEdges::default()
+        };
         state.begin(message, info.pt, edges);
         state.swallowed |= bit;
         show_gesture_cursor(&state, info.pt);
