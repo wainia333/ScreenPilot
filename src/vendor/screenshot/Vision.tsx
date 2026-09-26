@@ -722,7 +722,7 @@ function EditableOcrText({
 type Point = { x: number; y: number }
 type Rect = { x: number; y: number; width: number; height: number }
 type BarRect = { x: number; y: number; width: number }
-type CopyTarget = 'answer' | 'original' | 'translated'
+type CopyTarget = 'conversation' | 'original' | 'translated'
 type VisionMessageRole = 'user' | 'assistant'
 type VisionTranslateFailureKind = 'original' | 'translated'
 type PendingVisionImage = { imageId: string; dataUrl: string }
@@ -1551,6 +1551,7 @@ export default function Vision() {
   const initialHistoryRef = useRef<VisionHistoryLoadResult | null>(null)
   if (initialHistoryRef.current === null) initialHistoryRef.current = loadVisionHistory(localStorage)
   const [history, setHistory] = useState<HistoryItem[]>(initialHistoryRef.current.items)
+  const [historyPersistenceFailed, setHistoryPersistenceFailed] = useState(false)
   const historyRejectedCount = initialHistoryRef.current.rejectedCount
   const [historyOpen, setHistoryOpen] = useState(false)
   const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
@@ -1603,6 +1604,10 @@ export default function Vision() {
   const messageCopyTimeoutRef = useRef<number | null>(null)
   const captureWarningTimeoutRef = useRef<number | null>(null)
   const historyPersistenceRef = useRef<Set<Promise<void>>>(new Set())
+  const historyRef = useRef(history)
+  const persistedHistoryRef = useRef(history)
+  const historyImageCleanupQueueRef = useRef<Set<string>>(new Set())
+  const historyImageCleanupRunningRef = useRef(false)
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const speechSeqRef = useRef(0)
   const nativeFlySeqRef = useRef(0)
@@ -1675,6 +1680,51 @@ export default function Vision() {
   pastedImageRef.current = pastedImage
   appLabelRef.current = appLabel
   langRef.current = lang
+  historyRef.current = history
+
+  const flushHistoryImageCleanup = useCallback(async () => {
+    if (historyImageCleanupRunningRef.current) return
+    historyImageCleanupRunningRef.current = true
+    try {
+      for (const id of [...historyImageCleanupQueueRef.current]) {
+        try {
+          await api.visionDeleteHistoryImage(id)
+          historyImageCleanupQueueRef.current.delete(id)
+        } catch (error) {
+          // The history snapshot is already durable here. Failure to remove
+          // an orphaned image must not be reported as a lost conversation;
+          // keep the id queued so a later successful history write retries
+          // the cleanup.
+          console.error('[vision-history] delete failed:', error)
+          break
+        }
+      }
+    } finally {
+      historyImageCleanupRunningRef.current = false
+    }
+  }, [])
+
+  const persistHistory = useCallback((next: HistoryItem[]) => {
+    const result = saveVisionHistory(localStorage, next, persistedHistoryRef.current)
+    historyRef.current = result.history
+    setHistory(result.history)
+    if (!result.ok) {
+      setHistoryPersistenceFailed(true)
+      return
+    }
+    const previousIds = new Set(persistedHistoryRef.current.map(item => item.id))
+    const nextIds = new Set(result.persistedHistory.map(item => item.id))
+    previousIds.forEach(id => {
+      if (!nextIds.has(id)) historyImageCleanupQueueRef.current.add(id)
+    })
+    persistedHistoryRef.current = result.persistedHistory
+    setHistoryPersistenceFailed(false)
+    void flushHistoryImageCleanup()
+  }, [flushHistoryImageCleanup])
+
+  const retryHistoryPersistence = useCallback(() => {
+    persistHistory(historyRef.current)
+  }, [persistHistory])
 
   const ensureVisionStreamListener = useCallback(async () => {
     if (!visionStreamEnabledRef.current || visionStreamListenerReadyRef.current) return true
@@ -1736,8 +1786,8 @@ export default function Vision() {
   }), [appLabel, imagePreview, lang, messages])
   useEffect(() => {
     if (
-      copiedTarget !== 'answer'
-      || copiedTextRef.current?.target !== 'answer'
+      copiedTarget !== 'conversation'
+      || copiedTextRef.current?.target !== 'conversation'
     ) return
     if (copiedTextRef.current.text !== conversationMarkdown) beginCopyOperation()
   }, [beginCopyOperation, conversationMarkdown, copiedTarget])
@@ -2471,6 +2521,7 @@ export default function Vision() {
           // 先完成持久化，再写历史元数据，避免关闭窗口时留下无法恢复的记录。
           await api.visionCommitImageToHistory(id)
         } catch (err) {
+          setHistoryPersistenceFailed(true)
           console.error('[vision-history] commit failed:', err)
           await api.visionDeleteTemporaryImage(id).catch(cleanupError => {
             console.error('[vision-history] failed image cleanup failed:', cleanupError)
@@ -2478,19 +2529,16 @@ export default function Vision() {
           return
         }
       }
-      setHistory(prev => {
-        const filtered = prev.filter(h => h.id !== id)
-        const next: HistoryItem = {
-          id,
-          imagePreview: thumb,
-          appLabel: textOnly ? '' : appLabel,
-          messages: historyMessages,
-          capturedFrame: textOnly ? null : capturedFrame,
-          timestamp: Date.now(),
-          textOnly,
-        }
-        return [next, ...filtered].slice(0, HISTORY_MAX)
-      })
+      const next: HistoryItem = {
+        id,
+        imagePreview: thumb,
+        appLabel: textOnly ? '' : appLabel,
+        messages: historyMessages,
+        capturedFrame: textOnly ? null : capturedFrame,
+        timestamp: Date.now(),
+        textOnly,
+      }
+      persistHistory([next, ...historyRef.current.filter(h => h.id !== id)].slice(0, HISTORY_MAX))
     })()
     historyPersistenceRef.current.add(persistence)
     void persistence.then(
@@ -2499,23 +2547,12 @@ export default function Vision() {
       },
       (error: unknown) => {
         historyPersistenceRef.current.delete(persistence)
+        setHistoryPersistenceFailed(true)
         console.error('[vision-history] persistence failed:', error)
       },
     )
     return () => { cancelled = true }
-  }, [mode, streaming, messages, imagePreview, appLabel, capturedFrame])
-
-  const prevHistoryIdsRef = useRef<Set<string>>(new Set(history.map(h => h.id)))
-  useEffect(() => {
-    saveVisionHistory(localStorage, history)
-    const curIds = new Set(history.map(h => h.id))
-    prevHistoryIdsRef.current.forEach(id => {
-      if (!curIds.has(id)) {
-        api.visionDeleteHistoryImage(id).catch(err => console.error('[vision-history] delete failed:', err))
-      }
-    })
-    prevHistoryIdsRef.current = curIds
-  }, [history])
+  }, [appLabel, capturedFrame, imagePreview, messages, mode, persistHistory, streaming])
 
   // 监听 vision-stream 事件：把 reasoning_delta / delta 累积到最后一条 assistant 消息
   // StrictMode 双挂载下 listen 是 async：cleanup 时 unlisten 可能还没赋值，需要 cancelled 旗标
@@ -4498,7 +4535,7 @@ export default function Vision() {
     const sequence = beginCopyOperation()
     const ok = await copyToClipboard(text)
     if (!copyOperationIsCurrent(sequence)) return
-    const currentText = target === 'answer'
+    const currentText = target === 'conversation'
       ? buildVisionMarkdown({
           messages: messagesRef.current,
           imageDataUrl: imagePreviewRef.current,
@@ -4680,7 +4717,7 @@ export default function Vision() {
   const handleCopy = async () => {
     if (!messages.some(message => message.content.trim())) return
     const markdown = await buildCurrentConversationMarkdown()
-    await copyTextWithFeedback(markdown, 'answer')
+    await copyTextWithFeedback(markdown, 'conversation')
   }
 
   // 点击历史项：把当前会话恢复到该 item（image / appLabel / messages / capturedFrame）
@@ -5483,6 +5520,16 @@ export default function Vision() {
           {t.visionCloseFailed}
         </div>
       ) : null}
+      {historyPersistenceFailed ? (
+        <div
+          role="alert"
+          data-screenpilot-history-error="true"
+          className="pointer-events-auto absolute left-1/2 top-14 z-[93] flex max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 items-center gap-2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
+        >
+          <span>{t.visionHistoryNotSaved}</span>
+          <button type="button" className="text-button shrink-0 px-1" onClick={retryHistoryPersistence}>{t.visionHistoryRetry}</button>
+        </div>
+      ) : null}
       {speechErrorAnnouncement ? (
         <span role="alert" className="sr-only">
           {speechErrorAnnouncement}
@@ -6116,14 +6163,14 @@ export default function Vision() {
                   <button
                     type="button"
                     onClick={() => void handleCopy()}
-                    data-screenpilot-copy-target="answer"
-                    data-screenpilot-copy-state={copiedTarget === 'answer' ? 'copied' : 'idle'}
-                    title={copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}
-                    aria-label={copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}
+                    data-screenpilot-copy-target="conversation"
+                    data-screenpilot-copy-state={copiedTarget === 'conversation' ? 'copied' : 'idle'}
+                    title={copiedTarget === 'conversation' ? t.visionCopiedConversation : t.visionCopyConversation}
+                    aria-label={copiedTarget === 'conversation' ? t.visionCopiedConversation : t.visionCopyConversation}
                     className="flex cursor-pointer items-center gap-1 rounded px-2 py-0.5 text-[10px] text-neutral-500 transition-colors hover:bg-black/5 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
                   >
-                    {copiedTarget === 'answer' ? <Check size={11} /> : <Copy size={11} />}
-                    <span>{copiedTarget === 'answer' ? t.visionCopied : t.visionCopy}</span>
+                    {copiedTarget === 'conversation' ? <Check size={11} /> : <Copy size={11} />}
+                    <span>{copiedTarget === 'conversation' ? t.visionCopiedConversation : t.visionCopyConversation}</span>
                   </button>
                   <button
                     type="button"

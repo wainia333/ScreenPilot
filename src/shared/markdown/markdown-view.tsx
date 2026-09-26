@@ -5,7 +5,7 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { stableMarkdown } from './stable-markdown'
-import { copyToClipboard } from '../../vendor/kivio-screenshot/utils/clipboard'
+import { copyToClipboard } from '../../vendor/screenshot/utils/clipboard'
 
 function childText(children: ReactNode): string {
   if (typeof children === 'string' || typeof children === 'number') return String(children)

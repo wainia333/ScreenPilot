@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: vi.fn(),
 }))
 
-import { api } from '../../vendor/kivio-screenshot/api/tauri'
+import { api } from '../../vendor/screenshot/api/tauri'
 
 describe('Vision request API contract', () => {
   it('serializes requestId with vision_ask arguments', async () => {

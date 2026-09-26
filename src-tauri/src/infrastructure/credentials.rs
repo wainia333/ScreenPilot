@@ -191,6 +191,12 @@ pub fn validate_adapter_key_batch_shape(
     for (adapter_id, keys) in changes {
         let expected_count = adapter_credential_field_count(adapter_id)
             .ok_or("Adapter credential id is unsupported")?;
+        // An empty entry is the batch transaction's explicit delete marker.
+        // Partial non-empty entries remain invalid so a clear cannot silently
+        // replace a configured adapter with incomplete credentials.
+        if keys.is_empty() {
+            continue;
+        }
         validate_adapter_key_entry(adapter_id, keys, expected_count)?;
     }
     Ok(())
@@ -580,6 +586,45 @@ mod tests {
         );
         assert_eq!(*reads.lock().expect("read lock"), 0);
         assert_eq!(*writes.lock().expect("write lock"), 0);
+    }
+
+    #[test]
+    fn adapter_batch_accepts_an_empty_entry_as_an_explicit_delete() {
+        let store = Arc::new(Mutex::new(HashMap::from([(
+            String::from("adapter-baidu-ocr"),
+            vec![String::from("old-api"), String::from("old-secret")],
+        )])));
+        let changes = HashMap::from([(String::from("adapter-baidu-ocr"), Vec::new())]);
+        let read_store = Arc::clone(&store);
+        let write_store = Arc::clone(&store);
+
+        set_adapter_keys_batch_with(
+            &changes,
+            move |adapter_id| {
+                Ok(read_store
+                    .lock()
+                    .expect("store lock")
+                    .get(adapter_id)
+                    .cloned()
+                    .unwrap_or_default())
+            },
+            move |adapter_id, keys| {
+                let mut store = write_store.lock().expect("store lock");
+                if keys.is_empty() {
+                    store.remove(adapter_id);
+                } else {
+                    store.insert(adapter_id.into(), keys.to_vec());
+                }
+                Ok(())
+            },
+        )
+        .expect("explicit adapter delete succeeds");
+
+        assert!(store
+            .lock()
+            .expect("store lock")
+            .get("adapter-baidu-ocr")
+            .is_none());
     }
 
     #[test]

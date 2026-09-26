@@ -15,6 +15,7 @@ type OptimizerHistory = {
   id: string
   input: string
   output: string
+  originalOutput?: string
   updatedAt: number
 }
 
@@ -41,6 +42,50 @@ export function OptimizerPage() {
     document.documentElement.lang.startsWith('en') ? 'en' : 'zh',
   )
   const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
+  const historyRef = useRef(history)
+  const persistedHistoryRef = useRef(history)
+  const [historySaveFailed, setHistorySaveFailed] = useState(false)
+  const activeHistoryId = useRef<string | null>(null)
+  const historyEditTimer = useRef<number | null>(null)
+  const pendingHistoryEdit = useRef<{ id: string; output: string } | null>(null)
+  useEffect(() => {
+    historyRef.current = history
+  }, [history])
+  const persistHistory = useCallback((next: OptimizerHistory[]) => {
+    const result = saveHistory(localStorage, historyKey, next, persistedHistoryRef.current)
+    historyRef.current = result.history
+    setHistory(result.history)
+    if (result.ok) {
+      persistedHistoryRef.current = result.persistedHistory
+      setHistorySaveFailed(false)
+    } else {
+      setHistorySaveFailed(true)
+    }
+  }, [])
+  const retryHistorySave = useCallback(() => persistHistory(historyRef.current), [persistHistory])
+  const flushHistoryEdit = useCallback(() => {
+    if (historyEditTimer.current !== null) {
+      window.clearTimeout(historyEditTimer.current)
+      historyEditTimer.current = null
+    }
+    const pending = pendingHistoryEdit.current
+    pendingHistoryEdit.current = null
+    if (pending === null) return
+    const next = historyRef.current.map((item) => item.id === pending.id
+      ? { ...item, output: pending.output, updatedAt: Date.now() }
+      : item)
+    if (next.some((item, index) => item !== historyRef.current[index])) persistHistory(next)
+  }, [persistHistory])
+  const scheduleHistoryEdit = useCallback((output: string) => {
+    const id = activeHistoryId.current
+    if (id === null) return
+    pendingHistoryEdit.current = { id, output }
+    if (historyEditTimer.current !== null) window.clearTimeout(historyEditTimer.current)
+    historyEditTimer.current = window.setTimeout(() => {
+      historyEditTimer.current = null
+      flushHistoryEdit()
+    }, 300)
+  }, [flushHistoryEdit])
   const generation = useRef(0)
   const requestActive = useRef(false)
   const copyRequest = useRef(0)
@@ -77,6 +122,7 @@ export function OptimizerPage() {
     })
   }, [desktop])
   const hideOptimizer = useCallback(async () => {
+    flushHistoryEdit()
     const cancellation = invalidateOptimization()
     try {
       await desktop.hideWindow()
@@ -85,7 +131,7 @@ export function OptimizerPage() {
       setError(String(reason))
     }
     await cancellation
-  }, [desktop, invalidateOptimization])
+  }, [desktop, flushHistoryEdit, invalidateOptimization])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -94,14 +140,17 @@ export function OptimizerPage() {
     }
     window.addEventListener('keydown', handleEscape)
     return () => {
+      flushHistoryEdit()
       void invalidateOptimization()
       copyRequest.current += 1
       window.removeEventListener('keydown', handleEscape)
     }
-  }, [hideOptimizer, invalidateOptimization])
+  }, [flushHistoryEdit, hideOptimizer, invalidateOptimization])
 
   const updateInput = (value: string) => {
     if (value === input) return
+    flushHistoryEdit()
+    activeHistoryId.current = null
     void invalidateOptimization()
     setInput(value)
     setOutput('')
@@ -128,8 +177,15 @@ export function OptimizerPage() {
       const result = await desktop.optimizePrompt({ text: source, generation: requestGeneration })
       if (result.generation !== generation.current) return
       setOutput(result.text)
-      const entry = { id: crypto.randomUUID(), input: source, output: result.text, updatedAt: Date.now() }
-      setHistory((items) => saveHistory(localStorage, historyKey, upsertHistory(items, entry)))
+      const entry = {
+        id: crypto.randomUUID(),
+        input: source,
+        output: result.text,
+        originalOutput: result.text,
+        updatedAt: Date.now(),
+      }
+      activeHistoryId.current = entry.id
+      persistHistory(upsertHistory(historyRef.current, entry))
     } catch (reason) {
       if (requestGeneration === generation.current) setError(String(reason))
     } finally {
@@ -141,9 +197,12 @@ export function OptimizerPage() {
   }
 
   const restoreHistory = (item: OptimizerHistory) => {
+    flushHistoryEdit()
     void invalidateOptimization()
-    setInput(item.input)
-    setOutput(item.output)
+    const current = historyRef.current.find((entry) => entry.id === item.id) ?? item
+    activeHistoryId.current = current.id
+    setInput(current.input)
+    setOutput(current.output)
     setLoading(false)
     setError(null)
     copyRequest.current += 1
@@ -192,12 +251,18 @@ export function OptimizerPage() {
             language={interfaceLanguage}
             showOutput={false}
             onRestore={restoreHistory}
-            onRemove={(id) => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== id)))}
-            onClear={() => setHistory((items) => saveHistory(localStorage, historyKey, items.length === 0 ? items : []))}
+            onRemove={(id) => persistHistory(historyRef.current.filter((entry) => entry.id !== id))}
+            onClear={() => persistHistory(historyRef.current.length === 0 ? historyRef.current : [])}
           />
           <button type="button" className="ocr-header-button" aria-label={t.closeOptimizer} onClick={() => void hideOptimizer()}><X size={14} /></button>
         </div>
       </header>
+      {historySaveFailed ? (
+        <aside className="mx-3 mt-2 shrink-0 rounded-lg bg-white/95 px-3 py-2 text-[11px] text-red-600 shadow-md ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-red-400 dark:ring-white/10" role="alert">
+          <span>{t.historyNotSaved}</span>
+          <button type="button" className="text-button ml-2 h-6 px-1" onClick={retryHistorySave}>{t.retryHistory}</button>
+        </aside>
+      ) : null}
       <div
         className="ocr-result-body translator-split-body"
         style={{ gridTemplateRows: `${String(ratio)}fr 9px ${String(1 - ratio)}fr` }}
@@ -264,7 +329,9 @@ export function OptimizerPage() {
                 setOutput(event.target.value)
                 setCopied(false)
                 setCopyError(null)
+                scheduleHistoryEdit(event.target.value)
               }}
+              onBlur={flushHistoryEdit}
             />
           ) : null}
         </section>

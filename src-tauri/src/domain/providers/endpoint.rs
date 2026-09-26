@@ -1,8 +1,11 @@
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ApiProtocol {
     ChatCompletions,
+    #[default]
     Responses,
 }
 
@@ -13,7 +16,17 @@ pub struct ProviderEndpoints {
     pub protocol: ApiProtocol,
 }
 
+/// Backward-compatible Responses-default endpoint derivation for callers that
+/// do not persist an explicit protocol yet.
+#[allow(dead_code)]
 pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
+    derive_endpoints_with_protocol(input, ApiProtocol::default())
+}
+
+pub fn derive_endpoints_with_protocol(
+    input: &str,
+    preferred_protocol: ApiProtocol,
+) -> Result<ProviderEndpoints, String> {
     let mut request = Url::parse(input).map_err(|_| "Provider URL is invalid")?;
     request.set_query(None);
     request.set_fragment(None);
@@ -26,19 +39,12 @@ pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
     let base_path = if path.is_empty() { "/v1" } else { path };
     let (request_path, models_path, protocol) =
         if let Some(root) = path.strip_suffix("/chat/completions") {
-            let explicit_chat = root.ends_with("/v1");
+            // A complete endpoint is an explicit user choice regardless of its
+            // proxy prefix. Do not reinterpret it as a Responses endpoint.
             (
-                if explicit_chat {
-                    path.to_string()
-                } else {
-                    append_path(root, "responses")
-                },
+                path.to_string(),
                 append_path(root, "models"),
-                if explicit_chat {
-                    ApiProtocol::ChatCompletions
-                } else {
-                    ApiProtocol::Responses
-                },
+                ApiProtocol::ChatCompletions,
             )
         } else if let Some(root) = path.strip_suffix("/responses") {
             (
@@ -48,15 +54,15 @@ pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
             )
         } else if let Some(root) = path.strip_suffix("/models") {
             (
-                append_path(root, "responses"),
+                append_path(root, protocol_path(preferred_protocol)),
                 path.to_string(),
-                ApiProtocol::Responses,
+                preferred_protocol,
             )
         } else {
             (
-                append_path(base_path, "responses"),
+                append_path(base_path, protocol_path(preferred_protocol)),
                 append_path(base_path, "models"),
-                ApiProtocol::Responses,
+                preferred_protocol,
             )
         };
     request.set_path(&request_path);
@@ -67,6 +73,13 @@ pub fn derive_endpoints(input: &str) -> Result<ProviderEndpoints, String> {
         models,
         protocol,
     })
+}
+
+fn protocol_path(protocol: ApiProtocol) -> &'static str {
+    match protocol {
+        ApiProtocol::ChatCompletions => "chat/completions",
+        ApiProtocol::Responses => "responses",
+    }
 }
 
 fn append_path(prefix: &str, suffix: &str) -> String {
@@ -163,9 +176,9 @@ mod tests {
             ),
             (
                 "https://proxy.example.com/gateway/chat/completions/",
-                "https://proxy.example.com/gateway/responses",
+                "https://proxy.example.com/gateway/chat/completions",
                 "https://proxy.example.com/gateway/models",
-                ApiProtocol::Responses,
+                ApiProtocol::ChatCompletions,
             ),
             (
                 "https://proxy.example.com/gateway/v1/models/",
@@ -179,6 +192,28 @@ mod tests {
             assert_eq!(endpoints.request.as_str(), request);
             assert_eq!(endpoints.models.as_str(), models);
             assert_eq!(endpoints.protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn uses_explicit_protocol_for_roots_and_models_endpoints() {
+        for input in [
+            "https://proxy.example.com/gateway",
+            "https://proxy.example.com/gateway/",
+            "https://proxy.example.com/gateway/models",
+            "https://proxy.example.com/gateway/models/",
+        ] {
+            let endpoints = derive_endpoints_with_protocol(input, ApiProtocol::ChatCompletions)
+                .expect("derive chat endpoints");
+            assert_eq!(
+                endpoints.request.as_str(),
+                "https://proxy.example.com/gateway/chat/completions"
+            );
+            assert_eq!(
+                endpoints.models.as_str(),
+                "https://proxy.example.com/gateway/models"
+            );
+            assert_eq!(endpoints.protocol, ApiProtocol::ChatCompletions);
         }
     }
 

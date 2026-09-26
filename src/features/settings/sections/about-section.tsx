@@ -25,7 +25,7 @@ export function AboutSection({
         <img src="/app-mark.png" alt="ScreenPilot" />
         <div>
           <h1>ScreenPilot</h1>
-          <p>Version 0.1.5 · Wainia</p>
+          <p>Version 0.1.6 · Wainia</p>
         </div>
       </div>
       <SettingGroup title={t.configurationManagement}>
@@ -56,7 +56,7 @@ export function AboutSection({
       <div className="about-footnote">{t.localOnlyFootnote}</div>
       <section className="about-credits" aria-labelledby="about-credits-heading">
         <h2 id="about-credits-heading">{language === 'zh' ? '致谢' : 'Acknowledgements'}</h2>
-        <p>此项目在开发过程中参考了一些非常优秀的项目：</p>
+        <p>{t.acknowledgementsDescription}</p>
         <ul>
           <li><a href="https://github.com/ZMGID/kivio">https://github.com/ZMGID/kivio</a></li>
           <li><a href="https://github.com/RamonUnch/AltSnap">https://github.com/RamonUnch/AltSnap</a></li>

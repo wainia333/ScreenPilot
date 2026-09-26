@@ -1,4 +1,4 @@
-use crate::application::state::AppState;
+use crate::application::state::{AppState, TranslatorPasteTarget};
 use crate::infrastructure::ai_http::{
     complete_text_cancelled, complete_text_with_effort_cancelled, AiRequestPolicy,
 };
@@ -249,6 +249,76 @@ fn inject_paste<K: PasteKeyboard>(keyboard: &mut K) -> Result<(), String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteGuardFailure {
+    NoTarget,
+    TargetClosed,
+    ForegroundChanged,
+    ClipboardUnavailable,
+    ClipboardChanged,
+    RequestExpired,
+}
+
+fn paste_guard_error(failure: PasteGuardFailure) -> String {
+    match failure {
+        PasteGuardFailure::NoTarget => {
+            "Automatic paste cancelled: the original target window is unavailable. The translation result remains available for manual copy and paste.".into()
+        }
+        PasteGuardFailure::TargetClosed => {
+            "Automatic paste cancelled: the original target window was closed. The translation result remains available for manual copy and paste.".into()
+        }
+        PasteGuardFailure::ForegroundChanged => {
+            "Automatic paste cancelled: the foreground window changed. The translation result remains available for manual copy and paste.".into()
+        }
+        PasteGuardFailure::ClipboardUnavailable => {
+            "Automatic paste cancelled: clipboard ownership could not be verified. The translated text remains available for manual copy and paste.".into()
+        }
+        PasteGuardFailure::ClipboardChanged => {
+            "Automatic paste cancelled: the clipboard changed while waiting. The translated text remains available for manual copy and paste.".into()
+        }
+        PasteGuardFailure::RequestExpired => {
+            "Automatic paste cancelled: a newer commit superseded this request. The latest clipboard content was preserved.".into()
+        }
+    }
+}
+
+fn validate_paste_guard(
+    target: Option<TranslatorPasteTarget>,
+    target_is_valid: bool,
+    foreground: Option<TranslatorPasteTarget>,
+    expected_clipboard_sequence: Option<u32>,
+    current_clipboard_sequence: Option<u32>,
+    expected_generation: u64,
+    current_generation: u64,
+) -> Result<(), PasteGuardFailure> {
+    if expected_generation != current_generation {
+        return Err(PasteGuardFailure::RequestExpired);
+    }
+    let target = target.ok_or(PasteGuardFailure::NoTarget)?;
+    if !target_is_valid {
+        return Err(PasteGuardFailure::TargetClosed);
+    }
+    if foreground != Some(target) {
+        return Err(PasteGuardFailure::ForegroundChanged);
+    }
+    let expected_clipboard_sequence =
+        expected_clipboard_sequence.ok_or(PasteGuardFailure::ClipboardUnavailable)?;
+    if current_clipboard_sequence != Some(expected_clipboard_sequence) {
+        return Err(PasteGuardFailure::ClipboardChanged);
+    }
+    Ok(())
+}
+
+fn reveal_translator_paste_feedback(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("translator") else {
+        return;
+    };
+    // The error is shown without activating or refocusing the translator. A
+    // user who moved to another application must keep that application's
+    // focus, even when the delayed paste is rejected.
+    let _ = crate::application::lifecycle::show_without_activation(&window);
+}
+
 #[tauri::command]
 pub async fn optimizer_run(
     state: State<'_, AppState>,
@@ -312,9 +382,25 @@ pub async fn text_commit(
     text: String,
     auto_paste: bool,
 ) -> Result<(), String> {
-    Clipboard::new()
-        .and_then(|mut clipboard| clipboard.set_text(text))
-        .map_err(|error| error.to_string())?;
+    let commit_generation = state.begin_text_commit();
+    let paste_target = state.translator_paste_target()?;
+    let expected_clipboard_sequence = {
+        let _clipboard_guard = state.lock_text_commit_clipboard()?;
+        if !state.text_commit_is_current(commit_generation) {
+            return Err(paste_guard_error(PasteGuardFailure::RequestExpired));
+        }
+        Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(&text))
+            .map_err(|error| error.to_string())?;
+        if auto_paste {
+            crate::platform::windows::selection::current_clipboard_sequence()
+        } else {
+            None
+        }
+    };
+    if !state.text_commit_is_current(commit_generation) {
+        return Err(paste_guard_error(PasteGuardFailure::RequestExpired));
+    }
     if let Some(window) = app.get_webview_window("translator") {
         state.begin_surface_action();
         state.cancel_active_translator_request();
@@ -324,8 +410,38 @@ pub async fn text_commit(
     }
     if auto_paste {
         sleep(Duration::from_millis(600)).await;
-        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
-        inject_paste(&mut enigo)?;
+        let target_is_valid = paste_target
+            .map(crate::platform::windows::selection::paste_target_is_valid)
+            .unwrap_or(false);
+        let current_foreground =
+            crate::platform::windows::selection::current_foreground_paste_target();
+        let current_clipboard_sequence =
+            crate::platform::windows::selection::current_clipboard_sequence();
+        if let Err(failure) = validate_paste_guard(
+            paste_target,
+            target_is_valid,
+            current_foreground,
+            expected_clipboard_sequence,
+            current_clipboard_sequence,
+            commit_generation,
+            state.text_commit_generation(),
+        ) {
+            if failure != PasteGuardFailure::RequestExpired {
+                reveal_translator_paste_feedback(&app);
+            }
+            return Err(paste_guard_error(failure));
+        }
+        let mut enigo = match Enigo::new(&Settings::default()) {
+            Ok(enigo) => enigo,
+            Err(error) => {
+                reveal_translator_paste_feedback(&app);
+                return Err(error.to_string());
+            }
+        };
+        if let Err(error) = inject_paste(&mut enigo) {
+            reveal_translator_paste_feedback(&app);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -362,7 +478,8 @@ pub fn vision_take_selection(state: State<'_, AppState>) -> String {
 mod tests {
     use super::{
         build_template_prompt, build_translation_prompt, inject_paste,
-        optimizer_response_language_name, translation_target_language_name, PasteKeyboard,
+        optimizer_response_language_name, translation_target_language_name, validate_paste_guard,
+        PasteGuardFailure, PasteKeyboard, TranslatorPasteTarget,
     };
 
     #[derive(Default)]
@@ -491,6 +608,62 @@ mod tests {
         assert_eq!(
             keyboard.actions,
             ["press-control", "click-paste", "release-control"]
+        );
+    }
+
+    fn test_target(hwnd: isize, process_id: u32) -> TranslatorPasteTarget {
+        TranslatorPasteTarget { hwnd, process_id }
+    }
+
+    #[test]
+    fn paste_guard_allows_only_the_same_live_target_and_clipboard_generation() {
+        let target = test_target(101, 7);
+        assert_eq!(
+            validate_paste_guard(Some(target), true, Some(target), Some(20), Some(20), 3, 3,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn paste_guard_rejects_a_closed_or_reused_target_window() {
+        let target = test_target(101, 7);
+        assert_eq!(
+            validate_paste_guard(Some(target), false, Some(target), Some(20), Some(20), 3, 3,),
+            Err(PasteGuardFailure::TargetClosed)
+        );
+        assert_eq!(
+            validate_paste_guard(
+                Some(target),
+                true,
+                Some(test_target(101, 8)),
+                Some(20),
+                Some(20),
+                3,
+                3,
+            ),
+            Err(PasteGuardFailure::ForegroundChanged)
+        );
+    }
+
+    #[test]
+    fn paste_guard_rejects_clipboard_changes_and_unknown_sequences() {
+        let target = test_target(101, 7);
+        assert_eq!(
+            validate_paste_guard(Some(target), true, Some(target), Some(20), Some(21), 3, 3,),
+            Err(PasteGuardFailure::ClipboardChanged)
+        );
+        assert_eq!(
+            validate_paste_guard(Some(target), true, Some(target), None, Some(21), 3, 3,),
+            Err(PasteGuardFailure::ClipboardUnavailable)
+        );
+    }
+
+    #[test]
+    fn paste_guard_rejects_a_superseded_commit_before_other_checks() {
+        let target = test_target(101, 7);
+        assert_eq!(
+            validate_paste_guard(Some(target), true, Some(target), Some(20), Some(20), 3, 4,),
+            Err(PasteGuardFailure::RequestExpired)
         );
     }
 }

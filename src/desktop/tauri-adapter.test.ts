@@ -14,10 +14,20 @@ class RecordingTauriApi implements TauriApi {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     this.invocations.push(args === undefined ? { command } : { command, args })
     if (command === 'settings_load') return Promise.resolve(structuredClone(DEFAULT_SETTINGS) as T)
+    if (command === 'settings_snapshot_load') {
+      return Promise.resolve({ settings: structuredClone(DEFAULT_SETTINGS), revision: 3 } as T)
+    }
     if (command === 'startup_notice_take') return Promise.resolve(null as T)
     if (command === 'startup_notice_acknowledge') return Promise.resolve(true as T)
+    if (command === 'main_navigation_pending') {
+      return Promise.resolve({ requestId: 8, route: 'prompt-optimizer' } as T)
+    }
+    if (command === 'window_route_current') return Promise.resolve('prompt-optimizer' as T)
     if (command === 'settings_save') {
       return Promise.resolve({ settings: args?.settings, appliedShortcuts: {} } as T)
+    }
+    if (command === 'settings_save_patch') {
+      return Promise.resolve({ settings: structuredClone(DEFAULT_SETTINGS), appliedShortcuts: {}, revision: 4 } as T)
     }
     if (command === 'settings_import') return Promise.resolve(null as T)
     if (command === 'settings_export' || command === 'translator_cancel' || command === 'optimizer_cancel') {
@@ -78,14 +88,20 @@ describe('TauriDesktopPort command contract', () => {
     const settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
 
     await expect(port.loadSettings()).resolves.toEqual(settings)
+    await expect(port.loadSettingsSnapshot()).resolves.toEqual({ settings, revision: 3 })
     await expect(port.takeStartupNotice()).resolves.toBeNull()
     await expect(port.acknowledgeStartupNotice()).resolves.toBe(true)
+    await expect(port.pendingMainNavigation()).resolves.toEqual({ requestId: 8, route: 'prompt-optimizer' })
+    await expect(port.currentWindowRoute()).resolves.toBe('prompt-optimizer')
+    await port.acknowledgeMainNavigation(9, true)
     await expect(port.saveSettings(settings)).resolves.toMatchObject({ settings })
+    await expect(port.saveSettingsPatch(3, { theme: 'dark' })).resolves.toMatchObject({ revision: 4 })
     await port.updateTranslationSettings({ method: 'google', sourceLanguage: 'en' })
     await port.exportSettings(true)
     await port.importSettings()
     await port.pickDirectory()
     await port.saveProviderKeyChanges({ 'provider-a': ['secret'] })
+    await port.saveAdapterKeyChanges({ 'adapter-baidu-ocr': ['api-secret', 'secret-key'] })
     await port.saveImportedSecrets({ schemaVersion: 1, providers: {}, adapters: {} }, ['old-provider'])
     await port.setProviderKeys('provider-a', ['secret'])
     await port.providerKeyCount('provider-a')
@@ -95,14 +111,20 @@ describe('TauriDesktopPort command contract', () => {
 
     expect(api.invocations).toEqual([
       { command: 'settings_load' },
+      { command: 'settings_snapshot_load' },
       { command: 'startup_notice_take' },
       { command: 'startup_notice_acknowledge' },
+      { command: 'main_navigation_pending' },
+      { command: 'window_route_current' },
+      { command: 'main_navigation_acknowledge', args: { requestId: 9, accepted: true } },
       { command: 'settings_save', args: { settings } },
+      { command: 'settings_save_patch', args: { baseRevision: 3, patch: { theme: 'dark' } } },
       { command: 'translation_settings_update', args: { patch: { method: 'google', sourceLanguage: 'en' } } },
       { command: 'settings_export', args: { includeSecrets: true } },
       { command: 'settings_import' },
       { command: 'directory_pick' },
       { command: 'credentials_set_provider_keys_batch', args: { changes: { 'provider-a': ['secret'] } } },
+      { command: 'credentials_set_adapter_keys_batch', args: { changes: { 'adapter-baidu-ocr': ['api-secret', 'secret-key'] } } },
       {
         command: 'credentials_set_imported_secrets',
         args: {
@@ -160,15 +182,26 @@ describe('TauriDesktopPort command contract', () => {
     const unlisten = await Promise.all([
       port.onRoute((payload) => observed.push(payload)),
       port.onWindowReset((payload) => observed.push(payload)),
+      port.onMainNavigationRequest((payload) => observed.push(payload)),
+      port.onSettingsChanged((payload) => observed.push(payload)),
       port.onTranslatorPrepare(() => observed.push('prepare')),
       port.onTranslatorSelection((payload) => observed.push(payload)),
     ])
 
     api.emit('screenpilot:route', 'translator')
     api.emit('screenpilot:reset', 'settings')
+    api.emit('screenpilot:main-navigation-request', { requestId: 3, route: 'prompt-optimizer' })
+    api.emit('screenpilot:settings-changed', { settings: structuredClone(DEFAULT_SETTINGS), revision: 1 })
     api.emit('screenpilot:translator-prepare', undefined)
     api.emit('screenpilot:translator-selection', 'selected text')
-    expect(observed).toEqual(['translator', 'settings', 'prepare', 'selected text'])
+    expect(observed).toEqual([
+      'translator',
+      'settings',
+      { requestId: 3, route: 'prompt-optimizer' },
+      { settings: DEFAULT_SETTINGS, revision: 1 },
+      'prepare',
+      'selected text',
+    ])
 
     unlisten.forEach((dispose) => dispose())
     expect(api.listeners.size).toBe(0)

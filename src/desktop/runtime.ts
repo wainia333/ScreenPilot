@@ -1,13 +1,16 @@
 import { createContext } from 'react'
 import type { DesktopPort } from './contract'
-import { FakeDesktopPort } from './fake-desktop'
+import { BrowserPreviewDesktopPort } from './fake-desktop'
 import { TauriDesktopPort } from './tauri-adapter'
 
-const hasTauriRuntime =
-  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+export function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+const hasTauriRuntime = isTauriRuntime()
 
 export const defaultDesktopPort: DesktopPort = hasTauriRuntime
   ? new TauriDesktopPort()
-  : new FakeDesktopPort()
+  : new BrowserPreviewDesktopPort()
 
 export const DesktopContext = createContext<DesktopPort>(defaultDesktopPort)

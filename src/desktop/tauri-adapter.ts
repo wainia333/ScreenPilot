@@ -8,16 +8,22 @@ import type {
   PromptOptimizationRequest,
   PromptOptimizationResult,
   SettingsSaveResult,
+  SettingsChangedEvent,
+  SettingsPatch,
+  SettingsSnapshot,
   TranslationSettingsPatch,
   TranslationRequest,
   TranslationResult,
   Unlisten,
   WindowRoute,
+  MainNavigationRequest,
 } from './contract'
 
 type EventPayloads = {
   'screenpilot:route': WindowRoute
   'screenpilot:reset': WindowRoute
+  'screenpilot:main-navigation-request': MainNavigationRequest
+  'screenpilot:settings-changed': SettingsChangedEvent
   'screenpilot:translator-prepare': undefined
   'screenpilot:translator-selection': string
 }
@@ -39,9 +45,12 @@ export class TauriDesktopPort implements DesktopPort {
   constructor(private readonly api: TauriApi = defaultTauriApi) {}
 
   loadSettings = () => this.api.invoke<AppSettings>('settings_load')
+  loadSettingsSnapshot = () => this.api.invoke<SettingsSnapshot>('settings_snapshot_load')
   takeStartupNotice = () => this.api.invoke<string | null>('startup_notice_take')
   acknowledgeStartupNotice = () => this.api.invoke<boolean>('startup_notice_acknowledge')
   saveSettings = (settings: AppSettings) => this.api.invoke<SettingsSaveResult>('settings_save', { settings })
+  saveSettingsPatch = (baseRevision: number, patch: SettingsPatch) =>
+    this.api.invoke<SettingsSaveResult>('settings_save_patch', { baseRevision, patch })
   updateTranslationSettings = (patch: TranslationSettingsPatch) =>
     command(this.api, 'translation_settings_update', { patch })
   exportSettings = (includeSecrets: boolean) => this.api.invoke<boolean>('settings_export', { includeSecrets })
@@ -49,6 +58,8 @@ export class TauriDesktopPort implements DesktopPort {
   pickDirectory = () => this.api.invoke<string | null>('directory_pick')
   saveProviderKeyChanges = (changes: ProviderKeyChanges) =>
     command(this.api, 'credentials_set_provider_keys_batch', { changes })
+  saveAdapterKeyChanges = (changes: ProviderKeyChanges) =>
+    command(this.api, 'credentials_set_adapter_keys_batch', { changes })
   saveImportedSecrets = (secrets: SettingsSecrets, providerDeletionIds: string[]) =>
     command(this.api, 'credentials_set_imported_secrets', { secrets, providerDeletionIds })
   setProviderKeys = (providerId: string, keys: string[]) =>
@@ -72,8 +83,16 @@ export class TauriDesktopPort implements DesktopPort {
   startDragging = () => this.api.startDraggingCurrentWindow()
   openExternal = (url: string) => command(this.api, 'open_external', { url })
   permissionStatus = () => this.api.invoke<PermissionStatus>('permissions_status')
+  currentWindowRoute = () => this.api.invoke<WindowRoute>('window_route_current')
   onRoute = (listener: (route: WindowRoute) => void) => event(this.api, 'screenpilot:route', listener)
   onWindowReset = (listener: (route: WindowRoute) => void) => event(this.api, 'screenpilot:reset', listener)
+  onMainNavigationRequest = (listener: (request: MainNavigationRequest) => void) =>
+    event(this.api, 'screenpilot:main-navigation-request', listener)
+  pendingMainNavigation = () => this.api.invoke<MainNavigationRequest | null>('main_navigation_pending')
+  acknowledgeMainNavigation = (requestId: number, accepted: boolean) =>
+    command(this.api, 'main_navigation_acknowledge', { requestId, accepted })
+  onSettingsChanged = (listener: (event: SettingsChangedEvent) => void) =>
+    event(this.api, 'screenpilot:settings-changed', listener)
   onTranslatorPrepare = (listener: () => void) => event(this.api, 'screenpilot:translator-prepare', listener)
   onTranslatorSelection = (listener: (selection: string) => void) => event(this.api, 'screenpilot:translator-selection', listener)
 }

@@ -30,6 +30,7 @@ impl SettingsStore {
             .map_err(|error| format!("Settings file is invalid: {error}"))?;
         let mut settings = serde_json::from_value::<AppSettings>(raw.clone())
             .map_err(|error| format!("Settings file is invalid: {error}"))?;
+        settings.migrate_provider_protocols(&raw);
         settings.migrate_missing_ai_toggles(&raw);
         settings.migrate_prompt_defaults();
         settings.normalize_ai_options();
@@ -255,6 +256,22 @@ mod tests {
             .load()
             .unwrap_err()
             .starts_with("Settings file is invalid:"));
+    }
+
+    #[test]
+    fn persists_interface_language_for_the_next_startup() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let store = SettingsStore::new(directory.path());
+        let mut settings = AppSettings::default();
+        settings.language = crate::domain::settings::InterfaceLanguage::En;
+
+        store.save(&settings).expect("save English settings");
+        let reloaded = store.load().expect("reload English settings");
+
+        assert_eq!(
+            reloaded.language,
+            crate::domain::settings::InterfaceLanguage::En
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useCallback, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../desktop/context'
-import type { Unlisten, WindowRoute } from '../desktop/contract'
+import type { MainNavigationRequest, Unlisten, WindowRoute } from '../desktop/contract'
 import { FakeDesktopPort } from '../desktop/fake-desktop'
 import { WindowListenerRecovery } from './window-listener-recovery'
 
@@ -55,6 +55,20 @@ class DeferredListenerDesktop extends ListenerDesktop {
   }
 }
 
+class PendingNavigationDesktop extends ListenerDesktop {
+  pending: MainNavigationRequest | null = { requestId: 27, route: 'prompt-optimizer' }
+
+  override pendingMainNavigation(): Promise<MainNavigationRequest | null> {
+    return Promise.resolve(this.pending)
+  }
+}
+
+class CurrentRouteDesktop extends ListenerDesktop {
+  override currentWindowRoute(): Promise<WindowRoute | null> {
+    return Promise.resolve('prompt-optimizer')
+  }
+}
+
 function ListenerHarness() {
   const [route, setRoute] = useState<WindowRoute>('settings')
   const [generation, setGeneration] = useState(0)
@@ -73,6 +87,18 @@ function ListenerHarness() {
 
 function renderListenerHarness(desktop: ListenerDesktop) {
   return render(<DesktopProvider port={desktop}><ListenerHarness /></DesktopProvider>)
+}
+
+function NavigationListenerHarness({ onNavigation }: { onNavigation: (request: MainNavigationRequest) => void }) {
+  const handleRoute = useCallback(() => undefined, [])
+  const handleWindowReset = useCallback(() => undefined, [])
+  return (
+    <WindowListenerRecovery
+      onRoute={handleRoute}
+      onWindowReset={handleWindowReset}
+      onMainNavigationRequest={onNavigation}
+    />
+  )
 }
 
 describe('WindowListenerRecovery', () => {
@@ -99,6 +125,30 @@ describe('WindowListenerRecovery', () => {
     })
     expect(screen.getByRole('heading', { name: 'prompt-optimizer-1' })).toBeInTheDocument()
     expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('recovers a native navigation request emitted before the listener was ready', async () => {
+    const desktop = new PendingNavigationDesktop()
+    const onNavigation = vi.fn()
+    render(
+      <DesktopProvider port={desktop}>
+        <NavigationListenerHarness onNavigation={onNavigation} />
+      </DesktopProvider>,
+    )
+
+    await act(async () => Promise.resolve())
+
+    expect(onNavigation).toHaveBeenCalledOnce()
+    expect(onNavigation).toHaveBeenCalledWith({ requestId: 27, route: 'prompt-optimizer' })
+  })
+
+  it('recovers the durable native route when shortcut events were emitted before mount', async () => {
+    const desktop = new CurrentRouteDesktop()
+    renderListenerHarness(desktop)
+
+    await act(async () => Promise.resolve())
+
+    expect(screen.getByRole('heading')).toHaveTextContent('prompt-optimizer-0')
   })
 
   it('retries only failed registrations and preserves successful subscriptions', async () => {

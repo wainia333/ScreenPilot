@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ScreenPilot",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.wainia.screenpilot",
   "build": {
     "beforeDevCommand": "npm run dev:ui",
     "beforeBuildCommand": "npm run release:prepare",
-    "devUrl": "http://127.0.0.1:5713",
+    "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
   "app": {

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { relative, resolve, sep } from 'node:path'
 
-export const vendorProductionDirectory = 'src/vendor/kivio-screenshot'
+export const vendorProductionDirectory = 'src/vendor/screenshot'
 
 function projectPath(projectRoot, file) {
   return relative(projectRoot, file).split(sep).join('/')

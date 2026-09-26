@@ -8,6 +8,12 @@ import { OptimizerPage } from './optimizer-page'
 
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
+function getHistoryRestore(dialog: HTMLElement): HTMLElement {
+  const restore = dialog.querySelector<HTMLElement>('.history-menu-restore')
+  if (restore === null) throw new Error('History restore control is missing')
+  return restore
+}
+
 class RecordingDesktop extends FakeDesktopPort {
   readonly optimizations: PromptOptimizationRequest[] = []
   hides = 0
@@ -328,6 +334,75 @@ describe('OptimizerPage', () => {
     expect(copy.querySelector('.lucide-check')).toBeInTheDocument()
     await act(() => vi.advanceTimersByTime(1200))
     expect(copy.querySelector('.lucide-clipboard')).toBeInTheDocument()
+  })
+
+  it('flushes edited optimization history before restore and unmount, keeps copy current, and reopens the edit', async () => {
+    const writes: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (text: string) => { writes.push(text); return Promise.resolve() } },
+    })
+    localStorage.setItem('screenpilot:optimizer-history', JSON.stringify([{
+      id: 'editable-optimization',
+      input: 'prompt to edit',
+      output: 'model optimization',
+      originalOutput: 'model optimization',
+      updatedAt: Date.now(),
+    }]))
+    const desktop = new RecordingDesktop()
+    const view = render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const historyButton = screen.getByRole('button', { name: '优化历史' })
+    fireEvent.click(historyButton)
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '优化历史' })))
+    const output = screen.getByRole('textbox', { name: '优化结果' })
+    fireEvent.change(output, { target: { value: 'edited optimization' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '复制优化结果' }))
+      await Promise.resolve()
+    })
+    expect(writes).toEqual(['edited optimization'])
+    fireEvent.click(historyButton)
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '优化历史' })))
+    expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('edited optimization')
+    fireEvent.change(screen.getByRole('textbox', { name: '优化结果' }), { target: { value: 'edited again' } })
+    view.unmount()
+    expect(localStorage.getItem('screenpilot:optimizer-history')).toContain('edited again')
+    expect(desktop.optimizations).toHaveLength(0)
+
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '优化历史' }))
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '优化历史' })))
+    expect(screen.getByRole('textbox', { name: '优化结果' })).toHaveValue('edited again')
+  })
+
+  it('shows and retries a failed edited optimization history save', async () => {
+    localStorage.setItem('screenpilot:optimizer-history', JSON.stringify([{
+      id: 'failed-optimization-edit',
+      input: 'prompt',
+      output: 'before edit',
+      originalOutput: 'before edit',
+      updatedAt: Date.now(),
+    }]))
+    const desktop = new RecordingDesktop()
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('synthetic quota', 'QuotaExceededError')
+    })
+    render(<DesktopProvider port={desktop}><OptimizerPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '优化历史' }))
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '优化历史' })))
+    const output = screen.getByRole('textbox', { name: '优化结果' })
+    fireEvent.change(output, { target: { value: 'failed edit' } })
+    fireEvent.blur(output)
+    await act(async () => Promise.resolve())
+    expect(screen.getByRole('alert')).toHaveTextContent('当前会话可用，历史未保存')
+    setItem.mockRestore()
+    fireEvent.click(screen.getByRole('button', { name: '重试保存历史' }))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(localStorage.getItem('screenpilot:optimizer-history')).toContain('failed edit')
   })
 
   it('shows and synchronizes the optimization history badge', async () => {

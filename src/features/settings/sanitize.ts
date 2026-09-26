@@ -7,6 +7,7 @@ import type {
   ModelSelection,
   OcrMethod,
   ProviderSettings,
+  ProviderProtocol,
   SettingsIssue,
   ThemeMode,
   ThinkingEffort,
@@ -34,6 +35,7 @@ const translationMethods = new Set<TranslationMethod>([
   'caiyun2',
   'microsoft',
 ])
+const providerProtocols = new Set<ProviderProtocol>(['chatCompletions', 'responses'])
 
 function record(value: unknown): UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -84,18 +86,29 @@ function legacyAiEnabled(value: unknown, selection: ModelSelection | null, provi
   return typeof value === 'boolean' ? value : isValidModelSelection(selection, providers)
 }
 
+function legacyProviderProtocol(baseUrl: string): ProviderProtocol {
+  try {
+    const path = new URL(baseUrl).pathname.replace(/\/+$/u, '')
+    return path.endsWith('/chat/completions') ? 'chatCompletions' : 'responses'
+  } catch {
+    return 'responses'
+  }
+}
+
 function provider(value: unknown, index: number): ProviderSettings | null {
   const data = record(value)
   const id = text(data.id, `provider-${index + 1}`, 80).trim()
   const name = text(data.name, '', 100).trim()
   const baseUrl = text(data.baseUrl, '', 2_048).trim()
   if (id.length === 0 || name.length === 0 || baseUrl.length === 0) return null
+  const protocol = choice(data.protocol, providerProtocols, legacyProviderProtocol(baseUrl))
   const availableModels = stringList(data.availableModels)
   const enabledModels = stringList(data.enabledModels).filter((model) => availableModels.includes(model))
   return {
     id,
     name,
     baseUrl,
+    protocol,
     keyCount: integer(data.keyCount, 0, 0, 64),
     availableModels,
     enabledModels,
@@ -296,7 +309,12 @@ export function normalizeAiAvailability(settings: AppSettings): AppSettings {
 }
 
 export function validateSettings(settings: AppSettings): SettingsIssue[] {
-  const issues = shortcutIssues(settings.shortcuts)
+  const issues = shortcutIssues(settings.shortcuts, {
+    translator: true,
+    vision: settings.vision.enabled,
+    screenshotTranslation: settings.screenshotTranslation.enabled,
+    promptOptimizer: settings.promptOptimizer.enabled,
+  })
   if (settings.altSnap.shortcut.trim().length === 0) {
     issues.push({ path: 'altSnap.shortcut', code: 'missing', message: 'AltSnap shortcut cannot be empty' })
   }

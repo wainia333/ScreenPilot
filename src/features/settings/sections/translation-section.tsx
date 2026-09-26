@@ -1,17 +1,25 @@
 import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import { translationMethodOptions } from '../translation-methods'
-import type { AppSettings } from '../types'
+import type { AppSettings, TranslationMethod } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
 import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
-import { copyFor, translationLanguageOptions, translationMethodLabel } from '../../../shared/ui-copy'
+import {
+  copyFor,
+  formatCopy,
+  translationLanguageOptions,
+  translationMethodLabel,
+  translationServiceDestination,
+} from '../../../shared/ui-copy'
 
 export function TranslationSection({
   settings,
   onChange,
+  onOpenCredentials,
 }: {
   settings: AppSettings
   onChange: (settings: AppSettings) => void
+  onOpenCredentials?: () => void
 }) {
   const t = copyFor(settings.language)
   const update = (patch: Partial<AppSettings['translation']>) =>
@@ -24,6 +32,11 @@ export function TranslationSection({
   const methods = translationMethodOptions
     .filter((option) => option.value !== 'ai' || canUseAi)
     .map((option) => ({ ...option, label: translationMethodLabel(option.value, settings.language) }))
+  const usesAdapterCredentials = new Set<TranslationMethod>(['baidu', 'tencent', 'caiyun2']).has(settings.translation.method)
+  const destination = translationServiceDestination(settings, method, settings.translation.aiModel) ?? t.noSelection
+  const dataFlowDescription = method === 'ai'
+    ? formatCopy(t.aiTextTranslationDataFlow, { destination })
+    : formatCopy(t.textTranslationDataFlow, { destination })
   return (
     <>
       <SettingGroup title={t.translationBehavior}>
@@ -61,7 +74,7 @@ export function TranslationSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.translationInterface}>
+        <SettingRow label={t.translationInterface} description={dataFlowDescription}>
           <SelectField
             value={method}
             label={t.translationInterface}
@@ -69,6 +82,13 @@ export function TranslationSection({
             onChange={(method) => update({ method })}
           />
         </SettingRow>
+        {usesAdapterCredentials && onOpenCredentials === undefined ? null : usesAdapterCredentials ? (
+          <SettingRow label={t.credentialGroup} description={t.configureCredentials}>
+            <button type="button" className="secondary-button" onClick={onOpenCredentials}>
+              {t.configureCredentials}
+            </button>
+          </SettingRow>
+        ) : null}
       </SettingGroup>
       <SettingGroup
         title={t.aiTranslationSystemPrompt}

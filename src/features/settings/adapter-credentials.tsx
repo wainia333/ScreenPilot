@@ -1,89 +1,83 @@
-import { Check } from 'lucide-react'
-import { useState } from 'react'
-import { useDesktop } from '../../desktop/use-desktop'
+import { Trash2 } from 'lucide-react'
 import { SettingGroup, TextField } from '../../shared/ui/controls'
-import { copyFor } from '../../shared/ui-copy'
+import { copyFor, formatCopy } from '../../shared/ui-copy'
 import type { InterfaceLanguage } from './types'
+import { ADAPTER_CREDENTIALS, type AdapterCredentialCounts, type AdapterCredentialDrafts, type AdapterCredentialId } from './adapter-credential-specs'
 
-const adapters = [
-  { id: 'adapter-baidu-ocr', label: '百度 OCR', labelEn: 'Baidu OCR', fields: ['API Key', 'Secret Key'] },
-  { id: 'adapter-baidu-translation', label: '百度翻译', labelEn: 'Baidu Translate', fields: ['App ID', 'Secret'] },
-  { id: 'adapter-tencent-translation', label: '腾讯翻译', labelEn: 'Tencent Translate', fields: ['Secret ID', 'Secret Key'] },
-  { id: 'adapter-caiyun-translation', label: '彩云小译 2', labelEn: 'Caiyun 2', fields: ['Token'] },
-] as const
+function splitDraft(value: string | undefined, fieldCount: number): string[] {
+  const fields = (value ?? '').split(/\r?\n/u)
+  return Array.from({ length: fieldCount }, (_, index) => fields[index] ?? '')
+}
 
-export function AdapterCredentials({ language = 'zh' }: { language?: InterfaceLanguage }) {
-  const desktop = useDesktop()
+export function AdapterCredentials({
+  language = 'zh',
+  drafts,
+  configuredCounts,
+  disabled = false,
+  onDraftChange,
+  onClear,
+}: {
+  language?: InterfaceLanguage
+  drafts: AdapterCredentialDrafts
+  configuredCounts: AdapterCredentialCounts
+  disabled?: boolean
+  onDraftChange: (adapterId: AdapterCredentialId, value: string) => void
+  onClear: (adapterId: AdapterCredentialId) => void
+}) {
   const t = copyFor(language)
-  const [values, setValues] = useState<Record<string, string[]>>({})
-  const [savingAdapterId, setSavingAdapterId] = useState<string | null>(null)
-  const [status, setStatus] = useState<{ message: string; tone: 'success' | 'error' } | null>(null)
   return (
     <SettingGroup title={t.credentialGroup}>
       <div className="adapter-credentials">
-        {adapters.map((adapter) => {
+        {ADAPTER_CREDENTIALS.map((adapter) => {
           const adapterLabel = language === 'en' ? adapter.labelEn : adapter.label
-          const keys = adapter.fields.map((_, index) => values[adapter.id]?.[index]?.trim() ?? '')
-          const hasAnyValue = keys.some((value) => value.length > 0)
+          const hasDraft = Object.prototype.hasOwnProperty.call(drafts, adapter.id)
+          const values = splitDraft(drafts[adapter.id], adapter.fields.length)
+          const configuredCount = configuredCounts[adapter.id] ?? 0
+          const clearDisabled = disabled || (!hasDraft && configuredCount === 0)
           return (
-            <section key={adapter.id}>
+            <section key={adapter.id} data-settings-issue-path={`credentials.${adapter.id}`} tabIndex={-1}>
               <strong>{adapterLabel}</strong>
               <div>
                 {adapter.fields.map((field, index) => (
                   <TextField
                     key={field}
-                    value={values[adapter.id]?.[index] ?? ''}
+                    value={hasDraft ? values[index] ?? '' : ''}
                     label={`${adapterLabel} ${field}`}
                     type="password"
-                    placeholder={field}
-                    disabled={savingAdapterId !== null}
+                    placeholder={configuredCount > 0 ? formatCopy(t.savedKeyCount, { count: configuredCount }) : field}
+                    disabled={disabled}
                     onChange={(value) => {
-                      const next = [...(values[adapter.id] ?? [])]
+                      const next = [...values]
                       next[index] = value
-                      setValues((current) => ({ ...current, [adapter.id]: next }))
-                      setStatus(null)
+                      onDraftChange(adapter.id, next.join('\n'))
                     }}
                   />
                 ))}
                 <button
                   type="button"
                   className="secondary-button"
-                  disabled={!hasAnyValue || savingAdapterId !== null}
-                  onClick={async () => {
-                    if (keys.some((value) => value.length === 0)) {
-                      setStatus({
-                        message: language === 'zh'
-                          ? `请完整填写 ${adapterLabel} 的全部凭据字段`
-                          : `Complete every ${adapterLabel} credential field`,
-                        tone: 'error',
-                      })
-                      return
-                    }
-                    setSavingAdapterId(adapter.id)
-                    setStatus(null)
-                    try {
-                      await desktop.setProviderKeys(adapter.id, keys)
-                      setValues((current) => ({ ...current, [adapter.id]: [] }))
-                      setStatus({ message: `${adapterLabel} ${t.credentialSaved}`, tone: 'success' })
-                    } catch {
-                      setStatus({
-                        message: language === 'zh'
-                          ? `${adapterLabel} 凭据保存失败，请重试`
-                          : `${adapterLabel} credential save failed; retry`,
-                        tone: 'error',
-                      })
-                    } finally {
-                      setSavingAdapterId(null)
-                    }
-                  }}
+                  aria-label={`${t.clearCredentials}${language === 'zh' ? '：' : ': '}${adapterLabel}`}
+                  data-screenpilot-credential-clear="true"
+                  disabled={clearDisabled}
+                  onClick={() => onClear(adapter.id)}
                 >
-                  <Check size={14} />{t.save}
+                  <Trash2 size={14} />{t.clearCredentials}
                 </button>
               </div>
+              <span
+                className="adapter-credential-state"
+                data-configured={configuredCount > 0}
+                data-screenpilot-credential-state={adapter.id}
+              >
+                {hasDraft && values.every((value) => value.trim().length === 0)
+                  ? t.credentialClearPending
+                  : configuredCount > 0
+                    ? formatCopy(t.savedKeyCount, { count: configuredCount })
+                    : t.credentialNotConfigured}
+              </span>
             </section>
           )
         })}
-        {status === null ? null : <div className="inline-status" data-tone={status.tone} role="status">{status.message}</div>}
       </div>
     </SettingGroup>
   )

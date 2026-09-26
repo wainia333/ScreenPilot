@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,9 +15,14 @@ const tauriMocks = vi.hoisted(() => ({
 
 const vendorApi = vi.hoisted(() => {
   const originalStartDragging = vi.fn<() => Promise<void>>(() => Promise.resolve())
+  const synthesizeSpeech = vi.fn<() => Promise<{ success: boolean; data?: string }>>(() => Promise.resolve({
+    success: true,
+    data: 'data:audio/wav;base64,AA==',
+  }))
   return {
-    api: { startDragging: originalStartDragging },
+    api: { startDragging: originalStartDragging, synthesizeSpeech },
     originalStartDragging,
+    synthesizeSpeech,
   }
 })
 
@@ -27,8 +32,8 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ label: 'vision', setTitle: tauriMocks.setTitle }),
 }))
 
-vi.mock('../../vendor/kivio-screenshot/api/tauri', () => ({ api: vendorApi.api }))
-vi.mock('../../vendor/kivio-screenshot/Vision', async () => {
+vi.mock('../../vendor/screenshot/api/tauri', () => ({ api: vendorApi.api }))
+vi.mock('../../vendor/screenshot/Vision', async () => {
   const { createElement } = await import('react')
   return {
     default: function VisionContractSurface() {
@@ -59,7 +64,9 @@ vi.mock('../../vendor/kivio-screenshot/Vision', async () => {
                 <h2 data-screenpilot-translated-heading="true">
                   <span data-screenpilot-target-language-slot="true"></span>
                 </h2>
-                <div data-screenpilot-target-result-slot="true"></div>
+                <div data-screenpilot-target-result-slot="true">
+                  <div data-screenpilot-native-translation-result="true" data-screenpilot-translation-text="Previously translated">Previously translated</div>
+                </div>
               </div>
             </article>
           `,
@@ -83,6 +90,8 @@ const runtimeSettings = {
     translateModel: 'translation-model',
   },
 }
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 function commandCalls(command: string): number {
   return tauriMocks.invoke.mock.calls.filter(([calledCommand]) => calledCommand === command).length
@@ -114,6 +123,7 @@ describe('ReferenceVisionAdapter mount contract', () => {
     tauriMocks.setTitle.mockReset()
     tauriMocks.unlisten.mockReset()
     vendorApi.originalStartDragging.mockClear()
+    vendorApi.synthesizeSpeech.mockClear()
     vendorApi.api.startDragging = vendorApi.originalStartDragging
 
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
@@ -147,6 +157,9 @@ describe('ReferenceVisionAdapter mount contract', () => {
     document.documentElement.removeAttribute('data-theme')
     document.documentElement.style.removeProperty('color-scheme')
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    if (originalClipboardDescriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
+    else Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
   })
 
   it('loads settings, adapts the explicit Vision DOM, resets overrides, and disposes effects', async () => {
@@ -206,7 +219,7 @@ describe('ReferenceVisionAdapter mount contract', () => {
       targetLanguage: 'en',
     })
     expect(tauriMocks.invoke).toHaveBeenCalledWith('screenshot_translation_settings_update', {
-      patch: { sourceLanguage: 'ja', targetLanguage: 'en' },
+      patch: { targetLanguage: 'en' },
     })
     expect(document.querySelector('[data-screenpilot-translation-body="true"]'))
       .toHaveAttribute('data-screenpilot-translation-override', 'true')
@@ -260,5 +273,215 @@ describe('ReferenceVisionAdapter mount contract', () => {
       await Promise.resolve()
     })
     expect(commandCalls('vision_runtime_settings_load')).toBe(settingsLoadsBeforeUnmount)
+  })
+
+  it('keeps override Markdown, copy, speech, and keyboard actions bound to the displayed result', async () => {
+    const markdown = '- translated item\n\n$$x^2 + y^2$$\n\n```ts\nconst answer = 42\n```'
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    class FakeAudio {
+      ended = false
+      onended: (() => void) | null = null
+      onpause: (() => void) | null = null
+      onerror: (() => void) | null = null
+      play(): Promise<void> {
+        queueMicrotask(() => {
+          this.ended = true
+          this.onended?.()
+        })
+        return Promise.resolve()
+      }
+      pause(): void {
+        this.onpause?.()
+      }
+    }
+    vi.stubGlobal('Audio', FakeAudio)
+    tauriMocks.invoke.mockImplementation((command) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') return Promise.resolve({ success: true, translated: markdown })
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const targetLanguage = await screen.findByRole('combobox', { name: 'Target language' })
+    if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
+    act(() => {
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Captured source' },
+      })
+    })
+
+    fireEvent.change(targetLanguage, { target: { value: 'en' } })
+    expect(await screen.findByText('translated item')).toBeInTheDocument()
+    expect(document.querySelector('.katex')).not.toBeNull()
+    expect(document.querySelector('pre code')).toHaveTextContent('const answer = 42')
+
+    const heading = document.querySelector('[data-screenpilot-translated-heading="true"]')
+    if (!(heading instanceof HTMLElement)) throw new Error('Translated heading is missing')
+    const copy = within(heading).getByRole('button', { name: 'Copy' })
+    const speak = within(heading).getByRole('button', { name: 'Speak' })
+    expect(copy).toHaveAttribute('data-screenpilot-copy-target', 'translated-override')
+    expect(copy).not.toHaveAttribute('tabindex', '-1')
+    copy.focus()
+    expect(document.activeElement).toBe(copy)
+
+    fireEvent.click(copy)
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+    fireEvent.click(speak)
+    await waitFor(() => expect(vendorApi.synthesizeSpeech).toHaveBeenCalledWith(markdown))
+  })
+
+  it('marks the previous result when a source or target translation retry fails', async () => {
+    tauriMocks.invoke.mockImplementation((command) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') return Promise.resolve({ success: false, error: 'synthetic translation failure' })
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const sourceLanguage = await screen.findByRole('combobox', { name: 'Source language' })
+    if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
+    act(() => {
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Captured source' },
+      })
+    })
+
+    fireEvent.change(sourceLanguage, { target: { value: 'en' } })
+    expect(await screen.findByText('synthetic translation failure')).toBeInTheDocument()
+    expect(screen.getByText('Previous translation (current translation failed)')).toBeInTheDocument()
+    const overrideResult = document.querySelector('[data-screenpilot-translation-override-result="true"]')
+    if (!(overrideResult instanceof HTMLElement)) throw new Error('Override result is missing')
+    expect(within(overrideResult).getByText('Previously translated')).toBeInTheDocument()
+    const heading = document.querySelector('[data-screenpilot-translated-heading="true"]')
+    if (!(heading instanceof HTMLElement)) throw new Error('Translated heading is missing')
+    expect(within(heading).getByRole('button', { name: 'Copy' })).toBeEnabled()
+    expect(overrideResult).toHaveAttribute('data-screenpilot-translation-stale', 'true')
+  })
+
+  it('rolls a language choice back when persistence fails even if translation succeeds', async () => {
+    const settingsPatches: unknown[] = []
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') return Promise.resolve({ success: true, translated: 'Translated override' })
+      if (command === 'screenshot_translation_settings_update') {
+        settingsPatches.push((args as { patch?: unknown } | undefined)?.patch)
+        return Promise.reject(new Error('synthetic language save failure'))
+      }
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const targetLanguage = await screen.findByRole('combobox', { name: 'Target language' })
+    if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
+    act(() => {
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Captured source' },
+      })
+    })
+
+    fireEvent.change(targetLanguage, { target: { value: 'en' } })
+    expect(targetLanguage).toHaveValue('en')
+    await waitFor(() => expect(targetLanguage).toHaveValue('ko'))
+    expect(settingsPatches).toEqual([{ targetLanguage: 'en' }])
+    expect(await screen.findByText('Translated override')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Language settings could not be saved')
+  })
+
+  it('keeps a successful language save while reporting a translation failure separately', async () => {
+    tauriMocks.invoke.mockImplementation((command) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') {
+        return Promise.resolve({ success: false, error: 'synthetic translation failure' })
+      }
+      if (command === 'screenshot_translation_settings_update') return Promise.resolve(undefined)
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const targetLanguage = await screen.findByRole('combobox', { name: 'Target language' })
+    if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
+    act(() => {
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Captured source' },
+      })
+    })
+    fireEvent.change(targetLanguage, { target: { value: 'en' } })
+
+    await waitFor(() => expect(targetLanguage).toHaveValue('en'))
+    expect(await screen.findByText('synthetic translation failure')).toBeInTheDocument()
+    expect(screen.queryByText('Language settings could not be saved')).not.toBeInTheDocument()
+  })
+
+  it('serializes cross-field language saves as deduplicated single-field patches', async () => {
+    const settingsPatches: unknown[] = []
+    const saveResolvers: (() => void)[] = []
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') return Promise.resolve({ success: true, translated: 'Translated override' })
+      if (command === 'screenshot_translation_settings_update') {
+        settingsPatches.push((args as { patch?: unknown } | undefined)?.patch)
+        return new Promise<void>((resolve) => {
+          saveResolvers.push(resolve)
+        })
+      }
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const sourceLanguage = await screen.findByRole('combobox', { name: 'Source language' })
+    const targetLanguage = await screen.findByRole('combobox', { name: 'Target language' })
+
+    fireEvent.change(sourceLanguage, { target: { value: 'en' } })
+    await waitFor(() => expect(settingsPatches).toHaveLength(1))
+    fireEvent.change(targetLanguage, { target: { value: 'en' } })
+    await Promise.resolve()
+    expect(settingsPatches).toEqual([{ sourceLanguage: 'en' }])
+
+    saveResolvers.shift()?.()
+    await waitFor(() => expect(settingsPatches).toHaveLength(2))
+    expect(settingsPatches).toEqual([{ sourceLanguage: 'en' }, { targetLanguage: 'en' }])
+    saveResolvers.shift()?.()
+    await waitFor(() => {
+      expect(sourceLanguage).toHaveValue('en')
+      expect(targetLanguage).toHaveValue('en')
+    })
+  })
+
+  it('ignores a late translation response from an older language selection', async () => {
+    const translationResolvers: ((result: unknown) => void)[] = []
+    tauriMocks.invoke.mockImplementation((command) => {
+      if (command === 'vision_runtime_settings_load') return Promise.resolve(runtimeSettings)
+      if (command === 'vision_translate_text') {
+        return new Promise((resolve) => translationResolvers.push(resolve))
+      }
+      if (command === 'screenshot_translation_settings_update') return Promise.resolve(undefined)
+      if (command === 'vision_set_floating') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    })
+    render(<ReferenceVisionAdapter />)
+    const targetLanguage = await screen.findByRole('combobox', { name: 'Target language' })
+    if (translateStreamListener === undefined) throw new Error('Vision stream listener was not installed')
+    act(() => {
+      translateStreamListener?.({
+        payload: { imageId: 'capture-1', generation: 1, kind: 'original', delta: 'Captured source' },
+      })
+    })
+    fireEvent.change(targetLanguage, { target: { value: 'en' } })
+    await waitFor(() => expect(translationResolvers).toHaveLength(1))
+    const headingWhileLoading = document.querySelector('[data-screenpilot-translated-heading="true"]')
+    if (!(headingWhileLoading instanceof HTMLElement)) throw new Error('Translated heading is missing')
+    expect(within(headingWhileLoading).getByRole('button', { name: 'Copy' })).toBeDisabled()
+    fireEvent.change(targetLanguage, { target: { value: 'zh-CN' } })
+    await waitFor(() => expect(translationResolvers).toHaveLength(2))
+
+    translationResolvers[0]?.({ success: true, translated: 'old response' })
+    translationResolvers[1]?.({ success: true, translated: 'latest response' })
+    expect(await screen.findByText('latest response')).toBeInTheDocument()
+    expect(screen.queryByText('old response')).not.toBeInTheDocument()
+    expect(targetLanguage).toHaveValue('zh-CN')
   })
 })

@@ -1,3 +1,4 @@
+use crate::domain::providers::ApiProtocol;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use url::Url;
@@ -109,6 +110,8 @@ pub struct ProviderSettings {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    #[serde(default)]
+    pub protocol: ApiProtocol,
     pub key_count: u8,
     pub available_models: Vec<String>,
     pub enabled_models: Vec<String>,
@@ -367,6 +370,29 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn migrate_provider_protocols(&mut self, raw: &serde_json::Value) {
+        let Some(raw_providers) = raw.get("providers").and_then(serde_json::Value::as_array) else {
+            return;
+        };
+        for provider in &mut self.providers {
+            let Some(raw_provider) = raw_providers.iter().find(|raw_provider| {
+                raw_provider
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id == provider.id)
+            }) else {
+                continue;
+            };
+            if raw_provider
+                .as_object()
+                .is_some_and(|value| value.contains_key("protocol"))
+            {
+                continue;
+            }
+            provider.protocol = legacy_provider_protocol(&provider.base_url);
+        }
+    }
+
     pub fn migrate_missing_ai_toggles(&mut self, raw: &serde_json::Value) {
         let providers = &self.providers;
         let translation = raw
@@ -544,6 +570,16 @@ fn default_source_language() -> String {
     "auto".into()
 }
 
+fn legacy_provider_protocol(base_url: &str) -> ApiProtocol {
+    let path = Url::parse(base_url)
+        .ok()
+        .map(|url| url.path().trim_end_matches('/').to_owned());
+    match path.as_deref() {
+        Some(path) if path.ends_with("/chat/completions") => ApiProtocol::ChatCompletions,
+        _ => ApiProtocol::Responses,
+    }
+}
+
 fn default_thinking_effort() -> ThinkingEffort {
     ThinkingEffort::Medium
 }
@@ -665,6 +701,7 @@ mod tests {
             id: "remote".into(),
             name: "Remote".into(),
             base_url: "http://example.com/v1".into(),
+            protocol: ApiProtocol::Responses,
             key_count: 0,
             available_models: Vec::new(),
             enabled_models: Vec::new(),
@@ -723,6 +760,7 @@ mod tests {
             id: "provider".into(),
             name: "Provider".into(),
             base_url: "https://example.com/v1".into(),
+            protocol: ApiProtocol::Responses,
             key_count: 0,
             available_models: vec!["model".into()],
             enabled_models: vec!["model".into()],

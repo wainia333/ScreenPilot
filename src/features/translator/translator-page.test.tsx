@@ -13,6 +13,12 @@ import { TRANSLATOR_INPUT_DEBOUNCE_MS, TranslatorPage } from './translator-page'
 
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
+function getHistoryRestore(dialog: HTMLElement): HTMLElement {
+  const restore = dialog.querySelector<HTMLElement>('.history-menu-restore')
+  if (restore === null) throw new Error('History restore control is missing')
+  return restore
+}
+
 class RecordingDesktop extends FakeDesktopPort {
   readonly translations: TranslationRequest[] = []
   readonly commits: string[] = []
@@ -63,6 +69,33 @@ class DeferredTranslationDesktop extends RecordingDesktop {
     return new Promise((resolve) => {
       this.pending.push({ request, resolve })
     })
+  }
+}
+
+class RetryTranslationDesktop extends RecordingDesktop {
+  failures = 1
+
+  override translate(request: TranslationRequest): Promise<TranslationResult> {
+    this.translations.push(request)
+    if (this.failures > 0) {
+      this.failures -= 1
+      return Promise.reject(new Error('synthetic network timeout'))
+    }
+    return Promise.resolve({ generation: request.generation, text: `translated:${request.text}` })
+  }
+}
+
+class ReloadSettingsDesktop extends RecordingDesktop {
+  loadCalls = 0
+  failures = 1
+
+  override loadSettings(): ReturnType<FakeDesktopPort['loadSettings']> {
+    this.loadCalls += 1
+    if (this.failures > 0) {
+      this.failures -= 1
+      return Promise.reject(new Error('synthetic settings unavailable'))
+    }
+    return super.loadSettings()
   }
 }
 
@@ -275,6 +308,77 @@ describe('TranslatorPage', () => {
       await Promise.resolve()
     })
     expect(desktop.commits).toEqual(['edited translation'])
+  })
+
+  it('offers a localized retry after the first translation failure without changing input', async () => {
+    vi.useFakeTimers()
+    const desktop = new RetryTranslationDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const input = screen.getByLabelText('原文')
+    fireEvent.change(input, { target: { value: 'retry source' } })
+
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(desktop.translations).toHaveLength(1)
+    expect(input).toHaveValue('retry source')
+    expect(screen.getByRole('alert')).toHaveTextContent('网络连接失败')
+    expect(screen.getByRole('alert')).toHaveTextContent('synthetic network timeout')
+    expect(screen.getByText('技术详情')).toBeInTheDocument()
+
+    const retry = screen.getByRole('button', { name: '重试翻译' })
+    await act(async () => {
+      fireEvent.click(retry)
+      fireEvent.click(retry)
+      await Promise.resolve()
+    })
+
+    expect(desktop.translations).toHaveLength(2)
+    expect(input).toHaveValue('retry source')
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('translated:retry source')
+  })
+
+  it('keeps input unchanged and exposes an explicit settings reload after the first load fails', async () => {
+    vi.useFakeTimers()
+    const desktop = new ReloadSettingsDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const input = screen.getByLabelText('原文')
+    fireEvent.change(input, { target: { value: 'typed before settings recovery' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.translations).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '重新加载设置' })).toBeEnabled()
+    expect(screen.getByRole('combobox', { name: '翻译接口' })).toBeDisabled()
+
+    desktop.failures = 0
+    const reload = screen.getByRole('button', { name: '重新加载设置' })
+    await act(async () => {
+      fireEvent.click(reload)
+      fireEvent.click(reload)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(desktop.loadCalls).toBe(2)
+    expect(input).toHaveValue('typed before settings recovery')
+    expect(screen.getByRole('combobox', { name: '翻译接口' })).toBeEnabled()
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.translations).toHaveLength(1)
+    expect(desktop.translations[0]).toMatchObject({ text: 'typed before settings recovery' })
   })
 
   it('injects the hotkey selection and translates it without manual editing', async () => {
@@ -740,7 +844,7 @@ describe('TranslatorPage', () => {
     expect(menu.querySelector('.history-menu-list')).not.toBeNull()
     expect(menu.querySelector('.history-menu-input')).toHaveTextContent('saved source')
     expect(menu.querySelector('.history-menu-output')).toHaveTextContent('saved result')
-    expect(menu.querySelector('.history-menu-meta')).toHaveTextContent(/Microsoft · 刚刚/u)
+    expect(menu.querySelector('.history-menu-meta')).toHaveTextContent(/Microsoft · 语言信息未知 · 刚刚/u)
 
     const restore = menu.querySelector<HTMLButtonElement>('.history-menu-restore')
     expect(restore).not.toBeNull()
@@ -774,6 +878,143 @@ describe('TranslatorPage', () => {
     source.focus()
     expect(screen.queryByRole('dialog', { name: '翻译历史' })).toBeNull()
     expect(source).toHaveFocus()
+  })
+
+  it('migrates versioned history context without changing global settings or requesting on restore', async () => {
+    vi.useFakeTimers()
+    localStorage.setItem('screenpilot:translator-history', JSON.stringify([
+      {
+        id: 'baidu-history',
+        input: '历史原文',
+        output: '历史译文',
+        schemaVersion: 1,
+        sourceLanguage: 'en',
+        targetLanguage: 'ja',
+        method: 'baidu',
+        model: null,
+        updatedAt: Date.now(),
+      },
+      {
+        id: 'microsoft-history',
+        input: '另一条历史',
+        output: '另一条译文',
+        schemaVersion: 1,
+        sourceLanguage: 'zh-CN',
+        targetLanguage: 'en',
+        method: 'microsoft',
+        model: null,
+        updatedAt: Date.now() - 1,
+      },
+    ]))
+    const desktop = new RecordingDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    const historyButton = screen.getByRole('button', { name: '翻译历史' })
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('auto')
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('auto')
+    fireEvent.click(historyButton)
+    const menu = screen.getByRole('dialog', { name: '翻译历史' })
+    expect(menu.querySelector('.history-menu-meta')).toHaveTextContent(/百度 · (英语|English) → (日语|日本語)/u)
+    const restore = menu.querySelector<HTMLButtonElement>('.history-menu-restore')
+    expect(restore).not.toBeNull()
+    if (restore === null) throw new Error('Versioned history restore control is missing')
+    fireEvent.click(restore)
+    await act(async () => Promise.resolve())
+    expect(desktop.translations).toHaveLength(0)
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('auto')
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('auto')
+    expect(screen.getByRole('status')).toHaveTextContent(/历史参数[:：] 百度 · (英语|English) → (日语|日本語)/u)
+
+    fireEvent.change(screen.getByLabelText('原文'), { target: { value: '明确重译' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(desktop.translations.at(-1)).toMatchObject({
+      method: 'baidu',
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+    })
+    const saved = JSON.parse(localStorage.getItem('screenpilot:translator-history') ?? '[]') as Record<string, unknown>[]
+    expect(saved[0]).toMatchObject({ schemaVersion: 1, sourceLanguage: 'en', targetLanguage: 'ja', method: 'baidu' })
+  })
+
+  it('flushes edited translation history before restore and unmount, keeps copy current, and reopens the edit', async () => {
+    const writes: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (text: string) => { writes.push(text); return Promise.resolve() } },
+    })
+    localStorage.setItem('screenpilot:translator-history', JSON.stringify([{
+      id: 'editable-translation',
+      input: 'source to edit',
+      output: 'model output',
+      schemaVersion: 1,
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-CN',
+      method: 'microsoft',
+      model: null,
+      updatedAt: Date.now(),
+    }]))
+    const desktop = new RecordingDesktop()
+    const view = render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const historyButton = screen.getByRole('button', { name: '翻译历史' })
+    fireEvent.click(historyButton)
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '翻译历史' })))
+    const output = screen.getByRole('textbox', { name: '译文' })
+    fireEvent.change(output, { target: { value: 'edited output' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '复制译文' }))
+      await Promise.resolve()
+    })
+    expect(writes).toEqual(['edited output'])
+    fireEvent.click(historyButton)
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '翻译历史' })))
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('edited output')
+    fireEvent.change(screen.getByRole('textbox', { name: '译文' }), { target: { value: 'edited again' } })
+    view.unmount()
+    expect(localStorage.getItem('screenpilot:translator-history')).toContain('edited again')
+    expect(desktop.translations).toHaveLength(0)
+
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译历史' }))
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '翻译历史' })))
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('edited again')
+  })
+
+  it('shows and retries a failed edited translation history save', async () => {
+    localStorage.setItem('screenpilot:translator-history', JSON.stringify([{
+      id: 'failed-translation-edit',
+      input: 'source',
+      output: 'before edit',
+      schemaVersion: 1,
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-CN',
+      method: 'microsoft',
+      model: null,
+      updatedAt: Date.now(),
+    }]))
+    const desktop = new RecordingDesktop()
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('synthetic quota', 'QuotaExceededError')
+    })
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译历史' }))
+    fireEvent.click(getHistoryRestore(screen.getByRole('dialog', { name: '翻译历史' })))
+    const output = screen.getByRole('textbox', { name: '译文' })
+    fireEvent.change(output, { target: { value: 'failed edit' } })
+    fireEvent.blur(output)
+    await act(async () => Promise.resolve())
+    expect(screen.getByRole('alert')).toHaveTextContent('当前会话可用，历史未保存')
+    setItem.mockRestore()
+    fireEvent.click(screen.getByRole('button', { name: '重试保存历史' }))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(localStorage.getItem('screenpilot:translator-history')).toContain('failed edit')
   })
 
   it('submits an explicit source language and retranslates immediately', async () => {
@@ -876,6 +1117,7 @@ describe('TranslatorPage', () => {
       id: 'provider-before-translator-load',
       name: 'Initial provider',
       baseUrl: 'https://initial.example.com/v1',
+      protocol: 'responses' as const,
       keyCount: 1,
       availableModels: ['initial-model'],
       enabledModels: ['initial-model'],
@@ -896,6 +1138,7 @@ describe('TranslatorPage', () => {
       id: 'provider-after-translator-load',
       name: 'Latest provider',
       baseUrl: 'https://example.com/v1',
+      protocol: 'responses' as const,
       keyCount: 1,
       availableModels: ['latest-model'],
       enabledModels: ['latest-model'],
@@ -1004,6 +1247,29 @@ describe('TranslatorPage', () => {
     })
     expect(screen.getByRole('alert')).toHaveTextContent('Error: synthetic hide failure')
     expect(desktop.hides).toBe(1)
+  })
+
+  it('keeps delayed auto-paste cancellation visible when a translated result is present', async () => {
+    vi.useFakeTimers()
+    const desktop = new RejectingTranslatorDesktop()
+    render(<DesktopProvider port={desktop}><TranslatorPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    const input = screen.getByRole('textbox', { name: '原文' })
+    fireEvent.change(input, { target: { value: 'source for guarded paste' } })
+    await act(async () => {
+      vi.advanceTimersByTime(TRANSLATOR_INPUT_DEBOUNCE_MS)
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('textbox', { name: '译文' })).toHaveValue('translated:source for guarded paste')
+
+    desktop.rejectCommit = true
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Error: synthetic commit failure')
   })
 
   it('retries only a failed translator listener and keeps the successful listener active', async () => {

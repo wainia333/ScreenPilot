@@ -3,6 +3,10 @@ export type HistoryItem = {
   updatedAt: number
 }
 
+export type HistorySaveResult<T extends HistoryItem> =
+  | { ok: true; history: T[]; persistedHistory: T[] }
+  | { ok: false; history: T[]; persistedHistory: T[]; error: unknown }
+
 export function loadHistory<T extends HistoryItem>(
   storage: Pick<Storage, 'getItem'>,
   key: string,
@@ -23,14 +27,20 @@ export function saveHistory<T extends HistoryItem>(
   storage: Pick<Storage, 'setItem'>,
   key: string,
   items: T[],
-): T[] {
+  persistedItems: T[] = [],
+): HistorySaveResult<T> {
   const limited = [...items].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, 20)
   try {
     storage.setItem(key, JSON.stringify(limited))
-  } catch {
-    return limited
+  } catch (error) {
+    return {
+      ok: false,
+      history: limited,
+      persistedHistory: [...persistedItems],
+      error,
+    }
   }
-  return limited
+  return { ok: true, history: limited, persistedHistory: limited }
 }
 
 export function upsertHistory<T extends HistoryItem>(items: T[], next: T): T[] {

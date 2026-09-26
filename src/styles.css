@@ -15,7 +15,7 @@
   --sp-surface: #ffffff;
   --sp-surface-raised: #ffffff;
   --sp-text: #202326;
-  --sp-text-muted: #6a7075;
+  --sp-text-muted: #5f666b;
   --sp-border: #dcd9d5;
   --sp-border-strong: #c9c5c0;
   --sp-panel-edge: rgb(0 0 0 / 18%);
@@ -177,6 +177,40 @@ select:focus-visible {
   border: 1px solid var(--sp-panel-edge);
   border-radius: 14px;
   box-shadow: var(--sp-window-frame-shadow);
+}
+
+/* The browser fallback is a UI preview only. Keep the notice compact and
+   click-through so it identifies the environment without blocking controls. */
+.browser-preview-badge {
+  position: fixed;
+  z-index: 1000;
+  top: 6px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: calc(100vw - 12px);
+  padding: 3px 8px;
+  transform: translateX(-50%);
+  border: 1px solid color-mix(in srgb, var(--sp-warning) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sp-surface) 90%, var(--sp-warning));
+  color: var(--sp-text-muted);
+  box-shadow: 0 2px 8px rgb(40 32 28 / 12%);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.browser-preview-badge span:first-child {
+  /* Keep the compact Demo label above the normal-text contrast threshold in
+     both light and dark preview themes. */
+  color: var(--sp-text);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .settings-sidebar {
@@ -881,6 +915,16 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.adapter-credential-state {
+  grid-column: 2;
+  color: var(--sp-text-muted);
+  font-size: 10px;
+}
+
+.adapter-credential-state[data-configured="true"] {
+  color: var(--sp-success);
+}
+
 .about-identity {
   display: flex;
   align-items: center;
@@ -1049,11 +1093,44 @@ select:focus-visible {
   line-height: 1.5;
 }
 
-.decision-dialog > div {
+.decision-dialog > div:not(.close-dialog-error) {
   display: flex;
   justify-content: flex-end;
   gap: 7px;
   flex-wrap: wrap;
+}
+
+.close-dialog-error {
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--sp-error) 42%, var(--sp-border-strong));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sp-error) 10%, transparent);
+  color: var(--sp-error);
+  outline: none;
+}
+
+.close-dialog-error:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sp-error) 32%, transparent);
+}
+
+.close-dialog-error strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.close-dialog-error p {
+  margin: 0 0 7px;
+  color: inherit;
+}
+
+.close-dialog-error ul {
+  margin: 0 0 9px;
+  padding-left: 18px;
+}
+
+.close-dialog-error .text-button {
+  color: inherit;
 }
 
 .load-state,

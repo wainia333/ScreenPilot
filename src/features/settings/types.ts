@@ -26,10 +26,14 @@ export type ModelSelection = {
   model: string
 }
 
+export type ProviderProtocol = 'chatCompletions' | 'responses'
+
 export type ProviderSettings = {
   id: string
   name: string
   baseUrl: string
+  /** Optional while reading pre-protocol settings; sanitization supplies the default. */
+  protocol?: ProviderProtocol
   keyCount: number
   availableModels: string[]
   enabledModels: string[]

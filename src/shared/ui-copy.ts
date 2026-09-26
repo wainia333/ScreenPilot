@@ -1,4 +1,11 @@
-import type { InterfaceLanguage, TranslationLanguage, TranslationMethod } from '../features/settings/types'
+import type {
+  AppSettings,
+  InterfaceLanguage,
+  ModelSelection,
+  OcrMethod,
+  TranslationLanguage,
+  TranslationMethod,
+} from '../features/settings/types'
 
 const zh = {
   unknownError: '未知错误',
@@ -49,6 +56,8 @@ const zh = {
   settingsLoadFailed: '无法加载设置',
   settingsLoading: '正在加载设置',
   settingsSaved: '设置已保存并立即生效',
+  settingsConflict: '其他窗口刚刚修改了设置，请取消后检查最新值再重试。',
+  settingsValidationFailed: '设置校验失败',
   settingsLoadedPendingSave: '配置已载入，保存后才会应用',
   settingsExported: '配置已导出',
   directoryPickFailed: '选择目录失败',
@@ -57,9 +66,13 @@ const zh = {
   saveFailed: '保存失败',
   credentialSaveFailed: '凭据保存失败',
   settingsRollbackFailed: '设置回滚失败',
+  returnToEdit: '返回编辑并定位问题',
   closeAfterSavingTitle: '保存更改后关闭？',
   closeAfterSavingBody: '未保存的设置不会生效。',
   saveAndClose: '保存并关闭',
+  navigateAfterSavingTitle: '保存更改后切换页面？',
+  navigateAfterSavingBody: '未保存的设置不会生效，确认后将切换到目标页面。',
+  saveAndNavigate: '保存并切换',
   discardChanges: '放弃更改',
   continueEditing: '继续编辑',
   importOverwriteTitle: '覆盖当前未保存内容？',
@@ -78,6 +91,7 @@ const zh = {
   launchAsAdministrator: '管理员身份',
   launchAsAdministratorDescription: '保存时 Windows 会请求 UAC 确认；开机启动时将以管理员权限运行',
   screenshotArchive: '截图自动归档',
+  archiveDataFlowDescription: '仅控制截图是否写入所选本地归档目录，不影响发送给所选 OCR、翻译或 AI 服务。',
   archiveDirectory: '归档目录',
   archiveDirectoryRequired: '启用截图自动归档前，请先选择归档目录',
   chooseDirectory: '选择目录',
@@ -97,6 +111,8 @@ const zh = {
   aiModel: 'AI 模型',
   textTranslationAiModel: '文本翻译 AI 模型',
   translationInterface: '翻译接口',
+  textTranslationDataFlow: '输入文字会发送给所选翻译服务：{destination}。',
+  aiTextTranslationDataFlow: '输入文字和翻译提示词会发送给所选模型提供商：{destination}。',
   aiTranslationSystemPrompt: '大模型翻译系统提示词',
   enableScreenshotTranslation: '启用OCR翻译',
   screenshotTargetLanguage: 'OCR翻译目标语言',
@@ -104,11 +120,15 @@ const zh = {
   enableAiOcr: '开启大模型 OCR',
   ocrModel: 'OCR 模型',
   ocrInterface: 'OCR 接口',
+  ocrDataFlow: '截图会发送给所选 OCR 服务：{destination}。',
+  aiOcrDataFlow: '截图和 OCR 提示词会发送给所选模型提供商：{destination}。',
   aiVisionOcr: 'AI 视觉 OCR',
   baiduOcr: '百度 OCR',
   chaoxingOcr: '学习通 OCR',
   screenshotTranslationModel: 'OCR翻译模型',
   screenshotTranslationInterface: 'OCR翻译接口',
+  screenshotTranslationDataFlow: '识别文字会发送给所选翻译服务：{destination}。',
+  aiScreenshotTranslationDataFlow: '识别文字和 OCR 翻译提示词会发送给所选模型提供商：{destination}。',
   translationModel: '翻译模型',
   showRecognizedSource: '显示识别原文',
   streamingOutput: '流式输出',
@@ -120,7 +140,12 @@ const zh = {
   screenshotTranslationPrompt: 'OCR翻译提示词',
   credentialGroup: '接口凭据',
   credentialSaved: '凭据已安全保存',
+  credentialNotConfigured: '尚未配置',
+  credentialClearPending: '清除待保存',
+  clearCredentials: '清除凭据',
+  configureCredentials: '配置接口凭据',
   credentialRequired: '请完整填写凭据后再保存',
+  dataFlowDisabled: '已关闭，不会发送相关内容。',
   visionQa: 'Vision 问答',
   enableVision: '启用 Vision',
   responseLanguage: '回答语言',
@@ -153,6 +178,7 @@ const zh = {
   exportIncludesApiKeys: '导出包含 API Key',
   exportConfiguration: '导出配置',
   importConfiguration: '导入配置',
+  acknowledgementsDescription: '此项目在开发过程中参考了一些非常优秀的项目：',
   localOnlyFootnote: 'ScreenPilot 在本机处理设置与历史元数据，不提供账号或云端同步。',
   providersTitle: '模型提供商',
   providersDescription: '密钥保存在 Windows 凭据管理器，不写入设置文件。',
@@ -163,12 +189,18 @@ const zh = {
   name: '名称',
   providerName: '提供商名称',
   providerBaseUrl: '提供商 Base URL',
+  providerProtocol: '接口协议',
+  responsesProtocol: 'Responses',
+  chatCompletionsProtocol: 'Chat Completions',
   oneKeyPerLine: '每行一个密钥',
   fetchModels: '拉取模型',
+  fetchingModels: '拉取中…',
   modelsFetched: '获取到 {count} 个模型',
   connectionSucceeded: '连接成功',
   connectionFailed: '连接失败',
-  testConnection: '测试连接',
+  testConnection: '模型列表连接检查',
+  testingConnection: '检查中…',
+  providerRequestTimeout: '请求超时，请稍后重试。',
   deleteProvider: '删除 {name}',
   manualModelName: '{name} 手动模型名',
   manualModelPlaceholder: '手动添加模型，例如 local:vision',
@@ -178,8 +210,20 @@ const zh = {
   translatorTitle: '文本翻译',
   translating: '翻译中…',
   submitShortcut: 'Ctrl+Enter 提交',
+  retryTranslation: '重试翻译',
+  reloadSettings: '重新加载设置',
+  reloadingSettings: '重新加载设置…',
+  translationErrorDetails: '技术详情',
+  translationErrorUnconfigured: '翻译接口尚未配置完整，请检查设置和凭据。',
+  translationErrorNetwork: '网络连接失败，请检查网络后重试。',
+  translationErrorAuthentication: '接口认证失败，请检查凭据是否正确。',
+  translationErrorCancelled: '翻译已取消，可以重新尝试。',
+  translationErrorUnknown: '翻译失败，请重试。',
   waitingForInput: '等待输入',
   translationHistory: '翻译历史',
+  translationHistoryContext: '历史参数',
+  translationLanguageUnknown: '语言信息未知',
+  translationModelUnknown: '模型信息未知',
   closeTranslator: '关闭翻译',
   originalText: '原文',
   translatorInputPlaceholder: '输入或通过 F2 获取当前选中文本',
@@ -203,6 +247,8 @@ const zh = {
   optimizationResultPlaceholder: '优化结果可在此编辑',
   historyCount: '历史记录：{count} 条',
   historyEmpty: '暂无历史记录',
+  historyNotSaved: '当前会话可用，历史未保存',
+  retryHistory: '重试保存历史',
   deleteHistory: '删除历史',
   clearHistory: '清空',
   justNow: '刚刚',
@@ -212,6 +258,8 @@ const zh = {
   copyCode: '复制代码',
   send: '发送',
   translationFailed: '翻译失败',
+  translationPreviousResult: '上次译文（当前翻译失败）',
+  languageSaveFailed: '语言设置保存失败，已恢复上次保存的选项',
   translatingToTarget: '正在按目标语言翻译…',
   duplicateProviderId: 'Provider ID 必须唯一',
   providerHttpsRequired: 'Provider URL 必须使用 HTTPS（本机地址除外）',
@@ -271,6 +319,8 @@ const en: UiCopy = {
   settingsLoadFailed: 'Unable to load settings',
   settingsLoading: 'Loading settings',
   settingsSaved: 'Settings saved and applied',
+  settingsConflict: 'Another window changed these settings. Cancel, review the latest values, and try again.',
+  settingsValidationFailed: 'Settings validation failed',
   settingsLoadedPendingSave: 'Configuration loaded; save to apply it',
   settingsExported: 'Configuration exported',
   directoryPickFailed: 'Unable to choose directory',
@@ -279,9 +329,13 @@ const en: UiCopy = {
   saveFailed: 'Save failed',
   credentialSaveFailed: 'Credential save failed',
   settingsRollbackFailed: 'Settings rollback failed',
+  returnToEdit: 'Return to editing and fix this issue',
   closeAfterSavingTitle: 'Save changes before closing?',
   closeAfterSavingBody: 'Unsaved settings will not take effect.',
   saveAndClose: 'Save & close',
+  navigateAfterSavingTitle: 'Save changes before navigating?',
+  navigateAfterSavingBody: 'Unsaved settings will not take effect. Continue to the requested page after saving.',
+  saveAndNavigate: 'Save & navigate',
   discardChanges: 'Discard changes',
   continueEditing: 'Continue editing',
   importOverwriteTitle: 'Replace unsaved changes?',
@@ -300,6 +354,7 @@ const en: UiCopy = {
   launchAsAdministrator: 'Administrator identity',
   launchAsAdministratorDescription: 'Windows requests UAC confirmation when saving; startup will use administrator privileges',
   screenshotArchive: 'Auto-archive screenshots',
+  archiveDataFlowDescription: 'Only controls whether screenshots are written to the selected local archive directory; it does not change network sending to OCR, translation, or AI services.',
   archiveDirectory: 'Archive directory',
   archiveDirectoryRequired: 'Choose an archive directory before enabling screenshot auto-archive',
   chooseDirectory: 'Choose directory',
@@ -319,6 +374,8 @@ const en: UiCopy = {
   aiModel: 'AI model',
   textTranslationAiModel: 'Text translation AI model',
   translationInterface: 'Translation service',
+  textTranslationDataFlow: 'Input text is sent to the selected translation service: {destination}.',
+  aiTextTranslationDataFlow: 'Input text and the translation prompt are sent to the selected model provider: {destination}.',
   aiTranslationSystemPrompt: 'AI translation system prompt',
   enableScreenshotTranslation: 'Enable OCR translation',
   screenshotTargetLanguage: 'OCR translation target language',
@@ -326,11 +383,15 @@ const en: UiCopy = {
   enableAiOcr: 'Enable AI OCR',
   ocrModel: 'OCR model',
   ocrInterface: 'OCR service',
+  ocrDataFlow: 'Screenshots are sent to the selected OCR service: {destination}.',
+  aiOcrDataFlow: 'Screenshots and the OCR prompt are sent to the selected model provider: {destination}.',
   aiVisionOcr: 'AI vision OCR',
   baiduOcr: 'Baidu OCR',
   chaoxingOcr: 'Chaoxing OCR',
   screenshotTranslationModel: 'OCR translation model',
   screenshotTranslationInterface: 'OCR translation service',
+  screenshotTranslationDataFlow: 'Recognized text is sent to the selected translation service: {destination}.',
+  aiScreenshotTranslationDataFlow: 'Recognized text and the OCR translation prompt are sent to the selected model provider: {destination}.',
   translationModel: 'Translation model',
   showRecognizedSource: 'Show recognized source',
   streamingOutput: 'Streaming output',
@@ -342,7 +403,12 @@ const en: UiCopy = {
   screenshotTranslationPrompt: 'OCR translation prompt',
   credentialGroup: 'Service credentials',
   credentialSaved: 'Credentials saved securely',
+  credentialNotConfigured: 'Not configured',
+  credentialClearPending: 'Clear on save',
+  clearCredentials: 'Clear credentials',
+  configureCredentials: 'Configure service credentials',
   credentialRequired: 'Complete every credential field before saving',
+  dataFlowDisabled: 'Disabled; related content is not sent.',
   visionQa: 'Vision Q&A',
   enableVision: 'Enable Vision',
   responseLanguage: 'Response language',
@@ -375,6 +441,7 @@ const en: UiCopy = {
   exportIncludesApiKeys: 'Export API keys',
   exportConfiguration: 'Export configuration',
   importConfiguration: 'Import configuration',
+  acknowledgementsDescription: 'This project references several excellent projects during development:',
   localOnlyFootnote: 'ScreenPilot stores settings and history metadata locally and has no account or cloud sync.',
   providersTitle: 'Model providers',
   providersDescription: 'Keys are stored in Windows Credential Manager, not in the settings file.',
@@ -385,12 +452,18 @@ const en: UiCopy = {
   name: 'Name',
   providerName: 'Provider name',
   providerBaseUrl: 'Provider Base URL',
+  providerProtocol: 'API protocol',
+  responsesProtocol: 'Responses',
+  chatCompletionsProtocol: 'Chat Completions',
   oneKeyPerLine: 'One key per line',
   fetchModels: 'Fetch models',
+  fetchingModels: 'Fetching models…',
   modelsFetched: 'Fetched {count} models',
   connectionSucceeded: 'Connection succeeded',
   connectionFailed: 'Connection failed',
-  testConnection: 'Test connection',
+  testConnection: 'Model list connection check',
+  testingConnection: 'Checking connection…',
+  providerRequestTimeout: 'The request timed out. Try again.',
   deleteProvider: 'Delete {name}',
   manualModelName: '{name} manual model name',
   manualModelPlaceholder: 'Add a model manually, e.g. local:vision',
@@ -400,8 +473,20 @@ const en: UiCopy = {
   translatorTitle: 'Text Translation',
   translating: 'Translating…',
   submitShortcut: 'Ctrl+Enter to submit',
+  retryTranslation: 'Retry translation',
+  reloadSettings: 'Reload settings',
+  reloadingSettings: 'Reloading settings…',
+  translationErrorDetails: 'Technical details',
+  translationErrorUnconfigured: 'The translation service is not fully configured. Check settings and credentials.',
+  translationErrorNetwork: 'The network request failed. Check your connection and try again.',
+  translationErrorAuthentication: 'The service rejected the credentials. Check the configured credentials.',
+  translationErrorCancelled: 'The translation was cancelled. You can try again.',
+  translationErrorUnknown: 'Translation failed. Try again.',
   waitingForInput: 'Waiting for input',
   translationHistory: 'Translation history',
+  translationHistoryContext: 'History parameters',
+  translationLanguageUnknown: 'Language information unknown',
+  translationModelUnknown: 'Model information unknown',
   closeTranslator: 'Close translation',
   originalText: 'Original',
   translatorInputPlaceholder: 'Type text or press F2 to capture the current selection',
@@ -425,6 +510,8 @@ const en: UiCopy = {
   optimizationResultPlaceholder: 'The optimized result can be edited here',
   historyCount: '{count} history items',
   historyEmpty: 'No history yet',
+  historyNotSaved: 'This session is available, but history was not saved',
+  retryHistory: 'Retry history save',
   deleteHistory: 'Delete history item',
   clearHistory: 'Clear',
   justNow: 'Just now',
@@ -434,6 +521,8 @@ const en: UiCopy = {
   copyCode: 'Copy code',
   send: 'Send',
   translationFailed: 'Translation failed',
+  translationPreviousResult: 'Previous translation (current translation failed)',
+  languageSaveFailed: 'Language settings could not be saved; the last saved values were restored',
   translatingToTarget: 'Translating to the target language…',
   duplicateProviderId: 'Provider IDs must be unique',
   providerHttpsRequired: 'Provider URLs must use HTTPS (except local addresses)',
@@ -446,6 +535,61 @@ export const uiCopy: Record<InterfaceLanguage, UiCopy> = { zh, en }
 
 export function copyFor(language: InterfaceLanguage | undefined): UiCopy {
   return uiCopy[language ?? 'zh']
+}
+
+/**
+ * Returns the configured destination for an AI model without exposing any
+ * credential material. The configured Base URL is the same endpoint family
+ * used by the native request path, so the settings explanation stays tied to
+ * the actual provider selection.
+ */
+export function modelProviderDestination(
+  settings: AppSettings,
+  selection: ModelSelection | null,
+): string | null {
+  if (selection === null) return null
+  const provider = settings.providers.find((candidate) => candidate.id === selection.providerId)
+  if (provider === undefined || provider.baseUrl.trim().length === 0) return null
+  const name = provider.name.trim() || provider.id
+  return `${name} · ${provider.baseUrl.trim()}`
+}
+
+export function ocrServiceDestination(settings: AppSettings, method: OcrMethod): string | null {
+  switch (method) {
+    case 'ai':
+      return modelProviderDestination(settings, settings.screenshotTranslation.ocrModel)
+    case 'baidu':
+      return 'aip.baidubce.com'
+    case 'chaoxing':
+      return 'ai.chaoxing.com'
+    case 'system':
+      return '本机系统 OCR'
+  }
+}
+
+export function translationServiceDestination(
+  settings: AppSettings,
+  method: TranslationMethod,
+  model: ModelSelection | null,
+): string | null {
+  switch (method) {
+    case 'ai':
+      return modelProviderDestination(settings, model)
+    case 'baidu':
+      return 'fanyi-api.baidu.com'
+    case 'google':
+      return 'translate.google.com / translate.googleapis.com'
+    case 'tencent':
+      return 'tmt.tencentcloudapi.com'
+    case 'bing':
+    case 'bing2':
+    case 'microsoft':
+      return 'edge.microsoft.com'
+    case 'yandex':
+      return 'translate.yandex.net'
+    case 'caiyun2':
+      return 'api.interpreter.caiyunai.com'
+  }
 }
 
 export function formatCopy(template: string, values: Record<string, string | number>): string {

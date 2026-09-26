@@ -397,6 +397,42 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
   white-space: pre-wrap;
 }
 
+.screenpilot-target-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.screenpilot-target-action {
+  align-items: center;
+  border-radius: 6px;
+  color: rgb(163 163 163);
+  cursor: pointer;
+  display: inline-flex;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
+}
+
+.screenpilot-target-action:hover:not(:disabled),
+.screenpilot-target-action:focus-visible:not(:disabled) {
+  background: rgb(0 0 0 / 5%);
+  color: rgb(64 64 64);
+}
+
+.screenpilot-target-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.screenpilot-target-result-stale {
+  color: rgb(115 115 115);
+  font-size: 11px;
+  line-height: 18px;
+  margin-bottom: 4px;
+}
+
 [data-screenpilot-target-result="true"]:empty {
   display: none;
 }
@@ -459,5 +495,15 @@ main[data-screenpilot-vision-adapter="true"] select:focus-visible {
 
   .screenpilot-target-result {
     color: rgb(229 229 229);
+  }
+
+  .screenpilot-target-action:hover:not(:disabled),
+  .screenpilot-target-action:focus-visible:not(:disabled) {
+    background: rgb(255 255 255 / 8%);
+    color: rgb(229 229 229);
+  }
+
+  .screenpilot-target-result-stale {
+    color: rgb(163 163 163);
   }
 }

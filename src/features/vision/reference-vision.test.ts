@@ -5,8 +5,8 @@ import { safeExternalUrl } from './citation-links'
 
 const adapterStyles = readFileSync(resolve(process.cwd(), 'src/features/vision/vision-adapter.css'), 'utf8')
 const adapterSource = readFileSync(resolve(process.cwd(), 'src/features/vision/reference-vision.tsx'), 'utf8')
-const visionSource = readFileSync(resolve(process.cwd(), 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
-const visionStyles = readFileSync(resolve(process.cwd(), 'src/vendor/kivio-screenshot/index.css'), 'utf8')
+const visionSource = readFileSync(resolve(process.cwd(), 'src/vendor/screenshot/Vision.tsx'), 'utf8')
+const visionStyles = readFileSync(resolve(process.cwd(), 'src/vendor/screenshot/index.css'), 'utf8')
 const adapterStyleElement = document.createElement('style')
 adapterStyleElement.textContent = adapterStyles
 document.head.append(adapterStyleElement)

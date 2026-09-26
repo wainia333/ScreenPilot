@@ -1,18 +1,36 @@
 import { PromptField, PromptResetButton, SelectField, SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { ModelField } from '../model-options'
 import { AdapterCredentials } from '../adapter-credentials'
+import type { AdapterCredentialCounts, AdapterCredentialDrafts, AdapterCredentialId } from '../adapter-credential-specs'
 import { translationMethodOptions } from '../translation-methods'
 import type { AppSettings, OcrMethod, ThinkingEffort } from '../types'
 import { DEFAULT_SETTINGS } from '../defaults'
 import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
-import { copyFor, translationLanguageOptions, translationMethodLabel } from '../../../shared/ui-copy'
+import {
+  copyFor,
+  formatCopy,
+  ocrServiceDestination,
+  translationLanguageOptions,
+  translationMethodLabel,
+  translationServiceDestination,
+} from '../../../shared/ui-copy'
 
 export function ScreenshotSection({
   settings,
   onChange,
+  adapterCredentialDrafts,
+  adapterCredentialCounts,
+  onAdapterCredentialDraftChange,
+  onAdapterCredentialClear,
+  saving = false,
 }: {
   settings: AppSettings
   onChange: (settings: AppSettings) => void
+  adapterCredentialDrafts: AdapterCredentialDrafts
+  adapterCredentialCounts: AdapterCredentialCounts
+  onAdapterCredentialDraftChange: (adapterId: AdapterCredentialId, value: string) => void
+  onAdapterCredentialClear: (adapterId: AdapterCredentialId) => void
+  saving?: boolean
 }) {
   const t = copyFor(settings.language)
   const current = settings.screenshotTranslation
@@ -31,6 +49,21 @@ export function ScreenshotSection({
   const methods = translationMethodOptions
     .filter((option) => option.value !== 'ai' || canUseTranslationAi)
     .map((option) => ({ ...option, label: translationMethodLabel(option.value, settings.language) }))
+  const ocrDestination = ocrServiceDestination(settings, ocrMethod) ?? t.noSelection
+  const translationDestination = translationServiceDestination(
+    settings,
+    translationMethod,
+    current.translationModel,
+  ) ?? t.noSelection
+  const ocrDataFlowDescription = current.enabled
+    ? formatCopy(ocrMethod === 'ai' ? t.aiOcrDataFlow : t.ocrDataFlow, { destination: ocrDestination })
+    : t.dataFlowDisabled
+  const translationDataFlowDescription = current.enabled
+    ? formatCopy(
+      translationMethod === 'ai' ? t.aiScreenshotTranslationDataFlow : t.screenshotTranslationDataFlow,
+      { destination: translationDestination },
+    )
+    : t.dataFlowDisabled
   return (
     <>
       <SettingGroup title={t.screenshotTranslation}>
@@ -71,7 +104,7 @@ export function ScreenshotSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.ocrInterface}>
+        <SettingRow label={t.ocrInterface} description={ocrDataFlowDescription}>
           <SelectField<OcrMethod>
             value={ocrMethod}
             label={t.ocrInterface}
@@ -101,7 +134,7 @@ export function ScreenshotSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.translationInterface}>
+        <SettingRow label={t.translationInterface} description={translationDataFlowDescription}>
           <SelectField
             value={translationMethod}
             label={t.screenshotTranslationInterface}
@@ -170,7 +203,14 @@ export function ScreenshotSection({
           onChange={(translationPrompt) => update({ translationPrompt })}
         />
       </SettingGroup>
-      <AdapterCredentials language={settings.language} />
+      <AdapterCredentials
+        language={settings.language}
+        drafts={adapterCredentialDrafts}
+        configuredCounts={adapterCredentialCounts}
+        disabled={saving}
+        onDraftChange={onAdapterCredentialDraftChange}
+        onClear={onAdapterCredentialClear}
+      />
     </>
   )
 }

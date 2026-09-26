@@ -1,4 +1,6 @@
+use crate::application::state::TranslatorPasteTarget;
 use arboard::Clipboard;
+use std::ffi::c_void;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{w, Interface};
@@ -31,7 +33,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+    HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
 const SELECTION_LIMIT: usize = 200_000;
@@ -80,6 +83,56 @@ pub fn selected_text(clipboard_fallback: bool) -> String {
         clipboard_fallback,
         selected_text_clipboard,
     )
+}
+
+/// Capture the foreground window identity before ScreenPilot shows the
+/// translator.  The process id protects against a recycled HWND being
+/// mistaken for the original target.
+pub fn foreground_paste_target() -> Option<TranslatorPasteTarget> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut process_id = 0;
+        if GetWindowThreadProcessId(hwnd, Some(&mut process_id)) == 0 || process_id == 0 {
+            return None;
+        }
+        Some(TranslatorPasteTarget {
+            hwnd: hwnd.0 as isize,
+            process_id,
+        })
+    }
+}
+
+/// Check that the original target still denotes a live window owned by the
+/// same process.  This deliberately does not activate or focus the window.
+pub fn paste_target_is_valid(target: TranslatorPasteTarget) -> bool {
+    let hwnd = hwnd_from_paste_target(target);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id)) != 0
+            && process_id == target.process_id
+    }
+}
+
+/// Read the foreground identity at the point where delayed input would be
+/// injected.  No focus changes are performed here.
+pub fn current_foreground_paste_target() -> Option<TranslatorPasteTarget> {
+    foreground_paste_target()
+}
+
+/// Read the Win32 clipboard sequence number.  A missing/zero value is not a
+/// safe basis for delayed input and is therefore represented as `None`.
+pub fn current_clipboard_sequence() -> Option<u32> {
+    clipboard_sequence()
+}
+
+fn hwnd_from_paste_target(target: TranslatorPasteTarget) -> HWND {
+    HWND(target.hwnd as *mut c_void)
 }
 
 fn resolve_selection(

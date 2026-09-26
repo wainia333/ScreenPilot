@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'line',
   use: {
-    baseURL: 'http://127.0.0.1:5713',
+    baseURL: 'http://127.0.0.1:1420',
     colorScheme: 'light',
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
@@ -26,7 +26,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'npm run dev:ui',
-    url: 'http://127.0.0.1:5713',
+    url: 'http://127.0.0.1:1420',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

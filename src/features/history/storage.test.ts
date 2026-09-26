@@ -15,13 +15,15 @@ describe('history storage', () => {
     expect(loadHistory({ getItem: () => '{"item":true}' }, 'test', valid)).toEqual([])
     expect(loadHistory({ getItem: () => '{bad' }, 'test', valid)).toEqual([])
     const item = { id: 'one', updatedAt: 1, text: 'safe' }
-    expect(
-      saveHistory(
-        { setItem: () => { throw new DOMException('quota') } },
-        'test',
-        [item],
-      ),
-    ).toEqual([item])
+    const result = saveHistory(
+      { setItem: () => { throw new DOMException('quota') } },
+      'test',
+      [item],
+      [],
+    )
+    expect(result.ok).toBe(false)
+    expect(result.history).toEqual([item])
+    expect(result.persistedHistory).toEqual([])
   })
 
   it('persists sorted valid history when storage is available', () => {
@@ -30,7 +32,10 @@ describe('history storage', () => {
       { id: 'old', updatedAt: 1, text: 'old' },
       { id: 'new', updatedAt: 2, text: 'new' },
     ]
-    expect(saveHistory({ setItem: (_key, value) => { saved = value } }, 'test', items)[0]?.id).toBe('new')
+    const result = saveHistory({ setItem: (_key, value) => { saved = value } }, 'test', items)
+    expect(result.ok).toBe(true)
+    expect(result.history[0]?.id).toBe('new')
+    expect(result.persistedHistory[0]?.id).toBe('new')
     expect(JSON.parse(saved)).toEqual([items[1], items[0]])
   })
 

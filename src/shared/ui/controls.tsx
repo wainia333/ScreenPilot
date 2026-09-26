@@ -113,6 +113,7 @@ export function TextField({
   placeholder,
   type = 'text',
   disabled = false,
+  issuePath,
   onChange,
 }: {
   value: string
@@ -120,6 +121,7 @@ export function TextField({
   placeholder?: string
   type?: 'text' | 'password' | 'url'
   disabled?: boolean
+  issuePath?: string
   onChange: (value: string) => void
 }) {
   return (
@@ -128,6 +130,7 @@ export function TextField({
       value={value}
       type={type}
       disabled={disabled}
+      data-settings-issue-path={issuePath}
       aria-label={label}
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}

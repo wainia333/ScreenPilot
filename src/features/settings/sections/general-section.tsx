@@ -96,7 +96,7 @@ export function GeneralSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.screenshotArchive}>
+        <SettingRow label={t.screenshotArchive} description={t.archiveDataFlowDescription}>
           <Toggle
             checked={settings.general.imageArchiveEnabled}
             label={t.screenshotArchive}
@@ -108,6 +108,7 @@ export function GeneralSection({
             <button
               type="button"
               className="path-button"
+              data-settings-issue-path="general.imageArchivePath"
               disabled={pickDirectoryDisabled}
               aria-busy={pickingDirectory}
               onClick={onPickDirectory}
@@ -124,6 +125,7 @@ export function GeneralSection({
             value={settings.shortcuts.translator}
             label={t.recordTextTranslationShortcut}
             recordingLabel={t.pressShortcut}
+            issuePath="shortcuts.translator"
             onChange={(value) => updateShortcut('translator', value)}
           />
         </SettingRow>
@@ -132,6 +134,7 @@ export function GeneralSection({
             value={settings.shortcuts.vision}
             label={t.recordVisionShortcut}
             recordingLabel={t.pressShortcut}
+            issuePath="shortcuts.vision"
             onChange={(value) => updateShortcut('vision', value)}
           />
         </SettingRow>
@@ -140,6 +143,7 @@ export function GeneralSection({
             value={settings.shortcuts.screenshotTranslation}
             label={t.recordScreenshotShortcut}
             recordingLabel={t.pressShortcut}
+            issuePath="shortcuts.screenshotTranslation"
             onChange={(value) => updateShortcut('screenshotTranslation', value)}
           />
         </SettingRow>
@@ -148,6 +152,7 @@ export function GeneralSection({
             value={settings.shortcuts.promptOptimizer}
             label={t.recordOptimizerShortcut}
             recordingLabel={t.pressShortcut}
+            issuePath="shortcuts.promptOptimizer"
             onChange={(value) => updateShortcut('promptOptimizer', value)}
           />
         </SettingRow>

@@ -1,11 +1,11 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DesktopProvider } from '../../desktop/context'
 import { FakeDesktopPort } from '../../desktop/fake-desktop'
 import { observedDragRejection } from '../../shared/testing/observed-drag-rejection'
 import { DEFAULT_SETTINGS } from './defaults'
 import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from './types'
-import type { SettingsSaveResult } from '../../desktop/contract'
+import type { MainNavigationRequest, SettingsPatch, SettingsSaveResult } from '../../desktop/contract'
 import { SettingsPage } from './settings-page'
 import { primaryProviderKeyDraft } from './provider-key-draft'
 
@@ -47,6 +47,20 @@ class FailingSettingsDesktop extends ClosingDesktop {
 class FailingSaveDesktop extends ClosingDesktop {
   override saveSettings(): Promise<SettingsSaveResult> {
     return Promise.reject(new Error('synthetic save failure'))
+  }
+}
+
+class CredentialRollbackFailureDesktop extends ClosingDesktop {
+  patchCalls = 0
+
+  override saveSettingsPatch(baseRevision: number, patch: SettingsPatch): Promise<SettingsSaveResult> {
+    this.patchCalls += 1
+    if (this.patchCalls >= 2) return Promise.reject(new Error('synthetic rollback failure'))
+    return super.saveSettingsPatch(baseRevision, patch)
+  }
+
+  override saveAdapterKeyChanges(): Promise<void> {
+    return Promise.reject(new Error('synthetic credential failure'))
   }
 }
 
@@ -111,6 +125,25 @@ class DeferredSaveDesktop extends ClosingDesktop {
         })
       }
     })
+  }
+}
+
+class DeferredNavigationPatchDesktop extends ClosingDesktop {
+  resolvePatch: (() => void) | null = null
+
+  override saveSettingsPatch(baseRevision: number, patch: SettingsPatch): Promise<SettingsSaveResult> {
+    return new Promise((resolve, reject) => {
+      this.resolvePatch = () => {
+        this.resolvePatch = null
+        super.saveSettingsPatch(baseRevision, patch).then(resolve, reject)
+      }
+    })
+  }
+}
+
+class FailingNavigationPatchDesktop extends ClosingDesktop {
+  override saveSettingsPatch(): Promise<SettingsSaveResult> {
+    return Promise.reject(new Error('synthetic navigation save failure'))
   }
 }
 
@@ -204,6 +237,66 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Appearance & language')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Close settings' })).toBeInTheDocument()
     expect(document.documentElement).toHaveAttribute('lang', 'en')
+    fireEvent.click(screen.getByRole('button', { name: 'About' }))
+    expect(screen.getByText('This project references several excellent projects during development:')).toBeVisible()
+  })
+
+  it('explains built-in data destinations without a first-use prompt', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    expect(screen.getByText('输入文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    expect(screen.getByText('截图会发送给所选 OCR 服务：ai.chaoxing.com。')).toBeVisible()
+    expect(screen.getByText('识别文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('switch', { name: '启用OCR翻译' }))
+    expect(screen.getAllByText('已关闭，不会发送相关内容。')).toHaveLength(2)
+
+    fireEvent.click(screen.getByRole('button', { name: '常规' }))
+    expect(screen.getByText(/仅控制截图是否写入所选本地归档目录/u)).toBeVisible()
+  })
+
+  it('updates data destinations when an AI provider and model are selected', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS)
+    settings.providers = [{
+      id: 'gateway',
+      name: 'Gateway',
+      baseUrl: 'https://gateway.example/v1',
+      protocol: 'responses',
+      keyCount: 0,
+      availableModels: ['vision-model'],
+      enabledModels: ['vision-model'],
+    }]
+    const selection = { providerId: 'gateway', model: 'vision-model' }
+    settings.translation = {
+      ...settings.translation,
+      method: 'ai',
+      aiEnabled: true,
+      aiModel: selection,
+    }
+    settings.screenshotTranslation = {
+      ...settings.screenshotTranslation,
+      ocrAiEnabled: true,
+      ocrMethod: 'ai',
+      ocrModel: selection,
+      translationAiEnabled: true,
+      translationMethod: 'ai',
+      translationModel: selection,
+    }
+    const desktop = new StartupSettingsDesktop(settings)
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    expect(screen.getByText('输入文字和翻译提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    expect(screen.getByText('截图和 OCR 提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
+    expect(screen.getByText('识别文字和 OCR 翻译提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
   })
 
   it('keeps a startup recovery notice until the visible settings window acknowledges it', async () => {
@@ -250,6 +343,175 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
     fireEvent.click(screen.getByRole('button', { name: '放弃更改' }))
     expect(desktop.hides).toBe(1)
+  })
+
+  it('holds a native route request while saving and acknowledges only after save succeeds', async () => {
+    const desktop = new DeferredNavigationPatchDesktop()
+    const onResolved = vi.fn()
+    const view = render(<DesktopProvider port={desktop}><SettingsPage onNavigationRequestResolved={onResolved} /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    const request: MainNavigationRequest = { requestId: 41, route: 'prompt-optimizer' }
+    view.rerender(<DesktopProvider port={desktop}><SettingsPage navigationRequest={request} onNavigationRequestResolved={onResolved} /></DesktopProvider>)
+    const dialog = await screen.findByRole('dialog', { name: '保存更改后切换页面？' })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存并切换' }))
+    expect(desktop.mainNavigationAcks).toEqual([])
+    expect(screen.getByRole('button', { name: '保存中…' })).toBeDisabled()
+    await act(async () => {
+      desktop.resolvePatch?.()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(desktop.mainNavigationAcks).toEqual([{ requestId: 41, accepted: true }])
+    expect(onResolved).toHaveBeenCalledWith(41)
+    expect(screen.getByRole('radio', { name: '深色' })).toBeChecked()
+  })
+
+  it('keeps the navigation guard and credential draft after a navigation save failure', async () => {
+    const desktop = new FailingNavigationPatchDesktop()
+    const view = render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'navigation-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'navigation-secret' } })
+    const request: MainNavigationRequest = { requestId: 42, route: 'prompt-optimizer' }
+    view.rerender(<DesktopProvider port={desktop}><SettingsPage navigationRequest={request} /></DesktopProvider>)
+    const dialog = await screen.findByRole('dialog', { name: '保存更改后切换页面？' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存并切换' }))
+    await act(async () => Promise.resolve())
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('保存失败')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('synthetic navigation save failure')
+    expect(desktop.mainNavigationAcks).toEqual([])
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('navigation-api')
+    expect(screen.getByLabelText('百度 OCR Secret Key')).toHaveValue('navigation-secret')
+  })
+
+  it('treats an import waiting for confirmation as dirty for native navigation', async () => {
+    const desktop = new ImportSettingsDesktop(structuredClone(DEFAULT_SETTINGS))
+    const view = render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: '关于' }))
+    fireEvent.click(screen.getByRole('button', { name: '导入配置' }))
+    await act(async () => Promise.resolve())
+    const importDialog = screen.getByRole('dialog', { name: '覆盖当前未保存内容？' })
+    const request: MainNavigationRequest = { requestId: 43, route: 'prompt-optimizer' }
+    view.rerender(<DesktopProvider port={desktop}><SettingsPage navigationRequest={request} /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    expect(screen.getByRole('dialog', { name: '覆盖当前未保存内容？' })).toBe(importDialog)
+    expect(desktop.mainNavigationAcks).toEqual([])
+
+    fireEvent.click(within(importDialog).getByRole('button', { name: '取消' }))
+    const navigationDialog = await screen.findByRole('dialog', { name: '保存更改后切换页面？' })
+    fireEvent.click(within(navigationDialog).getByRole('button', { name: '继续编辑' }))
+    await act(async () => Promise.resolve())
+    expect(desktop.mainNavigationAcks).toEqual([{ requestId: 43, accepted: false }])
+    fireEvent.click(screen.getByRole('button', { name: '常规' }))
+    expect(screen.getByRole('radio', { name: '深色' })).toBeChecked()
+  })
+
+  it('keeps the close dialog open with a validation summary and locates an invalid URL', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '模型提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '新增' }))
+    const baseUrl = screen.getByRole('textbox', { name: '提供商 Base URL' })
+    fireEvent.change(baseUrl, { target: { value: 'not a url' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: '保存并关闭' }))
+      await Promise.resolve()
+    })
+
+    const error = within(dialog).getByRole('alert')
+    expect(error).toHaveTextContent('Provider URL 无效')
+    expect(error).toHaveTextContent('返回编辑并定位问题')
+    expect(document.activeElement).toBe(error)
+    expect(desktop.hides).toBe(0)
+
+    fireEvent.click(within(error).getByRole('button', { name: '返回编辑并定位问题' }))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.querySelector('.settings-toolbar h1')).toHaveTextContent('模型提供商')
+    expect(document.activeElement).toBe(baseUrl)
+  })
+
+  it('summarizes shortcut and archive validation failures inside the close dialog', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    const archive = screen.getByRole('switch', { name: '截图自动归档' })
+    fireEvent.click(archive)
+    fireEvent.click(screen.getByRole('button', { name: '录制文本翻译快捷键' }))
+    fireEvent.keyDown(screen.getByRole('button', { name: '录制文本翻译快捷键' }), { key: 'F3' })
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: '保存并关闭' }))
+      await Promise.resolve()
+    })
+
+    const error = within(dialog).getByRole('alert')
+    expect(error).toHaveTextContent('快捷键存在冲突')
+    expect(error).toHaveTextContent('选择归档目录')
+    expect(within(dialog).getByRole('button', { name: '返回编辑并定位问题' })).toBeVisible()
+    expect(desktop.hides).toBe(0)
+  })
+
+  it('keeps credential drafts and focuses the modal error after a credential save failure', async () => {
+    const desktop = new ClosingDesktop()
+    desktop.adapterKeySaveError = 'synthetic credential failure'
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'credential-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'credential-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: '保存并关闭' }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const error = within(dialog).getByRole('alert')
+    expect(error).toHaveTextContent('凭据保存失败')
+    expect(error).toHaveTextContent('synthetic credential failure')
+    expect(document.activeElement).toBe(error)
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('credential-api')
+    expect(desktop.hides).toBe(0)
+  })
+
+  it('reports rollback failures separately while retaining the unsaved close draft', async () => {
+    const desktop = new CredentialRollbackFailureDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'rollback-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'rollback-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: '保存并关闭' }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const error = within(dialog).getByRole('alert')
+    expect(error).toHaveTextContent('设置回滚失败')
+    expect(error).toHaveTextContent('synthetic credential failure')
+    expect(error).toHaveTextContent('synthetic rollback failure')
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('rollback-api')
+    expect(desktop.hides).toBe(0)
   })
 
   it('shows close failures for clean and discarded settings without leaking rejected promises', async () => {
@@ -453,6 +715,44 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en')
   })
 
+  it('merges a shared-window translation update while saving an unrelated theme edit', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+
+    fireEvent.click(screen.getByRole('radio', { name: '深色' }))
+    await act(async () => {
+      await desktop.updateTranslationSettings({ targetLanguage: 'ja' })
+    })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+
+    const persisted = await desktop.loadSettings()
+    expect(persisted.theme).toBe('dark')
+    expect(persisted.translation.targetLanguage).toBe('ja')
+  })
+
+  it('keeps a same-field shared-window conflict recoverable instead of overwriting it', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    const target = screen.getByRole('combobox', { name: '目标语言' })
+    fireEvent.change(target, { target: { value: 'en' } })
+
+    await act(async () => {
+      await desktop.updateTranslationSettings({ targetLanguage: 'ja' })
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('其他窗口刚刚修改了设置')
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    expect((await desktop.loadSettings()).translation.targetLanguage).toBe('ja')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('combobox', { name: '目标语言' })).toHaveValue('ja')
+  })
+
   it('shows a replayable save-success toast and dismisses it after a short delay', async () => {
     vi.useFakeTimers()
     const desktop = new CountingSettingsDesktop()
@@ -589,6 +889,7 @@ describe('SettingsPage', () => {
       id: 'removed-provider',
       name: 'Removed Provider',
       baseUrl: 'https://removed.example.com/v1',
+      protocol: 'responses',
       keyCount: 1,
       availableModels: [],
       enabledModels: [],
@@ -597,6 +898,7 @@ describe('SettingsPage', () => {
       id: 'imported-provider',
       name: 'Imported Provider',
       baseUrl: 'https://example.com/v1',
+      protocol: 'responses',
       keyCount: 1,
       availableModels: ['model'],
       enabledModels: ['model'],
@@ -640,6 +942,7 @@ describe('SettingsPage', () => {
       id: 'removed-provider',
       name: 'Removed Provider',
       baseUrl: 'https://removed.example.com/v1',
+      protocol: 'responses',
       keyCount: 1,
       availableModels: [],
       enabledModels: [],
@@ -648,6 +951,7 @@ describe('SettingsPage', () => {
       id: 'imported-provider',
       name: 'Imported Provider',
       baseUrl: 'https://example.com/v1',
+      protocol: 'responses',
       keyCount: 1,
       availableModels: [],
       enabledModels: [],
@@ -1159,7 +1463,7 @@ describe('SettingsPage', () => {
     fireEvent.change(keys, {
       target: { value: 'unsaved-key' },
     })
-    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(keys).toHaveValue('')
 
@@ -1183,7 +1487,7 @@ describe('SettingsPage', () => {
     fireEvent.change(keys, { target: { value: 'first-key\nsecond-key' } })
     expect(keys).toHaveValue('first-key\nsecond-key')
 
-    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
     fireEvent.change(screen.getByRole('textbox', { name: '提供商 Base URL' }), {
       target: { value: 'https://changed.example/v1' },
     })
@@ -1209,7 +1513,7 @@ describe('SettingsPage', () => {
       await Promise.resolve()
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
       await Promise.resolve()
     })
     expect(desktop.providerModelFetchCalls).toHaveLength(1)
@@ -1243,7 +1547,7 @@ describe('SettingsPage', () => {
       await Promise.resolve()
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+      fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
       await Promise.resolve()
     })
     expect(desktop.providerModelFetchCalls).toHaveLength(1)
@@ -1276,7 +1580,7 @@ describe('SettingsPage', () => {
     fireEvent.change(keys, { target: { value: 'draft-primary' } })
     fireEvent.change(keys, { target: { value: '' } })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
       await Promise.resolve()
     })
     expect(desktop.providerTestCalls[0]?.provider.id).toBe('cleared-provider')
@@ -1307,12 +1611,140 @@ describe('SettingsPage', () => {
       target: { value: 'draft-primary' },
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '模型列表连接检查' }))
       await Promise.resolve()
     })
     expect(desktop.providerTestCalls[0]?.provider.id).toBe('override-provider')
     expect(desktop.providerTestCalls[0]?.keys).toEqual(['draft-primary'])
     expect(screen.getByText('连接成功')).toBeVisible()
+  })
+
+  it('keeps adapter credential drafts while switching settings sections', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    const apiKey = screen.getByLabelText('百度 OCR API Key')
+    fireEvent.change(apiKey, { target: { value: 'draft-ocr-api' } })
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('draft-ocr-api')
+    expect(screen.getByRole('button', { name: '取消' })).toBeEnabled()
+    expect(desktop.adapterKeySaveCalls).toHaveLength(0)
+  })
+
+  it('cancels adapter credential drafts without writing them', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'cancel-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'cancel-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('')
+    expect(screen.getByLabelText('百度 OCR Secret Key')).toHaveValue('')
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    expect(desktop.adapterKeySaveCalls).toHaveLength(0)
+  })
+
+  it('protects adapter credential drafts on close and keeps them after continuing', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'close-api' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭设置' }))
+    const dialog = screen.getByRole('dialog', { name: '保存更改后关闭？' })
+    expect(dialog).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('close-api')
+    expect(desktop.hides).toBe(0)
+  })
+
+  it('validates incomplete adapter drafts before starting a credential batch', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'only-api' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('请完整填写凭据后再保存')
+    expect(desktop.adapterKeySaveCalls).toHaveLength(0)
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('only-api')
+  })
+
+  it('keeps adapter credential input and retryability when the batch save fails', async () => {
+    const desktop = new ClosingDesktop()
+    desktop.adapterKeySaveError = 'adapter credential store unavailable: retry-adapter-secret'
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'retry-adapter-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'retry-adapter-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    const failure = screen.getByRole('alert')
+    expect(failure).toHaveTextContent('凭据保存失败')
+    expect(failure).not.toHaveTextContent('retry-adapter-secret')
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('retry-adapter-api')
+    expect(screen.getByLabelText('百度 OCR Secret Key')).toHaveValue('retry-adapter-secret')
+    expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
+  })
+
+  it('clears adapter plaintext after success and only changes the selected adapter', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveAdapterKeyChanges({
+      'adapter-tencent-translation': ['existing-id', 'existing-secret'],
+    })
+    desktop.adapterKeySaveCalls.length = 0
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.change(screen.getByLabelText('百度 OCR API Key'), { target: { value: 'new-baidu-api' } })
+    fireEvent.change(screen.getByLabelText('百度 OCR Secret Key'), { target: { value: 'new-baidu-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    expect(desktop.adapterKeySaveCalls).toEqual([{
+      'adapter-baidu-ocr': ['new-baidu-api', 'new-baidu-secret'],
+    }])
+    expect(screen.getByLabelText('百度 OCR API Key')).toHaveValue('')
+    expect(screen.getByLabelText('百度 OCR Secret Key')).toHaveValue('')
+    expect(document.querySelector('[data-screenpilot-credential-state="adapter-baidu-ocr"]')).toHaveTextContent('已安全保存 2 个密钥')
+    expect(await desktop.providerKeyCount('adapter-baidu-ocr')).toBe(2)
+    expect(await desktop.providerKeyCount('adapter-tencent-translation')).toBe(2)
+    expect(JSON.stringify(await desktop.loadSettings())).not.toContain('new-baidu-secret')
+  })
+
+  it('saves adapter clears as drafts and does not clear untouched adapters', async () => {
+    const desktop = new ClosingDesktop()
+    await desktop.saveAdapterKeyChanges({
+      'adapter-baidu-ocr': ['old-api', 'old-secret'],
+      'adapter-caiyun-translation': ['untouched-token'],
+    })
+    desktop.adapterKeySaveCalls.length = 0
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
+    fireEvent.click(screen.getByRole('button', { name: '清除凭据：百度 OCR' }))
+    expect(screen.getByText('清除待保存')).toBeVisible()
+    expect(desktop.adapterKeySaveCalls).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await act(async () => Promise.resolve())
+    expect(desktop.adapterKeySaveCalls).toEqual([{ 'adapter-baidu-ocr': [] }])
+    expect(await desktop.providerKeyCount('adapter-baidu-ocr')).toBe(0)
+    expect(await desktop.providerKeyCount('adapter-caiyun-translation')).toBe(1)
+    expect(document.querySelector('[data-screenpilot-credential-state="adapter-baidu-ocr"]')).toHaveTextContent('尚未配置')
+  })
+
+  it('links an adapter translation choice to the shared credential editor', async () => {
+    const desktop = new ClosingDesktop()
+    render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
+    await act(async () => Promise.resolve())
+    fireEvent.click(screen.getByRole('button', { name: '翻译' }))
+    fireEvent.change(screen.getByRole('combobox', { name: '翻译接口' }), { target: { value: 'baidu' } })
+    fireEvent.click(screen.getByRole('button', { name: '配置接口凭据' }))
+    expect(screen.getByRole('heading', { name: 'OCR' })).toBeVisible()
+    expect(screen.getByLabelText('百度翻译 App ID')).toBeVisible()
   })
 
   it('saves multiple provider key drafts only through the global save action', async () => {

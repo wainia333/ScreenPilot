@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   loadVisionHistory,
+  saveVisionHistory,
   VISION_HISTORY_STORAGE_KEY,
   VISION_HISTORY_STORAGE_KEYS_LEGACY,
   type VisionHistoryItem,
@@ -47,5 +48,26 @@ describe('Vision history storage', () => {
     expect(loadVisionHistory(localStorage)).toEqual({ items: [], rejectedCount: 1 })
     expect(localStorage.getItem(VISION_HISTORY_STORAGE_KEY)).toBe('[]')
     expect(localStorage.getItem(legacyKey)).toBeNull()
+  })
+
+  it('returns an explicit failure while retaining the last confirmed snapshot', () => {
+    const oldHistory = [validItem]
+    const nextHistory = [{ ...validItem, id: 'capture-2' }]
+    const result = saveVisionHistory(
+      { setItem: () => { throw new DOMException('quota') } } as Storage,
+      nextHistory,
+      oldHistory,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.history).toEqual(nextHistory)
+    expect(result.persistedHistory).toEqual(oldHistory)
+  })
+
+  it('confirms a new snapshot only after serialization and storage succeed', () => {
+    let value = ''
+    const nextHistory = [{ ...validItem, id: 'capture-2' }]
+    const result = saveVisionHistory({ setItem: (_key, serialized) => { value = serialized } } as Storage, nextHistory)
+    expect(result).toEqual({ ok: true, history: nextHistory, persistedHistory: nextHistory })
+    expect(JSON.parse(value)).toEqual(nextHistory)
   })
 })

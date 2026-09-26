@@ -1,5 +1,6 @@
 use crate::application::state::{AppState, MainRoute, ReferenceSurface};
-use crate::domain::settings::AppSettings;
+use crate::domain::settings::{AppSettings, InterfaceLanguage};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -11,6 +12,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const TRANSLATOR_WIDTH: f64 = 680.0;
 pub(crate) const TRANSLATOR_HEIGHT: f64 = 400.0;
+type PhysicalPoint = (i32, i32);
+type MonitorGeometry = (i32, i32, i32, i32, f64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeatureSurface {
@@ -113,6 +116,8 @@ pub(crate) fn flush_windows_compositor() {
 pub(crate) fn flush_windows_compositor() {}
 
 fn hide_translator_surface(window: &WebviewWindow) -> Result<(), String> {
+    window.state::<AppState>().cancel_active_text_commit();
+    window.state::<AppState>().clear_translator_paste_target()?;
     hide_translator_with(
         &window.state::<AppState>(),
         || force_hide_window(window),
@@ -295,6 +300,32 @@ fn automatic_route(_activation: ProcessActivation) -> Option<MainRoute> {
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MainNavigationAction {
+    FocusCurrent,
+    ApplyDirectly,
+    AskSettingsGuard,
+}
+
+fn main_navigation_action(
+    current: MainRoute,
+    requested: MainRoute,
+    visible: bool,
+) -> MainNavigationAction {
+    if !visible {
+        // Every hidden-window entrance is a fresh popup: restore the route's
+        // size and position and replay its mount animation even when the
+        // native route already matches. Treating this as focus-only leaves a
+        // closed Settings window at its dragged position and a closed
+        // optimizer at the previous cursor position.
+        MainNavigationAction::ApplyDirectly
+    } else if current == requested {
+        MainNavigationAction::FocusCurrent
+    } else {
+        MainNavigationAction::AskSettingsGuard
+    }
+}
+
 fn activate_process(app: &AppHandle, activation: ProcessActivation) -> Result<(), String> {
     match automatic_route(activation) {
         Some(route) => show_main(app, route),
@@ -303,7 +334,7 @@ fn activate_process(app: &AppHandle, activation: ProcessActivation) -> Result<()
 }
 
 impl MainRoute {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Settings => "settings",
             Self::PromptOptimizer => "prompt-optimizer",
@@ -318,12 +349,64 @@ impl MainRoute {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct MainNavigationRequest {
+    #[serde(rename = "requestId")]
+    request_id: u64,
+    route: &'static str,
+}
+
+pub(crate) fn pending_main_navigation(
+    state: &AppState,
+) -> Result<Option<MainNavigationRequest>, String> {
+    state.pending_main_navigation().map(|pending| {
+        pending.map(|(request_id, route)| MainNavigationRequest {
+            request_id,
+            route: route.name(),
+        })
+    })
+}
+
 pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
     if route == MainRoute::PromptOptimizer
         && !app.state::<AppState>().current()?.prompt_optimizer.enabled
     {
         return Err("Prompt optimizer is disabled in settings".into());
     }
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main window is unavailable")?;
+    let visible = window.is_visible().map_err(|error| error.to_string())?;
+    match main_navigation_action(app.state::<AppState>().main_route()?, route, visible) {
+        MainNavigationAction::FocusCurrent => {
+            // Re-opening the active main route preserves its React tree, but
+            // still withdraws any translator/Vision peer first.
+            prepare_feature_surface(app, FeatureSurface::Main)?;
+            return show_and_focus(&window);
+        }
+        MainNavigationAction::ApplyDirectly => return apply_main_navigation(app, route),
+        MainNavigationAction::AskSettingsGuard => {}
+    }
+    prepare_feature_surface(app, FeatureSurface::Main)?;
+    // The guard lives in the existing main WebView. Reveal the current route
+    // before asking for a decision, but do not reset or resize it yet.
+    show_and_focus(&window)?;
+    let (request_id, is_new) = app.state::<AppState>().begin_main_navigation(route)?;
+    if is_new {
+        window
+            .emit(
+                "screenpilot:main-navigation-request",
+                MainNavigationRequest {
+                    request_id,
+                    route: route.name(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn apply_main_navigation(app: &AppHandle, route: MainRoute) -> Result<(), String> {
     prepare_feature_surface(app, FeatureSurface::Main)?;
     let window = app
         .get_webview_window("main")
@@ -344,9 +427,9 @@ pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
     match route {
-        MainRoute::Settings => center_on_cursor_monitor(app, &window)?,
+        MainRoute::Settings => center_on_cursor_monitor(app, &window, width, height)?,
         MainRoute::PromptOptimizer => {
-            let position = popup_window_position(app, &window, width, height)?;
+            let position = popup_window_position(app, width, height)?;
             window
                 .set_position(position)
                 .map_err(|error| error.to_string())?;
@@ -356,6 +439,20 @@ pub fn show_main(app: &AppHandle, route: MainRoute) -> Result<(), String> {
         .emit("screenpilot:route", route.name())
         .map_err(|error| error.to_string())?;
     show_and_focus(&window)
+}
+
+pub fn acknowledge_main_navigation(
+    app: &AppHandle,
+    request_id: u64,
+    accepted: bool,
+) -> Result<(), String> {
+    if let Some(route) = app
+        .state::<AppState>()
+        .acknowledge_main_navigation(request_id, accepted)?
+    {
+        apply_main_navigation(app, route)?;
+    }
+    Ok(())
 }
 
 fn toggle_optimizer_with(
@@ -408,6 +505,8 @@ pub(crate) fn close_main_window(
 }
 
 pub fn show_translator(app: &AppHandle) -> Result<(), String> {
+    app.state::<AppState>().cancel_active_text_commit();
+    app.state::<AppState>().clear_translator_paste_target()?;
     show_translator_window(app, true, true)
 }
 
@@ -440,7 +539,7 @@ fn prepare_translator_window(
             .map_err(|error| error.to_string())?;
     }
     normalize_translator_window(&window)?;
-    let position = translator_popup_position(app, &window)?;
+    let position = translator_popup_position(app)?;
     window
         .set_position(position)
         .map_err(|error| error.to_string())?;
@@ -670,6 +769,10 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                 if translator_is_visible(&app) {
                     hide_visible_translator_for_toggle(&app)
                 } else {
+                    state.cancel_active_text_commit();
+                    state.set_translator_paste_target(
+                        crate::platform::windows::selection::foreground_paste_target(),
+                    )?;
                     state.set_translator_selection(String::new());
                     // This is the first half of the OCR clipboard-write fence.
                     // It runs behind the previous surface transition, while the
@@ -724,6 +827,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                 },
             );
             if let Err(error) = result {
+                let _ = state.clear_translator_paste_target();
                 eprintln!("Hotkey action {action:?} failed: {error}");
             }
         });
@@ -868,26 +972,65 @@ fn register_shortcut(
         .map_err(|error| error.to_string())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TrayLabels {
+    translator: &'static str,
+    vision: &'static str,
+    screenshot: &'static str,
+    optimizer: &'static str,
+    settings: &'static str,
+    restart_admin: &'static str,
+    quit: &'static str,
+}
+
+const TRAY_SETTINGS_ACTION_ID: &str = "settings";
+const TRAY_RESTART_ADMIN_ACTION_ID: &str = "restart_admin";
+const TRAY_QUIT_ACTION_ID: &str = "quit";
+
+fn tray_labels(language: InterfaceLanguage) -> TrayLabels {
+    match language {
+        InterfaceLanguage::Zh => TrayLabels {
+            translator: "文本翻译",
+            vision: "Vision",
+            screenshot: "OCR翻译",
+            optimizer: "提示词优化",
+            settings: "设置",
+            restart_admin: "重启（管理员）",
+            quit: "退出",
+        },
+        InterfaceLanguage::En => TrayLabels {
+            translator: "Text translation",
+            vision: "Vision",
+            screenshot: "OCR translation",
+            optimizer: "Prompt optimization",
+            settings: "Settings",
+            restart_admin: "Restart (administrator)",
+            quit: "Quit",
+        },
+    }
+}
+
 fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str, &str)> {
+    let labels = tray_labels(settings.language);
     let mut items = vec![(
         "translator",
-        "文本翻译",
+        labels.translator,
         settings.shortcuts.translator.as_str(),
     )];
     if settings.vision.enabled {
-        items.push(("vision", "Vision", settings.shortcuts.vision.as_str()));
+        items.push(("vision", labels.vision, settings.shortcuts.vision.as_str()));
     }
     if settings.screenshot_translation.enabled {
         items.push((
             "screenshot",
-            "OCR翻译",
+            labels.screenshot,
             settings.shortcuts.screenshot_translation.as_str(),
         ));
     }
     if settings.prompt_optimizer.enabled {
         items.push((
             "optimizer",
-            "提示词优化",
+            labels.optimizer,
             settings.shortcuts.prompt_optimizer.as_str(),
         ));
     }
@@ -895,6 +1038,7 @@ fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str
 }
 
 fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri::Wry>, String> {
+    let labels = tray_labels(settings.language);
     let mut builder = MenuBuilder::new(app);
     for (id, label, shortcut) in tray_feature_items(settings) {
         let item = MenuItemBuilder::with_id(id, label)
@@ -917,10 +1061,10 @@ fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri
     builder = builder.item(&alt_snap);
     builder
         .separator()
-        .text("settings", "设置")
+        .text(TRAY_SETTINGS_ACTION_ID, labels.settings)
         .separator()
-        .text("restart_admin", "重启（管理员）")
-        .text("quit", "退出")
+        .text(TRAY_RESTART_ADMIN_ACTION_ID, labels.restart_admin)
+        .text(TRAY_QUIT_ACTION_ID, labels.quit)
         .build()
         .map_err(|error| error.to_string())
 }
@@ -1072,8 +1216,10 @@ fn reinforce_vision_topmost(window: &tauri::Window) {
     }
 }
 
-fn monitor_geometry_at_cursor(app: &AppHandle) -> Result<(i32, i32, i32, i32, f64), String> {
-    let cursor = app.cursor_position().map_err(|error| error.to_string())?;
+fn monitor_geometry_at_point(
+    app: &AppHandle,
+    point: PhysicalPoint,
+) -> Result<MonitorGeometry, String> {
     let monitors = app
         .available_monitors()
         .map_err(|error| error.to_string())?;
@@ -1084,10 +1230,7 @@ fn monitor_geometry_at_cursor(app: &AppHandle) -> Result<(i32, i32, i32, i32, f6
             let size = monitor.size();
             let right = position.x + size.width as i32;
             let bottom = position.y + size.height as i32;
-            (cursor.x as i32) >= position.x
-                && (cursor.x as i32) < right
-                && (cursor.y as i32) >= position.y
-                && (cursor.y as i32) < bottom
+            point.0 >= position.x && point.0 < right && point.1 >= position.y && point.1 < bottom
         })
         .or_else(|| monitors.first())
         .ok_or("No display is available")?;
@@ -1102,6 +1245,24 @@ fn monitor_geometry_at_cursor(app: &AppHandle) -> Result<(i32, i32, i32, i32, f6
     ))
 }
 
+fn cursor_monitor_geometry(app: &AppHandle) -> Result<(PhysicalPoint, MonitorGeometry), String> {
+    let cursor = app.cursor_position().map_err(|error| error.to_string())?;
+    let point = (cursor.x.round() as i32, cursor.y.round() as i32);
+    Ok((point, monitor_geometry_at_point(app, point)?))
+}
+
+fn physical_window_size(logical: (f64, f64), scale: f64) -> (i32, i32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    (
+        (logical.0 * scale).round().max(1.0) as i32,
+        (logical.1 * scale).round().max(1.0) as i32,
+    )
+}
+
 fn clamp_axis(start: i32, minimum: i32, maximum: i32, size: i32) -> i32 {
     if maximum - minimum <= size {
         minimum
@@ -1111,7 +1272,7 @@ fn clamp_axis(start: i32, minimum: i32, maximum: i32, size: i32) -> i32 {
 }
 
 fn popup_position(
-    cursor: (i32, i32),
+    cursor: PhysicalPoint,
     monitor: (i32, i32, i32, i32),
     window: (i32, i32),
     offset: i32,
@@ -1127,37 +1288,46 @@ fn popup_position(
     )
 }
 
-fn translator_popup_position(
-    app: &AppHandle,
-    window: &WebviewWindow,
-) -> Result<PhysicalPosition<i32>, String> {
-    popup_window_position(app, window, TRANSLATOR_WIDTH, TRANSLATOR_HEIGHT)
+fn centered_position(
+    monitor: (i32, i32, i32, i32),
+    window: (i32, i32),
+    margin: i32,
+) -> PhysicalPoint {
+    (
+        clamp_axis(
+            monitor.0 + (monitor.2 - window.0) / 2,
+            monitor.0 + margin,
+            monitor.0 + monitor.2 - margin,
+            window.0,
+        ),
+        clamp_axis(
+            monitor.1 + (monitor.3 - window.1) / 2,
+            monitor.1 + margin,
+            monitor.1 + monitor.3 - margin,
+            window.1,
+        ),
+    )
+}
+
+fn translator_popup_position(app: &AppHandle) -> Result<PhysicalPosition<i32>, String> {
+    popup_window_position(app, TRANSLATOR_WIDTH, TRANSLATOR_HEIGHT)
 }
 
 fn popup_window_position(
     app: &AppHandle,
-    window: &WebviewWindow,
-    fallback_width: f64,
-    fallback_height: f64,
+    logical_width: f64,
+    logical_height: f64,
 ) -> Result<PhysicalPosition<i32>, String> {
-    let cursor = app.cursor_position().map_err(|error| error.to_string())?;
-    let monitor = monitor_geometry_at_cursor(app)?;
-    let size = window.outer_size().ok();
-    let scale = if monitor.4.is_finite() && monitor.4 > 0.0 {
-        monitor.4
-    } else {
-        1.0
-    };
-    let width = size
-        .map(|value| value.width as i32)
-        .unwrap_or_else(|| (fallback_width * scale).round() as i32)
-        .max(1);
-    let height = size
-        .map(|value| value.height as i32)
-        .unwrap_or_else(|| (fallback_height * scale).round() as i32)
-        .max(1);
+    // Capture the cursor once. Reading it separately for the point and the
+    // monitor lets a moving pointer cross displays between calls, producing a
+    // point from one display clamped against another display's bounds.
+    let (cursor, monitor) = cursor_monitor_geometry(app)?;
+    // Use the route's target dimensions instead of outer_size immediately
+    // after set_size. The native resize can still be in flight, and the old
+    // physical size is also wrong after crossing monitors with different DPI.
+    let (width, height) = physical_window_size((logical_width, logical_height), monitor.4);
     let (x, y) = popup_position(
-        (cursor.x.round() as i32, cursor.y.round() as i32),
+        cursor,
         (monitor.0, monitor.1, monitor.2, monitor.3),
         (width, height),
         10,
@@ -1166,22 +1336,18 @@ fn popup_window_position(
     Ok(PhysicalPosition::new(x, y))
 }
 
-fn center_on_cursor_monitor(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
-    let monitor = monitor_geometry_at_cursor(app)?;
-    let window_size = window.outer_size().map_err(|error| error.to_string())?;
-    let width = window_size.width as i32;
-    let height = window_size.height as i32;
-    let x = clamp_axis(
-        monitor.0 + (monitor.2 - width) / 2,
-        monitor.0 + 8,
-        monitor.0 + monitor.2 - 8,
-        width,
-    );
-    let y = clamp_axis(
-        monitor.1 + (monitor.3 - height) / 2,
-        monitor.1 + 8,
-        monitor.1 + monitor.3 - 8,
-        height,
+fn center_on_cursor_monitor(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    logical_width: f64,
+    logical_height: f64,
+) -> Result<(), String> {
+    let (_, monitor) = cursor_monitor_geometry(app)?;
+    let (width, height) = physical_window_size((logical_width, logical_height), monitor.4);
+    let (x, y) = centered_position(
+        (monitor.0, monitor.1, monitor.2, monitor.3),
+        (width, height),
+        8,
     );
     window
         .set_position(PhysicalPosition::new(x, y))
@@ -1191,13 +1357,15 @@ fn center_on_cursor_monitor(app: &AppHandle, window: &WebviewWindow) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_shortcuts, automatic_route, capture_before_surface_transition,
-        deliver_translator_selection, hidden_surfaces_for, merge_shortcut_results, popup_position,
-        shortcut_registration_changed, tray_feature_items, FeatureSurface, HotkeyAction,
-        ProcessActivation,
+        active_shortcuts, automatic_route, capture_before_surface_transition, centered_position,
+        deliver_translator_selection, hidden_surfaces_for, main_navigation_action,
+        merge_shortcut_results, physical_window_size, popup_position,
+        shortcut_registration_changed, tray_feature_items, tray_labels, FeatureSurface,
+        HotkeyAction, MainNavigationAction, ProcessActivation, TRAY_QUIT_ACTION_ID,
+        TRAY_RESTART_ADMIN_ACTION_ID, TRAY_SETTINGS_ACTION_ID,
     };
     use crate::application::state::AppState;
-    use crate::domain::settings::AppSettings;
+    use crate::domain::settings::{AppSettings, InterfaceLanguage};
     use crate::infrastructure::images::ImageStore;
     use crate::infrastructure::settings_store::SettingsStore;
     use std::cell::{Cell, RefCell};
@@ -1491,6 +1659,70 @@ mod tests {
     fn keeps_initial_and_repeated_process_activation_in_the_tray() {
         assert_eq!(automatic_route(ProcessActivation::Initial), None);
         assert_eq!(automatic_route(ProcessActivation::Repeated), None);
+    }
+
+    #[test]
+    fn hidden_main_routes_always_restore_their_popup_geometry_before_reveal() {
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::Settings,
+                super::MainRoute::Settings,
+                false,
+            ),
+            MainNavigationAction::ApplyDirectly
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::Settings,
+                super::MainRoute::PromptOptimizer,
+                false,
+            ),
+            MainNavigationAction::ApplyDirectly
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::PromptOptimizer,
+                super::MainRoute::PromptOptimizer,
+                false,
+            ),
+            MainNavigationAction::ApplyDirectly
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::PromptOptimizer,
+                super::MainRoute::Settings,
+                false,
+            ),
+            MainNavigationAction::ApplyDirectly
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::Settings,
+                super::MainRoute::PromptOptimizer,
+                true,
+            ),
+            MainNavigationAction::AskSettingsGuard
+        );
+        assert_eq!(
+            main_navigation_action(super::MainRoute::Settings, super::MainRoute::Settings, true,),
+            MainNavigationAction::FocusCurrent
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::PromptOptimizer,
+                super::MainRoute::PromptOptimizer,
+                true,
+            ),
+            MainNavigationAction::FocusCurrent
+        );
+        assert_eq!(
+            main_navigation_action(
+                super::MainRoute::PromptOptimizer,
+                super::MainRoute::Settings,
+                true,
+            ),
+            MainNavigationAction::AskSettingsGuard
+        );
     }
 
     #[test]
@@ -1962,6 +2194,51 @@ mod tests {
     }
 
     #[test]
+    fn localizes_tray_feature_and_fixed_menu_labels_without_changing_action_ids() {
+        let zh = AppSettings::default();
+        assert_eq!(
+            tray_feature_items(&zh),
+            vec![
+                ("translator", "文本翻译", "F2"),
+                ("vision", "Vision", "F3"),
+                ("screenshot", "OCR翻译", "F4"),
+                ("optimizer", "提示词优化", "Control+Alt+P"),
+            ]
+        );
+        let mut en = zh.clone();
+        en.language = InterfaceLanguage::En;
+        assert_eq!(
+            tray_feature_items(&en),
+            vec![
+                ("translator", "Text translation", "F2"),
+                ("vision", "Vision", "F3"),
+                ("screenshot", "OCR translation", "F4"),
+                ("optimizer", "Prompt optimization", "Control+Alt+P"),
+            ]
+        );
+        assert_eq!(tray_labels(InterfaceLanguage::Zh).settings, "设置");
+        assert_eq!(
+            tray_labels(InterfaceLanguage::Zh).restart_admin,
+            "重启（管理员）"
+        );
+        assert_eq!(tray_labels(InterfaceLanguage::Zh).quit, "退出");
+        assert_eq!(tray_labels(InterfaceLanguage::En).settings, "Settings");
+        assert_eq!(
+            tray_labels(InterfaceLanguage::En).restart_admin,
+            "Restart (administrator)"
+        );
+        assert_eq!(tray_labels(InterfaceLanguage::En).quit, "Quit");
+        assert_eq!(
+            [
+                TRAY_SETTINGS_ACTION_ID,
+                TRAY_RESTART_ADMIN_ACTION_ID,
+                TRAY_QUIT_ACTION_ID,
+            ],
+            ["settings", "restart_admin", "quit"]
+        );
+    }
+
+    #[test]
     fn enablement_changes_require_shortcut_reregistration() {
         let previous = AppSettings::default();
         let mut next = previous.clone();
@@ -1980,6 +2257,29 @@ mod tests {
             popup_position((-1, -1), (-1920, -1080, 1920, 1080), (680, 520), 10, 8),
             (-688, -528)
         );
+    }
+
+    #[test]
+    fn centers_settings_on_positive_negative_and_scaled_monitors() {
+        assert_eq!(
+            centered_position((0, 0, 1920, 1080), (760, 620), 8),
+            (580, 230)
+        );
+        assert_eq!(
+            centered_position((-2560, -360, 2560, 1440), (760, 620), 8),
+            (-1660, 50)
+        );
+        assert_eq!(physical_window_size((760.0, 620.0), 1.5), (1140, 930));
+        assert_eq!(
+            centered_position((1920, 0, 2560, 1440), (1140, 930), 8),
+            (2630, 255)
+        );
+    }
+
+    #[test]
+    fn invalid_monitor_scale_falls_back_to_one() {
+        assert_eq!(physical_window_size((680.0, 450.0), f64::NAN), (680, 450));
+        assert_eq!(physical_window_size((680.0, 450.0), 0.0), (680, 450));
     }
 
     #[test]

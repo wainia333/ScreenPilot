@@ -49,11 +49,13 @@ pub fn save_transaction<E: SettingsEffects>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::settings::InterfaceLanguage;
 
     #[derive(Default)]
     struct FakeEffects {
         fail_at: Option<&'static str>,
         calls: Vec<String>,
+        tray_languages: Vec<InterfaceLanguage>,
     }
 
     impl FakeEffects {
@@ -89,6 +91,7 @@ mod tests {
         }
 
         fn update_tray(&mut self, settings: &AppSettings) -> Result<(), String> {
+            self.tray_languages.push(settings.language);
             self.record("tray", settings)
         }
     }
@@ -102,6 +105,7 @@ mod tests {
             let mut effects = FakeEffects {
                 fail_at: Some(stage),
                 calls: Vec::new(),
+                tray_languages: Vec::new(),
             };
             assert_eq!(
                 save_transaction(&mut effects, &previous, &next).unwrap_err(),
@@ -115,5 +119,17 @@ mod tests {
                 "tray:3".into(),
             ]));
         }
+    }
+
+    #[test]
+    fn saves_the_new_interface_language_before_rebuilding_the_tray() {
+        let previous = AppSettings::default();
+        let mut next = previous.clone();
+        next.language = InterfaceLanguage::En;
+        let mut effects = FakeEffects::default();
+
+        save_transaction(&mut effects, &previous, &next).expect("language save succeeds");
+
+        assert_eq!(effects.tray_languages, vec![InterfaceLanguage::En]);
     }
 }

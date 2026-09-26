@@ -23,6 +23,10 @@ export type VisionHistoryLoadResult = {
   rejectedCount: number
 }
 
+export type VisionHistorySaveResult =
+  | { ok: true; history: VisionHistoryItem[]; persistedHistory: VisionHistoryItem[] }
+  | { ok: false; history: VisionHistoryItem[]; persistedHistory: VisionHistoryItem[]; error: unknown }
+
 export const VISION_HISTORY_STORAGE_KEY = 'kivio:vision-history:v1'
 export const VISION_HISTORY_REPAIR_NOTICE_KEY = 'kivio:vision-history-repair-notice:v1'
 export const VISION_HISTORY_STORAGE_KEYS_LEGACY = [
@@ -152,10 +156,16 @@ export function loadVisionHistory(storage: Storage): VisionHistoryLoadResult {
   return { items, rejectedCount: Math.max(rejectedCount, readRepairNotice(storage)) }
 }
 
-export function saveVisionHistory(storage: Storage, history: VisionHistoryItem[]) {
+export function saveVisionHistory(
+  storage: Storage,
+  history: VisionHistoryItem[],
+  persistedHistory: VisionHistoryItem[] = [],
+): VisionHistorySaveResult {
+  const limited = history.slice(0, VISION_HISTORY_MAX)
   try {
-    storage.setItem(VISION_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, VISION_HISTORY_MAX)))
+    storage.setItem(VISION_HISTORY_STORAGE_KEY, JSON.stringify(limited))
+    return { ok: true, history: limited, persistedHistory: limited }
   } catch (error) {
-    console.error('[vision-history] localStorage save failed:', error)
+    return { ok: false, history: limited, persistedHistory: [...persistedHistory], error }
   }
 }

@@ -3,10 +3,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 import { VISION_FLOATING_PADDING } from '../src/features/vision/dialog-sizing'
 import { installVisionTauriMock } from './tauri-mock'
 
-async function expectAccessible(page: Page, excludedSelectors: readonly string[] = []) {
-  let builder = new AxeBuilder({ page })
-  for (const selector of excludedSelectors) builder = builder.exclude(selector)
-  const result = await builder.analyze()
+async function expectAccessible(page: Page) {
+  const result = await new AxeBuilder({ page }).analyze()
   expect(result.violations).toEqual([])
 }
 
@@ -151,19 +149,60 @@ async function expectTransparentAnswerActions(frame: Locator) {
   await expect.poll(() => transparentAnswerActionsStyle(frame)).toEqual(TRANSPARENT_ANSWER_ACTIONS)
 }
 
-async function expectAnswerActionsLeftAligned(panel: Locator) {
-  await expect.poll(async () => panel.evaluate((element) => {
+async function expectAnswerActionsContract(panel: Locator, page: Page) {
+  const actions = panel.locator('[data-screenpilot-answer-actions="true"]')
+  await expect(actions).toBeVisible()
+
+  const buttons = actions.locator(':scope > button')
+  const buttonCount = await buttons.count()
+  expect(buttonCount).toBeGreaterThanOrEqual(2)
+  expect(buttonCount).toBeLessThanOrEqual(3)
+  for (let index = 0; index < buttonCount; index += 1) {
+    await expect(buttons.nth(index)).toBeVisible()
+    await expect(buttons.nth(index)).toBeEnabled()
+  }
+
+  await expect(buttons.nth(0)).toHaveAttribute('data-screenpilot-copy-target', 'conversation')
+  await expect(buttons.nth(0)).toHaveAccessibleName(/^(复制会话|已复制会话|Copy conversation|Conversation copied)$/u)
+  await expect(buttons.nth(1)).toHaveAttribute('data-screenpilot-export-target', 'answer')
+  await expect(buttons.nth(1)).toHaveAccessibleName(/^(导出|导出中\.\.\.|已导出|Export|Exporting\.\.\.|Exported)$/u)
+  if (buttonCount === 3) {
+    await expect(buttons.nth(2)).toHaveAccessibleName(/^(停止|Stop)$/u)
+  }
+
+  const geometry = await panel.evaluate((element) => {
     const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
-    const firstButton = actions?.querySelector<HTMLElement>(':scope > button')
-    if (actions === null || firstButton === null || firstButton === undefined) return false
+    if (actions === null) return null
     const panelRect = element.getBoundingClientRect()
     const actionsRect = actions.getBoundingClientRect()
-    const buttonRect = firstButton.getBoundingClientRect()
-    const buttonAtActionsStart = Math.abs(buttonRect.left - actionsRect.left) <= 1
-    const nearPanelLeft = buttonRect.left >= panelRect.left - 1
-      && buttonRect.left - panelRect.left <= 20
-    return buttonAtActionsStart && nearPanelLeft
-  })).toBe(true)
+    const within = (inner: DOMRect, outer: DOMRect) => (
+      inner.left >= outer.left - 1
+      && inner.right <= outer.right + 1
+      && inner.top >= outer.top - 1
+      && inner.bottom <= outer.bottom + 1
+    )
+    const buttonRects = Array.from(actions.querySelectorAll<HTMLElement>(':scope > button'))
+      .map(button => button.getBoundingClientRect())
+    return {
+      actionsWithinPanel: within(actionsRect, panelRect),
+      buttonsWithinActions: buttonRects.map(buttonRect => within(buttonRect, actionsRect)),
+      panelOverflowing: element.scrollWidth > element.clientWidth + 1,
+      actionsOverflowing: actions.scrollWidth > actions.clientWidth + 1,
+    }
+  })
+  expect(geometry).not.toBeNull()
+  if (geometry === null) throw new Error('Vision answer action geometry is missing')
+  expect(geometry.actionsWithinPanel).toBe(true)
+  expect(geometry.buttonsWithinActions).toEqual(Array.from({ length: buttonCount }, () => true))
+  expect(geometry.panelOverflowing).toBe(false)
+  expect(geometry.actionsOverflowing).toBe(false)
+
+  await buttons.nth(0).focus()
+  await expect(buttons.nth(0)).toBeFocused()
+  for (let index = 1; index < buttonCount; index += 1) {
+    await page.keyboard.press('Tab')
+    await expect(buttons.nth(index)).toBeFocused()
+  }
 }
 
 async function expectHistoryCountBadge(button: Locator) {
@@ -435,8 +474,9 @@ async function settingsNavigationKeyframes(page: Page) {
   })
 }
 
-test('settings supports seven sections, unsaved close choices and accessible layout', async ({ page }) => {
+test('settings supports eight sections, unsaved close choices and accessible layout', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/')
   const settingsNavigation = page.getByRole('navigation', { name: '设置分区' })
   const settingsToolbar = page.locator('.settings-toolbar')
@@ -458,7 +498,10 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await expect(savedDot).toHaveCSS('background-color', 'rgb(52, 118, 86)')
   await expectEdgeSafeFrame(page.locator('.settings-window'))
   await expect(page.locator('.settings-footer').getByRole('button', { name: '保存' })).toBeVisible()
-  await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(7)
+  await expect.soft(settingsNavigation.getByRole('button')).toHaveCount(8)
+  expect.soft(await settingsNavigation.getByRole('button').evaluateAll((buttons) => (
+    buttons.map((button) => button.textContent.trim())
+  ))).toEqual(['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', '模型提供商', '关于'])
   const settingsFooter = page.locator('.settings-footer')
   const cancelSettings = settingsFooter.getByRole('button', { name: '取消' })
   await expect(cancelSettings).toBeVisible()
@@ -479,7 +522,8 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   const credentialRows = page.locator('.adapter-credentials > section')
   await expect(credentialRows).toHaveCount(4)
   for (const row of await credentialRows.all()) {
-    const button = row.getByRole('button', { name: '保存' })
+    const button = row.getByRole('button', { name: /清除凭据/u })
+    await expect(button).toBeDisabled()
     const rowBox = await row.boundingBox()
     const buttonBox = await button.boundingBox()
     if (rowBox === null || buttonBox === null) throw new Error('OCR credential row geometry is missing')
@@ -501,6 +545,75 @@ test('settings supports seven sections, unsaved close choices and accessible lay
   await dialog.getByRole('button', { name: '继续编辑' }).click()
   await expectAccessible(page)
   await expect(page).toHaveScreenshot('settings-dark.png')
+})
+
+test('A17 settings explains data destinations and disabled network paths', async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 620 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
+  await page.goto('/')
+
+  await page.getByRole('button', { name: '翻译', exact: true }).click()
+  await expect(page.getByText('输入文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+  await expect(page.getByRole('note')).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'OCR', exact: true }).click()
+  await expect(page.getByText('截图会发送给所选 OCR 服务：ai.chaoxing.com。')).toBeVisible()
+  await expect(page.getByText('识别文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+  await expect(page.getByRole('note')).toHaveCount(0)
+  await page.getByRole('switch', { name: '启用OCR翻译' }).click()
+  await expect(page.getByText('已关闭，不会发送相关内容。')).toHaveCount(2)
+
+  await page.getByRole('button', { name: '常规', exact: true }).click()
+  await expect(page.getByText(/仅控制截图是否写入所选本地归档目录/u)).toBeVisible()
+  await expectAccessible(page)
+})
+
+test('A06 settings contrast stays accessible across themes and navigation states', async ({ page }) => {
+  test.setTimeout(120_000)
+  await page.setViewportSize({ width: 680, height: 520 })
+  const sections = ['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', '模型提供商', '关于']
+  const themes = [
+    { radio: '浅色', documentTheme: 'light', colorScheme: 'light' },
+    { radio: '深色', documentTheme: 'dark', colorScheme: 'dark' },
+    { radio: '系统', documentTheme: 'system', colorScheme: 'light' },
+    { radio: '系统', documentTheme: 'system', colorScheme: 'dark' },
+  ] as const
+
+  for (const theme of themes) {
+    await page.emulateMedia({ colorScheme: theme.colorScheme, reducedMotion: 'reduce' })
+    await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
+    await page.goto('/')
+    const navigation = page.getByRole('navigation', { name: '设置分区' })
+    await expect(navigation).toBeVisible()
+    const buttons = navigation.getByRole('button')
+    const navigationLabels = await buttons.allTextContents()
+
+    await page.getByRole('radio', { name: theme.radio, exact: true }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme.documentTheme)
+
+    // Keep the Axe scans independent from the navigation inventory check. If
+    // a new/missing section changes the inventory, the available sections
+    // still exercise their selected and hovered states.
+    for (const section of sections) {
+      const selected = navigation.getByRole('button', { name: section, exact: true }).first()
+      if (await selected.count() === 0) continue
+      await selected.click()
+      await expect(selected).toHaveAttribute('aria-current', 'page')
+
+      await expectAccessible(page)
+
+      const selectedIndex = navigationLabels.findIndex(label => label === section)
+      const hoverIndex = navigationLabels.findIndex((label, index) => (
+        index !== selectedIndex && label !== section
+      ))
+      if (hoverIndex >= 0) {
+        await buttons.nth(hoverIndex).hover()
+        await expectAccessible(page)
+      }
+    }
+
+    expect.soft(navigationLabels).toEqual(sections)
+  }
 })
 
 test('settings cancel restores the loaded draft without closing the page', async ({ page }) => {
@@ -648,6 +761,7 @@ test('settings cancel hover preserves disabled colors and changes only when enab
 test('provider key drafts use the global footer save and cancel actions', async ({ page }) => {
   const pageErrors: string[] = []
   page.on('pageerror', (error) => pageErrors.push(error.message))
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/')
   await page.getByRole('button', { name: '模型提供商', exact: true }).click()
   const footer = page.locator('.settings-footer')
@@ -1269,6 +1383,7 @@ test('settings prompt fields match the provider focus frame in both themes', asy
 
 test('translator debounces, commits and restores its history', async ({ page }) => {
   await page.setViewportSize({ width: 680, height: 400 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'translator')
   await page.goto('/?route=translator')
   await expectEdgeSafeFrame(page.locator('.translator-window'))
   const card = page.locator('.translator-window.ocr-result-card.screenpilot-jelly-pop')
@@ -1350,8 +1465,53 @@ test('translator debounces, commits and restores its history', async ({ page }) 
   await expect(page).toHaveScreenshot('translator-result.png')
 })
 
+test('translator exposes retry and settings reload recovery without losing input', async ({ page }) => {
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'translator')
+  await page.goto('/?route=translator')
+
+  const input = page.getByRole('textbox', { name: '原文' })
+  const service = page.getByRole('combobox', { name: '翻译接口' })
+  await expect(service).toBeEnabled()
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { listenerAttempts: Record<string, number> }
+    }).__SCREENPILOT_TEST__
+    return state.listenerAttempts['screenpilot:translator-prepare'] ?? 0
+  })).toBeGreaterThanOrEqual(2)
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: {
+        settingsLoadFailuresRemaining: number
+        emitWindowEvent: (label: string, event: string, payload: unknown) => void
+      }
+    }).__SCREENPILOT_TEST__
+    state.settingsLoadFailuresRemaining = 1
+    state.emitWindowEvent('translator', 'screenpilot:translator-prepare', null)
+  })
+  await expect(page.getByRole('button', { name: '重新加载设置' })).toBeVisible()
+  await input.fill('A translation that can be retried.')
+  await expect(input).toHaveValue('A translation that can be retried.')
+  await expect(service).toBeDisabled()
+
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { translationFailuresRemaining: number }
+    }).__SCREENPILOT_TEST__
+    state.translationFailuresRemaining = 1
+  })
+  await page.getByRole('button', { name: '重新加载设置' }).click()
+  await expect(service).toBeEnabled()
+  await expect(page.getByRole('button', { name: '重试翻译' })).toBeVisible({ timeout: 4_000 })
+  await expect(page.getByRole('alert')).toContainText('网络连接失败')
+  await expect(input).toHaveValue('A translation that can be retried.')
+
+  await page.getByRole('button', { name: '重试翻译' }).click()
+  await expect(page.getByRole('textbox', { name: '译文' })).toHaveValue('译文：A translation that can be retried.')
+})
+
 test('prompt optimizer requests only on demand and keeps editable output', async ({ page }) => {
   await page.setViewportSize({ width: 680, height: 450 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/?route=prompt-optimizer')
   await expectEdgeSafeFrame(page.locator('.optimizer-window'))
   const card = page.locator('.optimizer-window.ocr-result-card.screenpilot-jelly-pop')
@@ -1412,7 +1572,6 @@ test('prompt optimizer requests only on demand and keeps editable output', async
 
 test('translation and prompt optimization keep their original history triggers and match the reference popover', async ({ page }) => {
   test.setTimeout(60_000)
-  await installVisionTauriMock(page)
   const longSource = `Reference history source ${'很长的原始内容'.repeat(40)}`
   const longOutput = `Reference history output ${'很长的处理结果'.repeat(40)}`
   const entries = Array.from({ length: 20 }, (_, index) => ({
@@ -1423,13 +1582,14 @@ test('translation and prompt optimization keep their original history triggers a
     updatedAt: Date.now() - index * 60_000,
   }))
   const routes = [
-    { route: 'translator', key: 'screenpilot:translator-history', button: '翻译历史' },
-    { route: 'prompt-optimizer', key: 'screenpilot:optimizer-history', button: '优化历史' },
+    { route: 'translator', windowLabel: 'translator', key: 'screenpilot:translator-history', button: '翻译历史' },
+    { route: 'prompt-optimizer', windowLabel: 'main', key: 'screenpilot:optimizer-history', button: '优化历史' },
   ] as const
 
   for (const route of routes) {
+    await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', route.windowLabel)
     await page.setViewportSize({ width: 680, height: 300 })
-    await page.goto(`/?route=${route.route}`)
+    await page.goto(`/?window=${route.windowLabel}&route=${route.route}`)
     await page.evaluate(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), {
       key: route.key,
       value: entries.map((entry) => route.route === 'translator' ? entry : {
@@ -2304,6 +2464,71 @@ test('Vision commits a completed screenshot before close writes recoverable hist
   })
 })
 
+test('Vision does not report saved history as lost when stale image cleanup fails', async ({ page }) => {
+  await page.addInitScript(() => {
+    const history = Array.from({ length: 20 }, (_, index) => ({
+      id: `saved-capture-${String(index)}`,
+      imagePreview: 'data:image/png;base64,AA==',
+      appLabel: 'Synthetic',
+      messages: [
+        { role: 'user', content: `Saved question ${String(index)}` },
+        { role: 'assistant', content: `Saved answer ${String(index)}` },
+      ],
+      capturedFrame: { x: 10, y: 20, width: 300, height: 200, label: 'Synthetic' },
+      timestamp: 1_700_000_000_000 - index,
+      textOnly: false,
+    }))
+    localStorage.setItem('screenpilot:vision-history:v1', JSON.stringify(history))
+  })
+  await installVisionTauriMock(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/?window=vision#vision?mode=chat')
+  await waitForVisionSelection(page)
+
+  await page.mouse.move(100, 140)
+  await page.mouse.down()
+  await page.mouse.move(560, 430, { steps: 8 })
+  await page.mouse.up()
+  await page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { historyImageDeleteFailuresRemaining: number }
+    }).__SCREENPILOT_TEST__
+    state.historyImageDeleteFailuresRemaining = 1
+  })
+  await page.getByPlaceholder('问点什么...').fill('Save despite stale image cleanup failure.')
+  await page.locator('[data-screenpilot-vision-send="true"]').click()
+  await expect(page.getByText(/synthetic ScreenPilot visual test/)).toBeVisible()
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as typeof window & {
+      __SCREENPILOT_TEST__: { historyImageDeleteCalls: string[] }
+    }).__SCREENPILOT_TEST__
+    const history = JSON.parse(localStorage.getItem('screenpilot:vision-history:v1') ?? '[]') as { id: string }[]
+    return {
+      firstHistoryId: history[0]?.id,
+      historyLength: history.length,
+      deleteCalls: state.historyImageDeleteCalls,
+    }
+  })).toEqual({
+    firstHistoryId: 'capture-1',
+    historyLength: 20,
+    deleteCalls: ['saved-capture-19'],
+  })
+  await expect(page.locator('[data-screenpilot-history-error="true"]')).toHaveCount(0)
+
+  await page.getByPlaceholder('问点什么...').fill('Retry the queued cleanup on the next save.')
+  await page.locator('[data-screenpilot-vision-send="true"]').click()
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & {
+      __SCREENPILOT_TEST__: { historyImageDeleteCalls: string[] }
+    }
+  ).__SCREENPILOT_TEST__.historyImageDeleteCalls)).toEqual([
+    'saved-capture-19',
+    'saved-capture-19',
+  ])
+  await expect(page.locator('[data-screenpilot-history-error="true"]')).toHaveCount(0)
+})
+
 test('Vision landing spring is temporary and leaves the settled WebView surface unpromoted', async ({ page }) => {
   await installVisionTauriMock(page, undefined, false)
   await page.emulateMedia({ reducedMotion: 'no-preference' })
@@ -2677,7 +2902,9 @@ test('Vision message toolbars reveal safely and support copy, role-aware editing
     userPrompt,
     assistantMarkdown,
   ])
-  await page.locator('[data-screenpilot-copy-target="answer"]').click()
+  const copyConversation = page.locator('[data-screenpilot-copy-target="conversation"]')
+  await expect(copyConversation).toHaveAccessibleName('复制会话')
+  await copyConversation.click()
   await expect.poll(() => page.evaluate(() => (
     window as typeof window & {
       __SCREENPILOT_CLIPBOARD_TEST__: { writes: string[] }
@@ -2813,7 +3040,7 @@ test('vision captures, annotates and answers without stale stream pollution', as
   await expect(answerPanel).toBeVisible()
   await expect(answerActions).toBeVisible()
   await expectTransparentAnswerActions(answerActions)
-  await expectAnswerActionsLeftAligned(answerPanel)
+  await expectAnswerActionsContract(answerPanel, page)
   await expect.poll(async () => answerPanel.evaluate((element) => element.getAnimations().length)).toBe(0)
   const answerPanelBox = await answerPanel.boundingBox()
   const answerActionsBox = await answerActions.boundingBox()
@@ -2886,41 +3113,69 @@ test('Vision reports clipboard failures and clears them after a successful retry
   await expect(copyError).toHaveCount(0)
   await expect(copyCode).toHaveAttribute('data-screenpilot-copy-state', 'copied')
 
-  const copyAnswer = page.locator('[data-screenpilot-copy-target="answer"]')
-  await expect(copyAnswer).toBeVisible()
+  const assistantShell = page.locator(
+    '[data-screenpilot-message-shell="true"][data-screenpilot-message-role="assistant"]',
+  ).first()
+  await assistantShell.hover()
+  const copyCurrentAnswer = assistantShell.locator('[data-screenpilot-message-action="copy"]')
+  await expect(copyCurrentAnswer).toBeVisible()
+  await expect(copyCurrentAnswer).toHaveAccessibleName('复制')
+  await copyCurrentAnswer.click()
+  await expect(copyCurrentAnswer).toHaveAccessibleName('已复制')
+  const currentAnswerClipboard = await page.evaluate(() => (
+    (window as typeof window & {
+      __SCREENPILOT_CLIPBOARD_TEST__: { writes: string[] }
+    }).__SCREENPILOT_CLIPBOARD_TEST__.writes.at(-1) ?? ''
+  ))
+  expect(currentAnswerClipboard).toBe('The answer includes a code sample:\n```ts\nconst copied = 42\n```')
+  expect(currentAnswerClipboard).not.toContain('Describe this screenshot.')
+  expect(currentAnswerClipboard).not.toMatch(/!\[截图\]\(data:image:/u)
+
+  const copyConversation = page.locator('[data-screenpilot-copy-target="conversation"]')
+  await expect(copyConversation).toBeVisible()
+  await expect(copyConversation).toHaveAccessibleName('复制会话')
   await failNextClipboardWrite(page)
-  await copyAnswer.click()
+  await copyConversation.click()
   await expect(copyError).toHaveAttribute('role', 'alert')
   await expect(copyError).toHaveText('复制失败，请检查剪贴板权限')
-  await expect(copyAnswer).toHaveAttribute('data-screenpilot-copy-state', 'idle')
-  await expect(copyAnswer).toContainText('复制')
+  await expect(copyConversation).toHaveAttribute('data-screenpilot-copy-state', 'idle')
+  await expect(copyConversation).toHaveAccessibleName('复制会话')
 
-  await copyAnswer.click()
+  await copyConversation.click()
   await expect(copyError).toHaveCount(0)
-  await expect(copyAnswer).toHaveAttribute('data-screenpilot-copy-state', 'copied')
-  await expect(copyAnswer).toContainText('已复制')
+  await expect(copyConversation).toHaveAttribute('data-screenpilot-copy-state', 'copied')
+  await expect(copyConversation).toHaveAccessibleName('已复制会话')
   expect(await page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { emitVisionAnswerDelta: (delta: string) => boolean }
     }).__SCREENPILOT_TEST__
     return state.emitVisionAnswerDelta('\nAdditional streamed detail.')
   })).toBe(true)
-  await expect(copyAnswer).toHaveAttribute('data-screenpilot-copy-state', 'idle')
-  await expect(copyAnswer).toContainText('复制')
-  expect(await page.evaluate(() => {
+  await expect(copyConversation).toHaveAttribute('data-screenpilot-copy-state', 'idle')
+  await expect(copyConversation).toHaveAccessibleName('复制会话')
+  const clipboardState = await page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_CLIPBOARD_TEST__: { legacyAttempts: number; writes: string[] }
     }).__SCREENPILOT_CLIPBOARD_TEST__
     return { legacyAttempts: state.legacyAttempts, writes: state.writes }
-  })).toEqual({
-    legacyAttempts: 2,
-    writes: [
-      'const copied = 42',
-      'const copied = 42',
-      'The answer includes a code sample:\n```ts\nconst copied = 42\n```',
-      'The answer includes a code sample:\n```ts\nconst copied = 42\n```',
-    ],
   })
+  expect(clipboardState.legacyAttempts).toBe(2)
+  expect(clipboardState.writes.slice(0, 3)).toEqual([
+    'const copied = 42',
+    'const copied = 42',
+    'The answer includes a code sample:\n```ts\nconst copied = 42\n```',
+  ])
+  expect(clipboardState.writes).toHaveLength(5)
+  expect(clipboardState.writes[3]).toBe(clipboardState.writes[4])
+  const conversationClipboard = clipboardState.writes[4]
+  expect(conversationClipboard).toBeDefined()
+  if (conversationClipboard === undefined) throw new Error('Vision conversation clipboard output is missing')
+  expect(conversationClipboard).toContain('# Vision 对话')
+  expect(conversationClipboard).toContain('## 提问 1\n\nDescribe this screenshot.')
+  expect(conversationClipboard).toContain('## 回答 1\n\nThe answer includes a code sample:\n```ts\nconst copied = 42\n```')
+  const screenshotReferences = conversationClipboard.match(/!\[截图\]\(data:image\/[^)\r\n]+\)/gu) ?? []
+  expect(screenshotReferences).toHaveLength(1)
+  expect(screenshotReferences[0]).toMatch(/^!\[截图\]\(data:image\/(?:png|svg\+xml)(?:;[^,)]*)?,/u)
   expect(pageErrors).toEqual([])
 })
 
@@ -3688,7 +3943,39 @@ test('Vision restores text history through the same top-slot flight before expan
     'data-screenpilot-answer-visible',
     'false',
   )
-  await expect(answerPanel).toHaveCSS('height', '0px')
+  const hiddenSurface = await answerPanel.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error('Vision answer panel is not an HTML element')
+    const style = getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return {
+      styleHeight: style.height,
+      styleMinHeight: style.minHeight,
+      rectHeight: rect.height,
+      borderHeight: Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth),
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      offsetHeight: element.offsetHeight,
+      opacity: style.opacity,
+      visibility: style.visibility,
+      pointerEvents: style.pointerEvents,
+      display: style.display,
+      position: style.position,
+      inlineHeight: element.style.height,
+      variableHeight: element.style.getPropertyValue('--screenpilot-dialog-initial-height'),
+      floatingMarker: element.dataset.screenpilotFloatingDialogCard ?? '',
+    }
+  })
+  expect(hiddenSurface.inlineHeight).toBe('0px')
+  expect(hiddenSurface.styleMinHeight).toBe('0px')
+  expect(hiddenSurface.styleHeight).toBe(`${String(hiddenSurface.borderHeight)}px`)
+  expect(hiddenSurface.clientHeight).toBe(0)
+  expect(hiddenSurface.scrollHeight).toBe(0)
+  expect(hiddenSurface.rectHeight).toBe(hiddenSurface.borderHeight)
+  expect(hiddenSurface.offsetHeight).toBe(Math.round(hiddenSurface.borderHeight))
+  expect(hiddenSurface.opacity).toBe('0')
+  expect(hiddenSurface.pointerEvents).toBe('none')
+  expect(hiddenSurface.position).toBe('absolute')
+  expect(hiddenSurface.floatingMarker).toBe('')
   await expect(answerPanel).toHaveCSS('pointer-events', 'none')
 
   expect(await page.evaluate(() => {
@@ -3716,7 +4003,7 @@ test('Vision keeps a restored answer floating when its native history flight fai
   const promptText = 'Restore this history after a failed native flight.'
   const answerText = 'The failed flight still restores this complete answer.'
   await seedTextOnlyVisionHistory(page, promptText, answerText)
-  await installVisionTauriMock(page, undefined, false)
+  await installVisionTauriMock(page, undefined, false, undefined, 0, 0, 0, '', false, {}, 'microsoft', undefined, true)
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto('/?window=vision#vision?mode=chat')
   await waitForVisionSelection(page)
@@ -3746,6 +4033,8 @@ test('Vision keeps a restored answer floating when its native history flight fai
   await expect(answerPanel).toBeVisible()
   await expect(answerPanel).toHaveAttribute('data-screenpilot-floating-dialog-card', 'true')
   await expect(page.locator('[data-screenpilot-floating-layout="true"]')).toBeVisible()
+  await expect(answerPanel).toHaveCSS('opacity', '1')
+  await expect(answerPanel).toHaveCSS('pointer-events', 'auto')
   await expect(page.getByRole('log')).toContainText(promptText)
   await expect(page.getByRole('log')).toContainText(answerText)
   await expect.poll(() => page.evaluate(() => {
@@ -4002,7 +4291,7 @@ test('Vision answer actions stay in normal flow below long responses', async ({ 
   const answerBody = answerPanel.locator('[data-screenpilot-answer-scroll="true"]')
   await expect(answerActions).toBeVisible()
   await expectTransparentAnswerActions(answerActions)
-  await expectAnswerActionsLeftAligned(answerPanel)
+  await expectAnswerActionsContract(answerPanel, page)
   const stopButton = answerActions.getByRole('button', { name: '停止', exact: true })
   await expect(stopButton).toBeVisible()
   await expect.poll(async () => answerPanel.evaluate((element) => {
@@ -4031,7 +4320,7 @@ test('Vision answer actions stay in normal flow below long responses', async ({ 
     element.scrollTop = element.scrollHeight
   })
   await expect(answerActions).toBeVisible()
-  await expectAnswerActionsLeftAligned(answerPanel)
+  await expectAnswerActionsContract(answerPanel, page)
 
   const finalLineVisibility = await answerPanel.evaluate((element) => {
     const actions = element.querySelector<HTMLElement>('[data-screenpilot-answer-actions="true"]')
@@ -4061,7 +4350,7 @@ test('Vision answer actions stay in normal flow below long responses', async ({ 
   expect(finalLineVisibility.textBottom).toBeLessThanOrEqual(finalLineVisibility.actionsTop + 1)
 
   await expect(stopButton).toBeHidden()
-  await expectAnswerActionsLeftAligned(answerPanel)
+  await expectAnswerActionsContract(answerPanel, page)
 })
 
 test('Vision markdown links open externally without navigating the app webview', async ({ page }) => {

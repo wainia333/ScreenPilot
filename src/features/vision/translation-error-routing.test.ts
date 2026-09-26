@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveVisionTranslateFailureKind } from '../../vendor/kivio-screenshot/Vision'
+import { resolveVisionTranslateFailureKind } from '../../vendor/screenshot/Vision'
 
 describe('Vision OCR translation error routing', () => {
   it('keeps an explicit OCR failure in the source result', () => {

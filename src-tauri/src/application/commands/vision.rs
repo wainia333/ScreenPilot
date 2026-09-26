@@ -1954,6 +1954,7 @@ fn configured_at(values: &[String], index: usize) -> bool {
 
 #[tauri::command]
 pub fn screenshot_translation_settings_update(
+    app: AppHandle,
     state: State<'_, AppState>,
     patch: Value,
 ) -> Result<Value, String> {
@@ -1963,6 +1964,14 @@ pub fn screenshot_translation_settings_update(
     let projection = vision_runtime_settings_projection(current.clone())?;
     state.store.save(&current)?;
     state.replace(&current)?;
+    let revision = state.advance_settings_revision(&current)?;
+    let _ = app.emit(
+        "screenpilot:settings-changed",
+        serde_json::json!({
+            "settings": current,
+            "revision": revision,
+        }),
+    );
     Ok(projection)
 }
 
@@ -3492,6 +3501,7 @@ mod tests {
                 id: "custom".into(),
                 name: "Custom".into(),
                 base_url: "https://example.com/v1".into(),
+                protocol: crate::domain::providers::ApiProtocol::Responses,
                 key_count: 1,
                 available_models: vec!["model-a".into()],
                 enabled_models: vec!["model-a".into()],

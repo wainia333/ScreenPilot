@@ -1,7 +1,7 @@
 use crate::application::state::CancellationSignal;
 use crate::domain::providers::{
-    derive_endpoints, exponential_backoff, retry_after, should_retry, should_rotate_key,
-    ApiProtocol,
+    derive_endpoints_with_protocol, exponential_backoff, retry_after, should_retry,
+    should_rotate_key, ApiProtocol,
 };
 use crate::domain::settings::ProviderSettings;
 use crate::domain::settings::ThinkingEffort;
@@ -283,7 +283,7 @@ pub async fn complete_text_cancelled(
     policy: AiRequestPolicy,
     cancellation: Option<Arc<CancellationSignal>>,
 ) -> Result<String, String> {
-    let endpoints = derive_endpoints(&provider.base_url)?;
+    let endpoints = derive_endpoints_with_protocol(&provider.base_url, provider.protocol)?;
     let body = match endpoints.protocol {
         ApiProtocol::ChatCompletions => json!({
             "model": model,
@@ -352,7 +352,7 @@ pub async fn complete_text_with_options_cancelled(
     options: TextRequestOptions,
     cancellation: Option<Arc<CancellationSignal>>,
 ) -> Result<String, String> {
-    let endpoints = derive_endpoints(&provider.base_url)?;
+    let endpoints = derive_endpoints_with_protocol(&provider.base_url, provider.protocol)?;
     let mut body = match endpoints.protocol {
         ApiProtocol::ChatCompletions => json!({
             "model": model,
@@ -528,7 +528,7 @@ fn build_vision_request(
     policy: AiRequestPolicy,
     options: VisionRequestOptions,
 ) -> Result<(ApiProtocol, Url, Value), String> {
-    let endpoints = derive_endpoints(&provider.base_url)?;
+    let endpoints = derive_endpoints_with_protocol(&provider.base_url, provider.protocol)?;
     validate_vision_options(endpoints.protocol, options)?;
     let last_user = messages.iter().rposition(|message| message.role == "user");
     let body = match endpoints.protocol {
@@ -614,7 +614,8 @@ where
     if cancelled() {
         return Ok(AiStreamFinish::Cancelled);
     }
-    let endpoints = derive_endpoints(&input.provider.base_url)?;
+    let endpoints =
+        derive_endpoints_with_protocol(&input.provider.base_url, input.provider.protocol)?;
     validate_vision_options(endpoints.protocol, options)?;
     let last_user = input
         .messages
@@ -1420,6 +1421,7 @@ mod tests {
             id: "test".into(),
             name: "Test".into(),
             base_url,
+            protocol: ApiProtocol::Responses,
             key_count: 1,
             available_models: vec!["model:vision".into()],
             enabled_models: vec!["model:vision".into()],
@@ -1516,8 +1518,11 @@ mod tests {
             VisionRequestOptions::default(),
         )
         .expect("bare chat suffix request");
-        assert_eq!(protocol, ApiProtocol::Responses);
-        assert_eq!(request.as_str(), "https://proxy.example.com/responses");
+        assert_eq!(protocol, ApiProtocol::ChatCompletions);
+        assert_eq!(
+            request.as_str(),
+            "https://proxy.example.com/chat/completions"
+        );
     }
 
     #[test]

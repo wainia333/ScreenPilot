@@ -1,4 +1,6 @@
-use crate::application::lifecycle::{register_changed_shortcuts, update_tray};
+use crate::application::lifecycle::{
+    acknowledge_main_navigation, pending_main_navigation, register_changed_shortcuts, update_tray,
+};
 use crate::application::state::AppState;
 use crate::domain::settings::{
     save_transaction, AppSettings, ProviderSettings, SettingsEffects, SettingsExport,
@@ -11,9 +13,10 @@ use crate::infrastructure::credentials::{
 use crate::infrastructure::provider_http;
 use chrono::Utc;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -22,6 +25,21 @@ use tauri_plugin_dialog::DialogExt;
 pub struct SettingsSaveResult {
     settings: AppSettings,
     applied_shortcuts: HashMap<String, String>,
+    revision: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshot {
+    settings: AppSettings,
+    revision: u64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChangedEvent {
+    settings: AppSettings,
+    revision: u64,
 }
 
 #[derive(Serialize)]
@@ -33,6 +51,13 @@ pub struct ProviderConnectionResult {
 #[tauri::command]
 pub fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> {
     state.current()
+}
+
+#[tauri::command]
+pub fn settings_snapshot_load(state: State<'_, AppState>) -> Result<SettingsSnapshot, String> {
+    let _settings_write = state.lock_settings_write()?;
+    let (settings, revision) = state.settings_snapshot()?;
+    Ok(SettingsSnapshot { settings, revision })
 }
 
 #[tauri::command]
@@ -65,6 +90,35 @@ pub fn startup_notice_acknowledge(
 }
 
 #[tauri::command]
+pub fn main_navigation_acknowledge(
+    app: AppHandle,
+    request_id: u64,
+    accepted: bool,
+) -> Result<(), String> {
+    acknowledge_main_navigation(&app, request_id, accepted)
+}
+
+#[tauri::command]
+pub fn main_navigation_pending(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::application::lifecycle::MainNavigationRequest>, String> {
+    pending_main_navigation(&state)
+}
+
+#[tauri::command]
+pub fn window_route_current(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<&'static str, String> {
+    match window.label() {
+        "main" => state.main_route().map(|route| route.name()),
+        "translator" => Ok("translator"),
+        "vision" | "ocr" => Ok("vision"),
+        label => Err(format!("Unknown ScreenPilot window: {label}")),
+    }
+}
+
+#[tauri::command]
 pub fn settings_save(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -80,6 +134,8 @@ pub fn settings_save(
         synchronize_startup: startup_settings_changed(&previous, &settings),
     };
     save_transaction(&mut effects, &previous, &settings)?;
+    let revision = state.advance_settings_revision(&settings)?;
+    emit_settings_changed(&app, &settings, revision);
     Ok(SettingsSaveResult {
         applied_shortcuts: HashMap::from([
             ("translator".into(), settings.shortcuts.translator.clone()),
@@ -94,7 +150,150 @@ pub fn settings_save(
             ),
         ]),
         settings,
+        revision,
     })
+}
+
+#[tauri::command]
+pub fn settings_save_patch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    base_revision: u64,
+    patch: Value,
+) -> Result<SettingsSaveResult, String> {
+    let _settings_write = state.lock_settings_write()?;
+    let previous = state.current()?;
+    let baseline = state.settings_at_revision(base_revision).ok_or_else(|| {
+        "SETTINGS_CONFLICT: the settings baseline is no longer available".to_string()
+    })?;
+    let previous_value = serde_json::to_value(&previous).map_err(|error| error.to_string())?;
+    let baseline_value = serde_json::to_value(&baseline).map_err(|error| error.to_string())?;
+    validate_settings_patch_shape(&previous_value, &patch, "settings")?;
+    let next_value = merge_settings_patch(previous_value.clone(), &patch)?;
+    let mut next = serde_json::from_value::<AppSettings>(next_value)
+        .map_err(|error| format!("Invalid settings patch: {error}"))?;
+    next.normalize_ai_options();
+    let next_value = serde_json::to_value(&next).map_err(|error| error.to_string())?;
+    let conflicts =
+        settings_conflict_paths(&baseline_value, &previous_value, &next_value, "settings");
+    if !conflicts.is_empty() {
+        return Err(format!("SETTINGS_CONFLICT: {}", conflicts.join(", ")));
+    }
+    if next == previous {
+        let revision = state.settings_revision();
+        return Ok(settings_save_result(next, revision));
+    }
+    let mut effects = RuntimeSettingsEffects {
+        app: &app,
+        state: &state,
+        synchronize_startup: startup_settings_changed(&previous, &next),
+    };
+    save_transaction(&mut effects, &previous, &next)?;
+    let revision = state.advance_settings_revision(&next)?;
+    emit_settings_changed(&app, &next, revision);
+    Ok(settings_save_result(next, revision))
+}
+
+fn settings_save_result(settings: AppSettings, revision: u64) -> SettingsSaveResult {
+    SettingsSaveResult {
+        applied_shortcuts: HashMap::from([
+            ("translator".into(), settings.shortcuts.translator.clone()),
+            ("vision".into(), settings.shortcuts.vision.clone()),
+            (
+                "screenshotTranslation".into(),
+                settings.shortcuts.screenshot_translation.clone(),
+            ),
+            (
+                "promptOptimizer".into(),
+                settings.shortcuts.prompt_optimizer.clone(),
+            ),
+        ]),
+        settings,
+        revision,
+    }
+}
+
+fn emit_settings_changed(app: &AppHandle, settings: &AppSettings, revision: u64) {
+    let _ = app.emit(
+        "screenpilot:settings-changed",
+        SettingsChangedEvent {
+            settings: settings.clone(),
+            revision,
+        },
+    );
+}
+
+fn validate_settings_patch_shape(current: &Value, patch: &Value, path: &str) -> Result<(), String> {
+    let Value::Object(patch_object) = patch else {
+        return Err("Invalid settings patch: root must be an object".into());
+    };
+    let Value::Object(current_object) = current else {
+        return Err(format!("Invalid settings patch at {path}"));
+    };
+    for (key, value) in patch_object {
+        let current_value = current_object
+            .get(key)
+            .ok_or_else(|| format!("Invalid settings patch field: {path}.{key}"))?;
+        if value.is_object() && current_value.is_object() {
+            validate_settings_patch_shape(current_value, value, &format!("{path}.{key}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_settings_patch(current: Value, patch: &Value) -> Result<Value, String> {
+    let Value::Object(mut current_object) = current else {
+        return Err("Invalid settings patch: current settings are not an object".into());
+    };
+    let Value::Object(patch_object) = patch else {
+        return Err("Invalid settings patch: root must be an object".into());
+    };
+    for (key, value) in patch_object {
+        let merged = match current_object.remove(key) {
+            Some(current_value) if current_value.is_object() && value.is_object() => {
+                merge_settings_patch(current_value, value)?
+            }
+            _ => value.clone(),
+        };
+        current_object.insert(key.clone(), merged);
+    }
+    Ok(Value::Object(current_object))
+}
+
+fn settings_conflict_paths(
+    baseline: &Value,
+    current: &Value,
+    next: &Value,
+    path: &str,
+) -> Vec<String> {
+    if let (Value::Object(baseline), Value::Object(current), Value::Object(next)) =
+        (baseline, current, next)
+    {
+        let keys = baseline
+            .keys()
+            .chain(current.keys())
+            .chain(next.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        return keys
+            .into_iter()
+            .flat_map(|key| {
+                let baseline_value = baseline.get(key).unwrap_or(&Value::Null);
+                let current_value = current.get(key).unwrap_or(&Value::Null);
+                let next_value = next.get(key).unwrap_or(&Value::Null);
+                settings_conflict_paths(
+                    baseline_value,
+                    current_value,
+                    next_value,
+                    &format!("{path}.{key}"),
+                )
+            })
+            .collect();
+    }
+    if current != next && baseline != current {
+        vec![path.to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -145,6 +344,7 @@ fn apply_translation_settings_patch(
 
 #[tauri::command]
 pub fn translation_settings_update(
+    app: AppHandle,
     state: State<'_, AppState>,
     patch: TranslationSettingsPatch,
 ) -> Result<(), String> {
@@ -152,7 +352,10 @@ pub fn translation_settings_update(
     let mut settings = state.current()?;
     apply_translation_settings_patch(&mut settings, patch)?;
     state.store.save(&settings)?;
-    state.replace(&settings)
+    state.replace(&settings)?;
+    let revision = state.advance_settings_revision(&settings)?;
+    emit_settings_changed(&app, &settings, revision);
+    Ok(())
 }
 
 #[tauri::command]
@@ -540,6 +743,7 @@ mod tests {
             id: "custom".into(),
             name: "Custom".into(),
             base_url: "https://example.com/v1".into(),
+            protocol: crate::domain::providers::ApiProtocol::Responses,
             key_count: 1,
             available_models: vec!["model-a".into()],
             enabled_models: vec!["model-a".into()],
@@ -599,6 +803,42 @@ mod tests {
         .expect_err("unsupported source language should fail");
         assert_eq!(error, "Text translation source language is unsupported");
         assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn settings_patch_merges_disjoint_changes_from_the_current_revision() {
+        let baseline = AppSettings::default();
+        let mut current = baseline.clone();
+        current.translation.target_language = "ja".into();
+        let patch = serde_json::json!({ "theme": "dark" });
+        let baseline_value = serde_json::to_value(&baseline).expect("baseline JSON");
+        let current_value = serde_json::to_value(&current).expect("current JSON");
+        validate_settings_patch_shape(&current_value, &patch, "settings")
+            .expect("valid settings patch");
+        let next_value =
+            merge_settings_patch(current_value.clone(), &patch).expect("merge disjoint patch");
+        let conflicts =
+            settings_conflict_paths(&baseline_value, &current_value, &next_value, "settings");
+        assert!(conflicts.is_empty());
+        let next = serde_json::from_value::<AppSettings>(next_value).expect("merged settings");
+        assert_eq!(next.theme, crate::domain::settings::ThemeMode::Dark);
+        assert_eq!(next.translation.target_language, "ja");
+    }
+
+    #[test]
+    fn settings_patch_reports_same_field_conflicts_without_silent_overwrite() {
+        let baseline = AppSettings::default();
+        let mut current = baseline.clone();
+        current.translation.target_language = "ja".into();
+        let patch = serde_json::json!({ "translation": { "targetLanguage": "en" } });
+        let baseline_value = serde_json::to_value(&baseline).expect("baseline JSON");
+        let current_value = serde_json::to_value(&current).expect("current JSON");
+        let next_value =
+            merge_settings_patch(current_value.clone(), &patch).expect("merge conflicting patch");
+        let conflicts =
+            settings_conflict_paths(&baseline_value, &current_value, &next_value, "settings");
+        assert_eq!(conflicts, vec!["settings.translation.targetLanguage"]);
+        assert_eq!(next_value["translation"]["targetLanguage"], "en");
     }
 
     #[test]
@@ -689,6 +929,7 @@ mod tests {
             id: "provider-a".into(),
             name: "Provider A".into(),
             base_url: "https://example.com/v1".into(),
+            protocol: crate::domain::providers::ApiProtocol::Responses,
             key_count: 1,
             available_models: Vec::new(),
             enabled_models: Vec::new(),
@@ -755,6 +996,7 @@ mod tests {
             id: "retained-provider".into(),
             name: "Retained Provider".into(),
             base_url: "https://example.com/v1".into(),
+            protocol: crate::domain::providers::ApiProtocol::Responses,
             key_count: 1,
             available_models: Vec::new(),
             enabled_models: Vec::new(),

@@ -87,7 +87,7 @@ for (const call of ['crate::native_freeze::show', 'crate::native_freeze::capture
   if (!rustSource.includes(call)) failures.push(`生产后端未接入受控截图核心：${call}`)
 }
 const lifecycleSource = readFileSync(resolve(root, 'src-tauri/src/application/lifecycle.rs'), 'utf8')
-const visionSource = readFileSync(resolve(root, 'src/vendor/kivio-screenshot/Vision.tsx'), 'utf8')
+const visionSource = readFileSync(resolve(root, 'src/vendor/screenshot/Vision.tsx'), 'utf8')
 const visionAdapterSource = readFileSync(resolve(root, 'src/features/vision/reference-vision.tsx'), 'utf8')
 const tauriConfig = JSON.parse(readFileSync(resolve(root, 'src-tauri/tauri.conf.json'), 'utf8'))
 const contentSecurityPolicy = tauriConfig?.app?.security?.csp

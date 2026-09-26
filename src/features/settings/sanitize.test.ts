@@ -170,6 +170,16 @@ describe('sanitizeSettings', () => {
 })
 
 describe('validateSettings', () => {
+  it('migrates old recorder whitespace and punctuation values to parser tokens', () => {
+    const settings = sanitizeSettings({
+      shortcuts: { translator: 'Control+ ', vision: 'Shift++' },
+      altSnap: { shortcut: 'Control+Alt' },
+    })
+    expect(settings.shortcuts.translator).toBe('Control+Space')
+    expect(settings.shortcuts.vision).toBe('Shift+Equal')
+    expect(settings.altSnap.shortcut).toBe('Control+Alt')
+  })
+
   it('rejects duplicate shortcuts', () => {
     const settings = sanitizeSettings({
       shortcuts: {
@@ -182,6 +192,33 @@ describe('validateSettings', () => {
     expect(validateSettings(settings)).toContainEqual(
       expect.objectContaining({ path: 'shortcuts.vision', code: 'conflict' }),
     )
+  })
+
+  it('matches Rust enablement filtering and reports conflicts when a feature is re-enabled', () => {
+    const disabled = sanitizeSettings({
+      vision: { enabled: false },
+      shortcuts: { translator: 'F2', vision: 'F2' },
+    })
+    expect(validateSettings(disabled)).toEqual([])
+
+    const enabled = { ...disabled, vision: { ...disabled.vision, enabled: true } }
+    expect(validateSettings(enabled)).toContainEqual(
+      expect.objectContaining({ path: 'shortcuts.vision', code: 'conflict' }),
+    )
+  })
+
+  it('rejects modifier-only global shortcuts but allows them for AltSnap', () => {
+    const settings = sanitizeSettings({
+      shortcuts: { translator: 'Control' },
+      altSnap: { shortcut: 'Control+Alt' },
+    })
+    expect(validateSettings(settings)).toContainEqual(
+      expect.objectContaining({ path: 'shortcuts.translator', code: 'invalid' }),
+    )
+    expect(validateSettings({
+      ...settings,
+      shortcuts: { ...settings.shortcuts, translator: 'F2' },
+    })).toEqual([])
   })
 
   it('allows HTTP only for loopback providers', () => {

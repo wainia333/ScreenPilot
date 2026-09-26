@@ -1,7 +1,7 @@
 use crate::domain::settings::AppSettings;
 use crate::infrastructure::images::ImageStore;
 use crate::infrastructure::settings_store::SettingsStore;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -48,6 +48,8 @@ impl CancellationSignal {
 
 pub struct AppState {
     pub settings: RwLock<AppSettings>,
+    settings_revision: AtomicU64,
+    settings_history: Mutex<VecDeque<(u64, AppSettings)>>,
     pub store: SettingsStore,
     pub images: ImageStore,
     pub webview_data_directory: PathBuf,
@@ -58,8 +60,13 @@ pub struct AppState {
     reference_vision: Mutex<ReferenceVisionState>,
     reference_ocr: Mutex<ReferenceVisionState>,
     translator_request: Mutex<TranslatorRequestState>,
+    translator_paste_target: Mutex<Option<TranslatorPasteTarget>>,
+    text_commit_generation: AtomicU64,
+    text_commit_clipboard: Mutex<()>,
     optimizer_request: Mutex<TranslatorRequestState>,
     main_route: Mutex<MainRoute>,
+    main_navigation_generation: AtomicU64,
+    pending_main_navigation: Mutex<Option<(u64, MainRoute)>>,
     reference_vision_images: Mutex<ReferenceVisionImages>,
     reference_ocr_images: Mutex<ReferenceVisionImages>,
     surface_generation: AtomicU64,
@@ -72,6 +79,15 @@ pub struct AppState {
     startup_notice: Mutex<Option<String>>,
     native_freeze_owner: Mutex<Option<ReferenceSurface>>,
     suspended_reference_surface: Mutex<Option<ReferenceSurface>>,
+}
+
+/// The external window that owned the focus before the translator surface was
+/// shown.  Keep this as scalar Win32 identity data so the application state
+/// does not own an HWND or any native handle lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TranslatorPasteTarget {
+    pub hwnd: isize,
+    pub process_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,8 +159,11 @@ impl AppState {
         webview_data_directory: PathBuf,
         _cache_directory: PathBuf,
     ) -> Self {
+        let initial_settings = settings.clone();
         Self {
             settings: RwLock::new(settings),
+            settings_revision: AtomicU64::new(0),
+            settings_history: Mutex::new(VecDeque::from([(0, initial_settings)])),
             store,
             images,
             webview_data_directory,
@@ -167,6 +186,9 @@ impl AppState {
                 cancelled: false,
                 signal: Arc::new(CancellationSignal::new()),
             }),
+            translator_paste_target: Mutex::new(None),
+            text_commit_generation: AtomicU64::new(0),
+            text_commit_clipboard: Mutex::new(()),
             reference_ocr_images: Mutex::new(ReferenceVisionImages {
                 generation: 0,
                 active: false,
@@ -179,6 +201,8 @@ impl AppState {
                 signal: Arc::new(CancellationSignal::new()),
             }),
             main_route: Mutex::new(MainRoute::Settings),
+            main_navigation_generation: AtomicU64::new(0),
+            pending_main_navigation: Mutex::new(None),
             reference_vision_images: Mutex::new(ReferenceVisionImages {
                 generation: 0,
                 active: false,
@@ -799,8 +823,102 @@ impl AppState {
         Ok(())
     }
 
+    /// Queue one native main-window navigation request. Repeated clicks for
+    /// the same route share the existing request so one user intent cannot
+    /// create a reset/acknowledgement loop.
+    pub fn begin_main_navigation(&self, route: MainRoute) -> Result<(u64, bool), String> {
+        let mut pending = self
+            .pending_main_navigation
+            .lock()
+            .map_err(|_| "Main navigation state is unavailable".to_string())?;
+        if let Some((request_id, pending_route)) = *pending {
+            if pending_route == route {
+                return Ok((request_id, false));
+            }
+        }
+        let request_id = self
+            .main_navigation_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        *pending = Some((request_id, route));
+        Ok((request_id, true))
+    }
+
+    pub fn pending_main_navigation(&self) -> Result<Option<(u64, MainRoute)>, String> {
+        self.pending_main_navigation
+            .lock()
+            .map(|pending| *pending)
+            .map_err(|_| "Main navigation state is unavailable".to_string())
+    }
+
+    pub fn acknowledge_main_navigation(
+        &self,
+        request_id: u64,
+        accepted: bool,
+    ) -> Result<Option<MainRoute>, String> {
+        let mut pending = self
+            .pending_main_navigation
+            .lock()
+            .map_err(|_| "Main navigation state is unavailable".to_string())?;
+        let Some((current_id, route)) = *pending else {
+            return Ok(None);
+        };
+        if current_id != request_id {
+            return Ok(None);
+        }
+        *pending = None;
+        Ok(accepted.then_some(route))
+    }
+
     pub fn begin_surface_action(&self) -> u64 {
         self.surface_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn set_translator_paste_target(
+        &self,
+        target: Option<TranslatorPasteTarget>,
+    ) -> Result<(), String> {
+        *self
+            .translator_paste_target
+            .lock()
+            .map_err(|_| "Translator paste target state is unavailable".to_string())? = target;
+        Ok(())
+    }
+
+    pub fn translator_paste_target(&self) -> Result<Option<TranslatorPasteTarget>, String> {
+        self.translator_paste_target
+            .lock()
+            .map(|target| *target)
+            .map_err(|_| "Translator paste target state is unavailable".to_string())
+    }
+
+    pub fn clear_translator_paste_target(&self) -> Result<(), String> {
+        self.set_translator_paste_target(None)
+    }
+
+    /// Begin a clipboard commit.  Advancing this token invalidates any older
+    /// delayed auto-paste, while keeping the clipboard write itself short and
+    /// independently serialized.
+    pub fn begin_text_commit(&self) -> u64 {
+        self.text_commit_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn text_commit_is_current(&self, generation: u64) -> bool {
+        self.text_commit_generation.load(Ordering::SeqCst) == generation
+    }
+
+    pub fn text_commit_generation(&self) -> u64 {
+        self.text_commit_generation.load(Ordering::SeqCst)
+    }
+
+    pub fn cancel_active_text_commit(&self) {
+        self.text_commit_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn lock_text_commit_clipboard(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.text_commit_clipboard
+            .lock()
+            .map_err(|_| "Clipboard commit state is unavailable".to_string())
     }
 
     pub fn surface_action_is_current(&self, generation: u64) -> bool {
@@ -833,6 +951,38 @@ impl AppState {
             .read()
             .map(|settings| settings.clone())
             .map_err(|_| "Settings state is unavailable".into())
+    }
+
+    pub fn settings_snapshot(&self) -> Result<(AppSettings, u64), String> {
+        let settings = self.current()?;
+        Ok((settings, self.settings_revision.load(Ordering::SeqCst)))
+    }
+
+    pub fn settings_revision(&self) -> u64 {
+        self.settings_revision.load(Ordering::SeqCst)
+    }
+
+    pub fn settings_at_revision(&self, revision: u64) -> Option<AppSettings> {
+        self.settings_history
+            .lock()
+            .ok()?
+            .iter()
+            .find_map(|(stored_revision, settings)| {
+                (*stored_revision == revision).then(|| settings.clone())
+            })
+    }
+
+    pub fn advance_settings_revision(&self, settings: &AppSettings) -> Result<u64, String> {
+        let mut history = self
+            .settings_history
+            .lock()
+            .map_err(|_| "Settings history is unavailable".to_string())?;
+        let revision = self.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        history.push_back((revision, settings.clone()));
+        while history.len() > 256 {
+            history.pop_front();
+        }
+        Ok(revision)
     }
 
     pub fn replace(&self, settings: &AppSettings) -> Result<(), String> {
@@ -897,7 +1047,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, ReferenceSurface};
+    use super::{AppState, MainRoute, ReferenceSurface, TranslatorPasteTarget};
     use crate::domain::settings::AppSettings;
     use crate::infrastructure::images::ImageStore;
     use crate::infrastructure::settings_store::SettingsStore;
@@ -917,6 +1067,57 @@ mod tests {
             ),
             directory,
         )
+    }
+
+    #[test]
+    fn main_navigation_acknowledgement_is_one_shot_and_deduplicated() {
+        let (state, _directory) = state();
+        let (request_id, emitted) = state
+            .begin_main_navigation(MainRoute::PromptOptimizer)
+            .unwrap();
+        assert!(emitted);
+        let (duplicate_id, duplicate_emitted) = state
+            .begin_main_navigation(MainRoute::PromptOptimizer)
+            .unwrap();
+        assert_eq!(duplicate_id, request_id);
+        assert!(!duplicate_emitted);
+        assert_eq!(
+            state.pending_main_navigation(),
+            Ok(Some((request_id, MainRoute::PromptOptimizer)))
+        );
+        assert_eq!(
+            state.acknowledge_main_navigation(request_id + 1, true),
+            Ok(None)
+        );
+        assert_eq!(
+            state.pending_main_navigation(),
+            Ok(Some((request_id, MainRoute::PromptOptimizer)))
+        );
+        assert_eq!(
+            state.acknowledge_main_navigation(request_id, false),
+            Ok(None)
+        );
+        assert_eq!(state.pending_main_navigation(), Ok(None));
+        assert_eq!(
+            state.acknowledge_main_navigation(request_id, true),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_replaced_main_navigation_rejects_the_old_ack() {
+        let (state, _directory) = state();
+        let (first, _) = state
+            .begin_main_navigation(MainRoute::PromptOptimizer)
+            .unwrap();
+        let (second, emitted) = state.begin_main_navigation(MainRoute::Settings).unwrap();
+        assert!(emitted);
+        assert_ne!(first, second);
+        assert_eq!(state.acknowledge_main_navigation(first, true), Ok(None));
+        assert_eq!(
+            state.acknowledge_main_navigation(second, true),
+            Ok(Some(MainRoute::Settings))
+        );
     }
 
     #[test]
@@ -1489,6 +1690,36 @@ mod tests {
         assert!(state.translator_request_current(2));
         assert!(state.begin_translator_request(1).is_none());
         assert!(state.begin_translator_request(2).is_none());
+    }
+
+    #[test]
+    fn text_commit_tokens_invalidate_older_delayed_pastes() {
+        let (state, _directory) = state();
+        let first = state.begin_text_commit();
+        assert!(state.text_commit_is_current(first));
+        let second = state.begin_text_commit();
+        assert!(!state.text_commit_is_current(first));
+        assert!(state.text_commit_is_current(second));
+        state.cancel_active_text_commit();
+        assert!(!state.text_commit_is_current(second));
+    }
+
+    #[test]
+    fn translator_paste_target_remains_available_for_repeated_commits() {
+        let (state, _directory) = state();
+        let target = TranslatorPasteTarget {
+            hwnd: 101,
+            process_id: 7,
+        };
+        state
+            .set_translator_paste_target(Some(target))
+            .expect("store translator paste target");
+        assert_eq!(state.translator_paste_target(), Ok(Some(target)));
+        assert_eq!(state.translator_paste_target(), Ok(Some(target)));
+        state
+            .clear_translator_paste_target()
+            .expect("clear translator paste target");
+        assert_eq!(state.translator_paste_target(), Ok(None));
     }
 
     #[test]

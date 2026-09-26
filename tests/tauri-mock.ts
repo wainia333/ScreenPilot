@@ -1,4 +1,7 @@
 import type { Page } from '@playwright/test'
+import { DEFAULT_SETTINGS } from '../src/features/settings/defaults'
+
+export type MockWindowLabel = 'main' | 'translator' | 'vision' | 'ocr'
 
 const sampleImage = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#f1f3f4"/><rect x="80" y="90" width="800" height="360" rx="24" fill="#ffffff" stroke="#d9dddf"/><text x="130" y="180" font-family="Segoe UI" font-size="44" fill="#171a1d">ScreenPilot Visual Test</text><text x="130" y="250" font-family="Segoe UI" font-size="28" fill="#4e565c">可见内容识别 · English OCR · E = mc²</text><rect x="130" y="310" width="520" height="18" rx="9" fill="#c35e42"/></svg>',
@@ -16,12 +19,24 @@ export async function installVisionTauriMock(
   directTranslate = false,
   listenerFailures: Partial<Record<'vision-stream' | 'vision-translate-stream', number>> = {},
   initialTranslationMethod: 'ai' | 'google' | 'baidu' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft' = 'microsoft',
+  explicitWindowLabel?: MockWindowLabel,
+  simulateNativeResize = false,
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod, requestedWindowLabel, desktopSettings, simulateNativeResize: simulateNativeResizeEnabled }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     const listenerTargets = new Map<number, { kind: string; label?: string }>()
-    const windowLabel = new URLSearchParams(window.location.search).get('window') ?? 'vision'
+    const windowLabel = requestedWindowLabel
+      ?? new URLSearchParams(window.location.search).get('window')
+      ?? 'vision'
+    const requestedRoute = new URLSearchParams(window.location.search).get('route')
+    let currentWindowRoute = windowLabel === 'translator'
+      ? 'translator'
+      : windowLabel === 'vision' || windowLabel === 'ocr'
+        ? 'vision'
+        : requestedRoute === 'prompt-optimizer'
+          ? 'prompt-optimizer'
+          : 'settings'
     let callbackSequence = 0
     let listenerSequence = 0
     let imageSequence = 0
@@ -54,6 +69,8 @@ export async function installVisionTauriMock(
       translationSettingsDelayMs: 0,
       translationSettingsFailuresRemaining: 0,
       translationResponseDelayMs: 0,
+      settingsLoadFailuresRemaining: 0,
+      translationFailuresRemaining: 0,
       externalUrls: [] as string[],
       answerText: 'The image contains a synthetic ScreenPilot visual test with Chinese, English, and a formula.',
       activeVisionImageId: '',
@@ -130,6 +147,8 @@ export async function installVisionTauriMock(
       temporaryImageIds: [] as string[],
       committedImageIds: [] as string[],
       deletedTemporaryImageIds: [] as string[],
+      historyImageDeleteCalls: [] as string[],
+      historyImageDeleteFailuresRemaining: 0,
       speechCalls: 0,
       speechFailuresRemaining: 0,
     }
@@ -273,6 +292,9 @@ export async function installVisionTauriMock(
       }
     }
     const emit = (event: string, payload: unknown) => {
+      if ((event === 'screenpilot:route' || event === 'screenpilot:reset') && typeof payload === 'string') {
+        currentWindowRoute = payload
+      }
       visionTestState.emitWindowEvent(windowLabel, event, payload)
     }
     visionTestState.emitVisionAnswerDelta = (delta: string) => {
@@ -305,6 +327,18 @@ export async function installVisionTauriMock(
       listenerTargets.delete(eventId)
     }
     const stringArgument = (value: unknown) => typeof value === 'string' ? value : ''
+    let desktopSettingsRevision = 0
+    const mergeDesktopSettingsPatch = (current: unknown, patch: unknown): unknown => {
+      if (typeof current !== 'object' || current === null || Array.isArray(current)
+        || typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+        return structuredClone(patch)
+      }
+      const merged = structuredClone(current) as Record<string, unknown>
+      Object.entries(patch as Record<string, unknown>).forEach(([key, value]) => {
+        merged[key] = key in merged ? mergeDesktopSettingsPatch(merged[key], value) : structuredClone(value)
+      })
+      return merged
+    }
     const invoke = async (command: string, args: Record<string, unknown> = {}) => {
       await Promise.resolve()
       if (command === 'plugin:event|listen') {
@@ -351,6 +385,88 @@ export async function installVisionTauriMock(
       if (command.startsWith('plugin:window|')) return null
       if (command === 'open_external') {
         visionTestState.externalUrls.push(String(args.url))
+        return null
+      }
+      if (command === 'startup_notice_take' || command === 'startup_notice_peek') return null
+      if (command === 'startup_notice_acknowledge') return true
+      if (command === 'main_navigation_pending') return null
+      if (command === 'main_navigation_acknowledge') return null
+      if (command === 'settings_load') {
+        if (visionTestState.settingsLoadFailuresRemaining > 0) {
+          visionTestState.settingsLoadFailuresRemaining -= 1
+          throw new Error('synthetic settings unavailable')
+        }
+        return structuredClone(desktopSettings)
+      }
+      if (command === 'settings_snapshot_load') {
+        return { settings: structuredClone(desktopSettings), revision: desktopSettingsRevision }
+      }
+      if (command === 'permissions_status') {
+        return { platform: 'windows', screenCapture: true, accessibility: true, administrator: false }
+      }
+      if (command === 'settings_save') {
+        desktopSettings = structuredClone(args.settings) as typeof desktopSettings
+        desktopSettingsRevision += 1
+        const result = {
+          settings: structuredClone(desktopSettings),
+          appliedShortcuts: {},
+          revision: desktopSettingsRevision,
+        }
+        emit('screenpilot:settings-changed', { settings: structuredClone(desktopSettings), revision: desktopSettingsRevision })
+        return result
+      }
+      if (command === 'settings_save_patch') {
+        desktopSettings = mergeDesktopSettingsPatch(desktopSettings, args.patch) as typeof desktopSettings
+        desktopSettingsRevision += 1
+        const result = {
+          settings: structuredClone(desktopSettings),
+          appliedShortcuts: {},
+          revision: desktopSettingsRevision,
+        }
+        emit('screenpilot:settings-changed', { settings: structuredClone(desktopSettings), revision: desktopSettingsRevision })
+        return result
+      }
+      if (command === 'translation_settings_update') {
+        desktopSettings = mergeDesktopSettingsPatch(desktopSettings, { translation: args.patch }) as typeof desktopSettings
+        desktopSettingsRevision += 1
+        emit('screenpilot:settings-changed', { settings: structuredClone(desktopSettings), revision: desktopSettingsRevision })
+        return null
+      }
+      if (
+        command === 'credentials_set_provider_keys_batch'
+        || command === 'credentials_set_adapter_keys_batch'
+        || command === 'credentials_set_imported_secrets'
+        || command === 'credentials_set_provider_keys'
+        || command === 'credentials_delete_provider_keys'
+      ) return null
+      if (command === 'credentials_provider_key_count') return 0
+      if (command === 'translator_cancel') return true
+      if (command === 'translator_take_selection') return ''
+      if (command === 'translator_translate') {
+        const request = args.request as { generation?: unknown; text?: unknown } | undefined
+        if (visionTestState.translationFailuresRemaining > 0) {
+          visionTestState.translationFailuresRemaining -= 1
+          throw new Error('synthetic network timeout')
+        }
+        return {
+          generation: Number(request?.generation ?? 0),
+          text: `译文：${typeof request?.text === 'string' ? request.text : ''}`,
+        }
+      }
+      if (command === 'optimizer_cancel') return true
+      if (command === 'window_route_current') return currentWindowRoute
+      if (command === 'optimizer_run') {
+        const request = args.request as { generation?: unknown; text?: unknown } | undefined
+        return {
+          generation: Number(request?.generation ?? 0),
+          text: `明确目标、约束和输出格式：\n\n${typeof request?.text === 'string' ? request.text : ''}`,
+        }
+      }
+      if (command === 'text_commit' || command === 'window_hide') {
+        if (command === 'window_hide') {
+          visionTestState.hideCount += 1
+          visionTestState.windowVisible = false
+        }
         return null
       }
       if (command === 'vision_runtime_settings_load') {
@@ -657,6 +773,17 @@ export async function installVisionTauriMock(
         visionTestState.floatingHasScreenshot = hasScreenshot
         visionTestState.floatingRect = floatingRect
         visionTestState.floatingAppliedRects.push(floatingRect)
+        if (simulateNativeResizeEnabled) {
+          Object.defineProperty(window, 'innerWidth', {
+            configurable: true,
+            value: Math.max(1, Math.round(floatingRect.width)),
+          })
+          Object.defineProperty(window, 'innerHeight', {
+            configurable: true,
+            value: Math.max(1, Math.round(floatingRect.height)),
+          })
+          window.dispatchEvent(new Event('resize'))
+        }
         return true
       }
       if (command === 'vision_fly_floating') {
@@ -729,6 +856,11 @@ export async function installVisionTauriMock(
       }
       if (command === 'vision_delete_history_image') {
         const imageId = stringArgument(args.imageId)
+        visionTestState.historyImageDeleteCalls.push(imageId)
+        if (visionTestState.historyImageDeleteFailuresRemaining > 0) {
+          visionTestState.historyImageDeleteFailuresRemaining -= 1
+          throw new Error('Synthetic history image delete failure')
+        }
         visionTestState.committedImageIds = visionTestState.committedImageIds.filter((id) => id !== imageId)
         return null
       }
@@ -740,7 +872,8 @@ export async function installVisionTauriMock(
         }
         return null
       }
-      if (command.startsWith('vision_')) return null
+      if (command === 'vision_cancel_stream' || command === 'vision_request' || command === 'vision_request_translate') return null
+      if (command === 'vision_export_markdown') return true
       throw new Error(`Unhandled Tauri mock command: ${command}`)
     }
     Object.assign(window, {
@@ -748,8 +881,8 @@ export async function installVisionTauriMock(
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener },
       __TAURI_INTERNALS__: {
         metadata: {
-          currentWindow: { label: new URLSearchParams(window.location.search).get('window') ?? 'vision' },
-          currentWebview: { label: new URLSearchParams(window.location.search).get('window') ?? 'vision' },
+          currentWindow: { label: windowLabel },
+          currentWebview: { label: windowLabel },
         },
         plugins: { path: { sep: '\\', delimiter: ';' } },
         convertFileSrc: (path: string) => path,
@@ -777,5 +910,8 @@ export async function installVisionTauriMock(
     directTranslateEnabled: directTranslate,
     initialListenerFailures: listenerFailures,
     initialMethod: initialTranslationMethod,
+    requestedWindowLabel: explicitWindowLabel,
+    desktopSettings: structuredClone(DEFAULT_SETTINGS),
+    simulateNativeResize,
   })
 }

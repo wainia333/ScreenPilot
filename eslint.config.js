@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', 'playwright-report', 'test-results', 'src-tauri/target', 'src-tauri/gen', 'src/vendor/kivio-screenshot'] },
+  { ignores: ['dist', 'coverage', 'playwright-report', 'test-results', 'release', 'src-tauri/target', 'src-tauri/gen', 'src/vendor/screenshot'] },
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked.map((config) => ({ ...config, files: ['**/*.{ts,tsx}'] })),
   ...tseslint.configs.stylisticTypeChecked.map((config) => ({ ...config, files: ['**/*.{ts,tsx}'] })),

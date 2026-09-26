@@ -12,7 +12,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 }))
 
 import { defaultTauriApi } from './tauri-api'
-import { api } from '../vendor/kivio-screenshot/api/tauri'
+import { api } from '../vendor/screenshot/api/tauri'
 
 describe('native event window isolation', () => {
   beforeEach(() => mocks.listen.mockClear())

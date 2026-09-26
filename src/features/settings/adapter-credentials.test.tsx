@@ -1,79 +1,44 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
-import { DesktopProvider } from '../../desktop/context'
-import { FakeDesktopPort } from '../../desktop/fake-desktop'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { AdapterCredentials } from './adapter-credentials'
 
-class RecordingDesktop extends FakeDesktopPort {
-  readonly adapterKeyWrites: { providerId: string; keys: string[] }[] = []
-
-  override setProviderKeys(providerId: string, keys: string[]): Promise<void> {
-    this.adapterKeyWrites.push({ providerId, keys: [...keys] })
-    return super.setProviderKeys(providerId, keys)
-  }
-}
-
 describe('AdapterCredentials', () => {
-  afterEach(cleanup)
-
-  it('renders localized credential labels without changing the save contract', () => {
-    const desktop = new RecordingDesktop()
-    render(<DesktopProvider port={desktop}><AdapterCredentials language="en" /></DesktopProvider>)
+  it('renders localized controlled fields and configuration state', () => {
+    const onDraftChange = vi.fn()
+    const onClear = vi.fn()
+    render(<AdapterCredentials
+      language="en"
+      drafts={{}}
+      configuredCounts={{ 'adapter-baidu-ocr': 2 }}
+      onDraftChange={onDraftChange}
+      onClear={onClear}
+    />)
 
     expect(screen.getByText('Service credentials')).toBeInTheDocument()
     expect(screen.getByLabelText('Baidu OCR API Key')).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Save' })[0]).toBeDisabled()
+    expect(screen.getByText('2 keys stored securely')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear credentials: Baidu OCR' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Clear credentials: Caiyun 2' })).toBeDisabled()
   })
 
-  it('does not replace saved credentials when the draft is blank', async () => {
-    const desktop = new RecordingDesktop()
-    await desktop.setProviderKeys('adapter-baidu-ocr', ['saved-api-key', 'saved-secret-key'])
-    desktop.adapterKeyWrites.length = 0
-    render(<DesktopProvider port={desktop}><AdapterCredentials /></DesktopProvider>)
+  it('keeps fields controlled and sends a clear action without writing credentials', () => {
+    const onDraftChange = vi.fn()
+    const onClear = vi.fn()
+    render(<AdapterCredentials
+      drafts={{ 'adapter-baidu-ocr': 'api-key\nsecret-key' }}
+      configuredCounts={{}}
+      onDraftChange={onDraftChange}
+      onClear={onClear}
+    />)
 
     const section = screen.getByLabelText('百度 OCR API Key').closest('section')
     expect(section).not.toBeNull()
     if (section === null) throw new Error('Baidu OCR credential section is missing')
-    const save = within(section).getByRole('button', { name: '保存' })
-    expect(save).toBeDisabled()
-    fireEvent.click(save)
-
-    expect(desktop.adapterKeyWrites).toHaveLength(0)
-    expect(await desktop.providerKeyCount('adapter-baidu-ocr')).toBe(2)
-  })
-
-  it('requires every field and preserves the declared field order', async () => {
-    const desktop = new RecordingDesktop()
-    render(<DesktopProvider port={desktop}><AdapterCredentials /></DesktopProvider>)
-
-    const apiKey = screen.getByLabelText('百度 OCR API Key')
-    const secretKey = screen.getByLabelText('百度 OCR Secret Key')
-    const section = apiKey.closest('section')
-    expect(section).not.toBeNull()
-    if (section === null) throw new Error('Baidu OCR credential section is missing')
-    const save = within(section).getByRole('button', { name: '保存' })
-
-    fireEvent.change(secretKey, { target: { value: 'secret-key' } })
-    await act(async () => {
-      fireEvent.click(save)
-      await Promise.resolve()
-    })
-    expect(desktop.adapterKeyWrites).toHaveLength(0)
-    expect(screen.getByRole('status')).toHaveTextContent('请完整填写 百度 OCR 的全部凭据字段')
-    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'error')
-
-    fireEvent.change(apiKey, { target: { value: ' api-key ' } })
-    await act(async () => {
-      fireEvent.click(save)
-      await Promise.resolve()
-    })
-    expect(desktop.adapterKeyWrites).toEqual([{
-      providerId: 'adapter-baidu-ocr',
-      keys: ['api-key', 'secret-key'],
-    }])
-    expect(apiKey).toHaveValue('')
-    expect(secretKey).toHaveValue('')
-    expect(screen.getByRole('status')).toHaveTextContent('百度 OCR 凭据已安全保存')
-    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'success')
+    expect(within(section).getByLabelText('百度 OCR API Key')).toHaveValue('api-key')
+    expect(within(section).getByLabelText('百度 OCR Secret Key')).toHaveValue('secret-key')
+    fireEvent.change(within(section).getByLabelText('百度 OCR API Key'), { target: { value: 'new-api-key' } })
+    expect(onDraftChange).toHaveBeenCalledWith('adapter-baidu-ocr', 'new-api-key\nsecret-key')
+    fireEvent.click(within(section).getByRole('button', { name: '清除凭据：百度 OCR' }))
+    expect(onClear).toHaveBeenCalledWith('adapter-baidu-ocr')
   })
 })

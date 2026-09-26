@@ -2,10 +2,13 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Check, Copy, Loader2, Play } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import ReferenceVision from '../../vendor/kivio-screenshot/Vision'
-import { api as referenceVisionApi } from '../../vendor/kivio-screenshot/api/tauri'
-import '../../vendor/kivio-screenshot/index.css'
+import ReferenceVision from '../../vendor/screenshot/Vision'
+import { api as referenceVisionApi } from '../../vendor/screenshot/api/tauri'
+import '../../vendor/screenshot/index.css'
+import { copyToClipboard } from '../../vendor/screenshot/utils/clipboard'
+import { i18n as visionI18n } from '../../vendor/screenshot/settings/i18n'
 import './vision-adapter.css'
 import { safeExternalUrl } from './citation-links'
 import {
@@ -18,6 +21,7 @@ import { installSafeFloatingDrag } from './safe-floating-drag'
 import { copyFor, translationLanguageOptions } from '../../shared/ui-copy'
 import type { InterfaceLanguage } from '../settings/types'
 import { syncDocumentTheme, type DocumentTheme } from '../../shared/theme'
+import { MarkdownView } from '../../shared/markdown/markdown-view'
 
 type TargetLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko'
 type SourceLanguage = TargetLanguage
@@ -59,12 +63,31 @@ type TranslateStreamPayload = {
 type OverrideResult = {
   status: 'idle' | 'loading' | 'ready' | 'error'
   text: string
+  error?: string
+  stale: boolean
+}
+
+type LanguageField = 'source' | 'target'
+
+type LanguagePair = {
+  source: SourceLanguage
+  target: TargetLanguage
+}
+
+type LanguageFlow = {
+  confirmed: LanguagePair
+  desired: LanguagePair
+  fieldVersions: Record<LanguageField, number>
+  epoch: number
+  saving: boolean
+  queue: Promise<void>
 }
 
 const supportedLanguages = new Set<TargetLanguage>(['auto', 'zh-CN', 'en', 'ja', 'ko'])
 
 const languageHost = document.createElement('span')
 const sourceLanguageHost = document.createElement('span')
+const targetActionsHost = document.createElement('span')
 const resultHost = document.createElement('div')
 const settledTranslateCards = new WeakSet<HTMLElement>()
 const requestedTranslateHeights = new WeakMap<HTMLElement, number>()
@@ -72,7 +95,125 @@ const translateFloatingContentWidths = new WeakMap<HTMLElement, number>()
 const OCR_FLOATING_MAX_HEIGHT = 400
 languageHost.dataset.screenpilotTargetLanguage = 'true'
 sourceLanguageHost.dataset.screenpilotSourceLanguage = 'true'
+targetActionsHost.dataset.screenpilotTargetActions = 'true'
 resultHost.dataset.screenpilotTargetResult = 'true'
+
+type TranslationOverrideActionsProps = {
+  text: string
+  loading: boolean
+  lang: InterfaceLanguage
+}
+
+function TranslationOverrideActions({ text, loading, lang }: TranslationOverrideActionsProps) {
+  const labels = visionI18n[lang]
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [speechState, setSpeechState] = useState<'idle' | 'loading' | 'speaking' | 'failed'>('idle')
+  const speechSequenceRef = useRef(0)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  const stopSpeech = useCallback(() => {
+    speechSequenceRef.current += 1
+    audioRef.current?.pause()
+    audioRef.current = null
+    setSpeechState('idle')
+  }, [])
+
+  useEffect(() => () => {
+    speechSequenceRef.current += 1
+    audioRef.current?.pause()
+    audioRef.current = null
+  }, [])
+
+  const copy = async () => {
+    if (loading || !text.trim()) return
+    const ok = await copyToClipboard(text)
+    if (!ok) {
+      setCopyState('failed')
+      return
+    }
+    setCopyState('copied')
+    window.setTimeout(() => setCopyState('idle'), 1400)
+  }
+
+  const speak = async () => {
+    if (loading || !text.trim()) return
+    if (speechState === 'loading' || speechState === 'speaking') {
+      stopSpeech()
+      return
+    }
+    const sequence = speechSequenceRef.current + 1
+    speechSequenceRef.current = sequence
+    setSpeechState('loading')
+    try {
+      const result = await referenceVisionApi.synthesizeSpeech(text)
+      if (sequence !== speechSequenceRef.current) return
+      if (!result.success || !result.data) throw new Error(result.error ?? labels.visionSpeechFailed)
+      const audio = new Audio(result.data)
+      audioRef.current = audio
+      setSpeechState('speaking')
+      await new Promise<void>((resolve, reject) => {
+        audio.onended = () => resolve()
+        audio.onpause = () => {
+          if (!audio.ended) resolve()
+        }
+        audio.onerror = () => reject(new Error('Audio playback failed'))
+        void audio.play().catch(reject)
+      })
+      if (sequence === speechSequenceRef.current) setSpeechState('idle')
+    } catch (error) {
+      if (sequence === speechSequenceRef.current) {
+        setSpeechState('failed')
+        console.error('[vision-translation] speech failed:', error)
+      }
+    } finally {
+      if (sequence === speechSequenceRef.current) {
+        audioRef.current = null
+      }
+    }
+  }
+
+  if (!text.trim()) return null
+  const speechLabel = speechState === 'failed'
+    ? labels.visionSpeechRetry
+    : speechState === 'loading' || speechState === 'speaking'
+      ? labels.visionStop
+      : labels.visionSpeak
+  const copyLabel = copyState === 'copied' ? labels.visionCopied : labels.visionCopy
+  const disabled = loading
+
+  return (
+    <span className="screenpilot-target-actions" data-screenpilot-target-actions="true">
+      <button
+        type="button"
+        data-screenpilot-target-action="copy"
+        data-screenpilot-copy-target="translated-override"
+        data-screenpilot-copy-state={copyState}
+        aria-label={copyLabel}
+        title={copyLabel}
+        disabled={disabled}
+        onClick={() => void copy()}
+        className="screenpilot-target-action"
+      >
+        {copyState === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+      <button
+        type="button"
+        data-screenpilot-target-action="speak"
+        data-screenpilot-speak-target="translated-override"
+        data-screenpilot-speech-state={speechState}
+        aria-label={speechLabel}
+        title={speechLabel}
+        disabled={disabled}
+        onClick={() => void speak()}
+        className="screenpilot-target-action"
+      >
+        {speechState === 'loading' ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} fill="currentColor" />}
+      </button>
+      {copyState === 'failed' ? <span role="alert" className="sr-only">{labels.visionCopyFailed}</span> : null}
+      {speechState === 'failed' ? <span role="alert" className="sr-only">{labels.visionSpeechFailed}</span> : null}
+    </span>
+  )
+}
 
 function isTargetLanguage(value: unknown): value is TargetLanguage {
   return typeof value === 'string' && supportedLanguages.has(value as TargetLanguage)
@@ -85,6 +226,13 @@ function findTranslationMethodSelect(root: ParentNode | null): HTMLSelectElement
 function visibleOcrSource(root: ParentNode | null): string {
   const source = root?.querySelector<HTMLElement>('[data-screenpilot-ocr-source-content="true"]')
   return source?.innerText.trim() ?? ''
+}
+
+function visibleNativeTranslation(root: ParentNode | null): string {
+  const result = root?.querySelector<HTMLElement>('[data-screenpilot-native-translation-result="true"]')
+  const dataText = result?.dataset.screenpilotTranslationText?.trim()
+  if (dataText) return dataText
+  return result?.innerText.trim() ?? ''
 }
 
 function setAttributeIfChanged(element: HTMLElement, name: string, value: string) {
@@ -185,7 +333,8 @@ export default function ReferenceVisionAdapter() {
   const [interfaceLanguage, setInterfaceLanguage] = useState<InterfaceLanguage>('zh')
   const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('auto')
   const [targetLanguage, setTargetLanguage] = useState<TargetLanguage>('auto')
-  const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '' })
+  const [overrideResult, setOverrideResult] = useState<OverrideResult>({ status: 'idle', text: '', stale: false })
+  const [languageSaveError, setLanguageSaveError] = useState<string | null>(null)
   // Capture the desktop/fullscreen viewport before Vision rebases its webview
   // to the compact native floating window. This is the same viewport used by
   // the vendor's initial answer metrics and remains stable during a drag.
@@ -195,12 +344,29 @@ export default function ReferenceVisionAdapter() {
   const requestSequenceRef = useRef(0)
   const sourceLanguageRef = useRef<SourceLanguage>('auto')
   const targetLanguageRef = useRef<TargetLanguage>('auto')
+  const overrideResultRef = useRef<OverrideResult>({ status: 'idle', text: '', stale: false })
+  const languageFlowRef = useRef<LanguageFlow>({
+    confirmed: { source: 'auto', target: 'auto' },
+    desired: { source: 'auto', target: 'auto' },
+    fieldVersions: { source: 0, target: 0 },
+    epoch: 0,
+    saving: false,
+    queue: Promise.resolve(),
+  })
+  const mountedRef = useRef(true)
   const overrideLockedRef = useRef(false)
   const aiAvailabilityRef = useRef({ ocr: true, translation: true })
   const aiAvailabilityLoadedRef = useRef(false)
   const t = copyFor(interfaceLanguage)
   const targetLanguageOptions = translationLanguageOptions(interfaceLanguage)
   const sourceLanguageOptions = targetLanguageOptions
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(
     () => installSafeFloatingDrag(referenceVisionApi, invoke),
@@ -230,8 +396,13 @@ export default function ReferenceVisionAdapter() {
   const clearOverride = useCallback(() => {
     overrideLockedRef.current = false
     requestSequenceRef.current += 1
-    setOverrideResult({ status: 'idle', text: '' })
+    overrideResultRef.current = { status: 'idle', text: '', stale: false }
+    setOverrideResult(overrideResultRef.current)
   }, [])
+
+  useEffect(() => {
+    overrideResultRef.current = overrideResult
+  }, [overrideResult])
 
   useEffect(() => {
     let active = true
@@ -253,15 +424,19 @@ export default function ReferenceVisionAdapter() {
         })
       }
       const configuredSource = settings.screenshotTranslation.sourceLanguage
-      if (isTargetLanguage(configuredSource)) {
-        sourceLanguageRef.current = configuredSource
-        setSourceLanguage(configuredSource)
-      }
       const configured = settings.screenshotTranslation.targetLanguage
-      if (isTargetLanguage(configured)) {
-        targetLanguageRef.current = configured
-        setTargetLanguage(configured)
-      }
+      const nextSource = isTargetLanguage(configuredSource) ? configuredSource : 'auto'
+      const nextTarget = isTargetLanguage(configured) ? configured : 'auto'
+      const flow = languageFlowRef.current
+      flow.epoch += 1
+      flow.confirmed = { source: nextSource, target: nextTarget }
+      flow.desired = { source: nextSource, target: nextTarget }
+      flow.fieldVersions = { source: flow.fieldVersions.source + 1, target: flow.fieldVersions.target + 1 }
+      sourceLanguageRef.current = nextSource
+      targetLanguageRef.current = nextTarget
+      setSourceLanguage(nextSource)
+      setTargetLanguage(nextTarget)
+      if (mountedRef.current) setLanguageSaveError(null)
       const screenshot = settings.screenshotTranslation
       aiAvailabilityRef.current = {
         ocr: screenshot.ocrAiEnabled === true
@@ -540,6 +715,12 @@ export default function ReferenceVisionAdapter() {
         sourceLanguageHost.remove()
       }
       if (languageHost.parentNode !== targetLanguageSlot) targetLanguageSlot.append(languageHost)
+      if (targetActionsHost.parentNode !== heading) heading.insertBefore(targetActionsHost, targetLanguageSlot)
+      heading.querySelectorAll<HTMLButtonElement>('button:not([data-screenpilot-target-action="copy"]):not([data-screenpilot-target-action="speak"])').forEach((button) => {
+        const nativeActionsBlocked = overrideResult.status !== 'idle' || languageSaveError !== null
+        button.disabled = nativeActionsBlocked
+        setBooleanAttribute(button, 'aria-disabled', nativeActionsBlocked)
+      })
       if (resultHost.parentNode !== targetResultSlot) targetResultSlot.append(resultHost)
     }
 
@@ -613,37 +794,88 @@ export default function ReferenceVisionAdapter() {
       })
       languageHost.remove()
       sourceLanguageHost.remove()
+      targetActionsHost.remove()
       resultHost.remove()
     }
-  }, [clearOverride, t.send])
+  }, [clearOverride, languageSaveError, overrideResult.status, t.send])
 
   useEffect(() => {
     const body = adapterRootRef.current?.querySelector<HTMLElement>('[data-screenpilot-translation-body="true"]') ?? null
     if (body === null) return
-    if (overrideResult.status === 'idle') delete body.dataset.screenpilotTranslationOverride
-    else body.dataset.screenpilotTranslationOverride = 'true'
-    return () => {
+    if (overrideResult.status === 'idle' && languageSaveError === null) {
       delete body.dataset.screenpilotTranslationOverride
     }
-  }, [overrideResult.status])
+    else body.dataset.screenpilotTranslationOverride = 'true'
+    setAttributeIfChanged(body, 'aria-busy', overrideResult.status === 'loading' ? 'true' : 'false')
+    return () => {
+      delete body.dataset.screenpilotTranslationOverride
+      body.removeAttribute('aria-busy')
+    }
+  }, [languageSaveError, overrideResult.status])
 
-  const persistTargetLanguage = useCallback(async (value: TargetLanguage, source: SourceLanguage) => {
-    await invoke<ReferenceSettings>('screenshot_translation_settings_update', {
-      patch: {
-        sourceLanguage: source,
-        targetLanguage: value,
-      },
-    })
-  }, [])
+  const drainLanguageSaves = useCallback(async () => {
+    const flow = languageFlowRef.current
+    if (flow.saving) return
+    flow.saving = true
+    try {
+      let continueSaving = true
+      while (continueSaving) {
+        if (flow.desired.source === flow.confirmed.source
+          && flow.desired.target === flow.confirmed.target) {
+          continueSaving = false
+          continue
+        }
+        const field: LanguageField = flow.desired.source !== flow.confirmed.source ? 'source' : 'target'
+        const value = flow.desired[field]
+        const version = flow.fieldVersions[field]
+        const epoch = flow.epoch
+        try {
+          await invoke<ReferenceSettings>('screenshot_translation_settings_update', {
+            patch: field === 'source'
+              ? { sourceLanguage: value }
+              : { targetLanguage: value },
+          })
+        } catch (error) {
+          const isCurrent = epoch === flow.epoch
+            && version === flow.fieldVersions[field]
+            && flow.desired[field] === value
+          if (isCurrent) {
+            const rollback = flow.confirmed[field]
+            flow.desired[field] = rollback
+            if (field === 'source') {
+              sourceLanguageRef.current = rollback
+              if (mountedRef.current) setSourceLanguage(rollback)
+            } else {
+              targetLanguageRef.current = rollback
+              if (mountedRef.current) setTargetLanguage(rollback)
+            }
+            if (mountedRef.current) {
+              const detail = error instanceof Error ? error.message : String(error)
+              setLanguageSaveError(`${t.languageSaveFailed}：${detail}`)
+            }
+          }
+          continue
+        }
+        if (epoch !== flow.epoch) continue
+        // The response is authoritative for this field even if a newer choice
+        // is already waiting. The newer desired value remains queued and will
+        // be persisted by the next loop iteration.
+        flow.confirmed[field] = value
+      }
+    } finally {
+      flow.saving = false
+    }
+  }, [t.languageSaveFailed])
 
-  const persistSourceLanguage = useCallback(async (value: SourceLanguage, target: TargetLanguage) => {
-    await invoke<ReferenceSettings>('screenshot_translation_settings_update', {
-      patch: {
-        targetLanguage: target,
-        sourceLanguage: value,
-      },
-    })
-  }, [])
+  const requestLanguageSave = useCallback((field: LanguageField, value: TargetLanguage) => {
+    const flow = languageFlowRef.current
+    flow.desired[field] = value
+    flow.fieldVersions[field] += 1
+    if (mountedRef.current) setLanguageSaveError(null)
+    const scheduled = flow.queue.then(() => drainLanguageSaves())
+    flow.queue = scheduled.catch(() => undefined)
+    return scheduled
+  }, [drainLanguageSaves])
 
   const translateVisibleSource = useCallback(async (
     source: string,
@@ -658,6 +890,20 @@ export default function ReferenceVisionAdapter() {
     })
   }, [])
 
+  const setOverrideState = useCallback((next: OverrideResult) => {
+    overrideResultRef.current = next
+    setOverrideResult(next)
+  }, [])
+
+  const beginOverrideTranslation = useCallback((source: string) => {
+    const previousText = overrideResultRef.current.text.trim() || visibleNativeTranslation(adapterRootRef.current)
+    const next: OverrideResult = source
+      ? { status: 'loading', text: previousText, stale: previousText.length > 0 }
+      : { status: 'idle', text: '', stale: false }
+    setOverrideState(next)
+    return previousText
+  }, [setOverrideState])
+
   const handleSourceLanguage = useCallback(async (value: SourceLanguage) => {
     overrideLockedRef.current = true
     sourceLanguageRef.current = value
@@ -665,30 +911,36 @@ export default function ReferenceVisionAdapter() {
     const source = visibleOcrSource(adapterRootRef.current) || sourceRef.current.text.trim()
     const sequence = requestSequenceRef.current + 1
     requestSequenceRef.current = sequence
-    if (source) setOverrideResult({ status: 'loading', text: '' })
-    else setOverrideResult({ status: 'idle', text: '' })
+    const previousText = beginOverrideTranslation(source)
     try {
       await invoke('vision_cancel_stream').catch(() => undefined)
       const [, translation] = await Promise.all([
-        persistSourceLanguage(value, targetLanguageRef.current),
+        requestLanguageSave('source', value),
         translateVisibleSource(source, value, targetLanguageRef.current),
       ])
       if (sequence !== requestSequenceRef.current || translation === null) return
       if (translation.cancelled) {
-        setOverrideResult({ status: 'idle', text: '' })
+        setOverrideState({ status: 'idle', text: '', stale: false })
       } else if (translation.success) {
-        setOverrideResult({ status: 'ready', text: translation.translated ?? '' })
+        setOverrideState({ status: 'ready', text: translation.translated ?? '', stale: false })
       } else {
-        setOverrideResult({ status: 'error', text: translation.error ?? t.translationFailed })
+        setOverrideState({
+          status: 'error',
+          text: previousText,
+          error: translation.error ?? t.translationFailed,
+          stale: previousText.length > 0,
+        })
       }
     } catch (error) {
       if (sequence !== requestSequenceRef.current) return
-      setOverrideResult({
+      setOverrideState({
         status: 'error',
-        text: error instanceof Error ? error.message : String(error),
+        text: previousText,
+        error: error instanceof Error ? error.message : String(error),
+        stale: previousText.length > 0,
       })
     }
-  }, [persistSourceLanguage, t.translationFailed, translateVisibleSource])
+  }, [beginOverrideTranslation, requestLanguageSave, setOverrideState, t.translationFailed, translateVisibleSource])
 
   const handleTargetLanguage = useCallback(async (value: TargetLanguage) => {
     overrideLockedRef.current = true
@@ -697,31 +949,37 @@ export default function ReferenceVisionAdapter() {
     const source = visibleOcrSource(adapterRootRef.current) || sourceRef.current.text.trim()
     const sequence = requestSequenceRef.current + 1
     requestSequenceRef.current = sequence
-    if (source) setOverrideResult({ status: 'loading', text: '' })
-    else setOverrideResult({ status: 'idle', text: '' })
+    const previousText = beginOverrideTranslation(source)
     try {
       await invoke('vision_cancel_stream').catch(() => undefined)
       const translation = translateVisibleSource(source, sourceLanguageRef.current, value)
       const [, result] = await Promise.all([
-        persistTargetLanguage(value, sourceLanguageRef.current),
+        requestLanguageSave('target', value),
         translation,
       ])
       if (sequence !== requestSequenceRef.current || result === null) return
       if (result.cancelled) {
-        setOverrideResult({ status: 'idle', text: '' })
+        setOverrideState({ status: 'idle', text: '', stale: false })
       } else if (result.success) {
-        setOverrideResult({ status: 'ready', text: result.translated ?? '' })
+        setOverrideState({ status: 'ready', text: result.translated ?? '', stale: false })
       } else {
-        setOverrideResult({ status: 'error', text: result.error ?? t.translationFailed })
+        setOverrideState({
+          status: 'error',
+          text: previousText,
+          error: result.error ?? t.translationFailed,
+          stale: previousText.length > 0,
+        })
       }
     } catch (error) {
       if (sequence !== requestSequenceRef.current) return
-      setOverrideResult({
+      setOverrideState({
         status: 'error',
-        text: error instanceof Error ? error.message : String(error),
+        text: previousText,
+        error: error instanceof Error ? error.message : String(error),
+        stale: previousText.length > 0,
       })
     }
-  }, [persistTargetLanguage, t.translationFailed, translateVisibleSource])
+  }, [beginOverrideTranslation, requestLanguageSave, setOverrideState, t.translationFailed, translateVisibleSource])
 
   return (
     <main ref={adapterRootRef} data-screenpilot-vision-adapter="true">
@@ -760,15 +1018,62 @@ export default function ReferenceVisionAdapter() {
         languageHost,
       )}
       {createPortal(
-        overrideResult.status === 'idle' ? null : (
-          <div
-            aria-live="polite"
-            className={overrideResult.status === 'error'
-              ? 'screenpilot-target-result screenpilot-target-result-error'
-              : 'screenpilot-target-result vision-readable-text'}
-          >
-            {overrideResult.status === 'loading' ? t.translatingToTarget : overrideResult.text}
-          </div>
+        <TranslationOverrideActions
+          key={`${overrideResult.status}:${overrideResult.text}`}
+          text={overrideResult.text}
+          loading={overrideResult.status === 'loading'}
+          lang={interfaceLanguage}
+        />,
+        targetActionsHost,
+      )}
+      {createPortal(
+        overrideResult.status === 'idle' && languageSaveError === null ? null : (
+          <>
+            {languageSaveError === null ? null : (
+              <div
+                role="alert"
+                aria-live="assertive"
+                className="screenpilot-target-result screenpilot-target-result-error screenpilot-language-save-error"
+              >
+                {languageSaveError}
+              </div>
+            )}
+            {overrideResult.status === 'idle' ? null : (
+              <>
+                {overrideResult.status === 'loading' ? (
+                  <div role="status" aria-live="polite" className="screenpilot-target-result screenpilot-target-result-status">
+                    {t.translatingToTarget}
+                  </div>
+                ) : null}
+                {overrideResult.error ? (
+                  <div
+                    role="alert"
+                    aria-live="assertive"
+                    aria-label={`${t.translationFailed}: ${overrideResult.error}`}
+                    className="screenpilot-target-result screenpilot-target-result-error"
+                  >
+                    <span>{t.translationFailed}: </span>
+                    <span>{overrideResult.error}</span>
+                  </div>
+                ) : null}
+                {overrideResult.text ? (
+                  <div
+                    data-screenpilot-translation-override-result="true"
+                    data-screenpilot-translation-stale={overrideResult.stale ? 'true' : 'false'}
+                    aria-live="polite"
+                    className="screenpilot-target-result vision-readable-text"
+                  >
+                    {overrideResult.stale ? (
+                      <div className="screenpilot-target-result-stale" role="status">
+                        {t.translationPreviousResult}
+                      </div>
+                    ) : null}
+                    <MarkdownView content={overrideResult.text} />
+                  </div>
+                ) : null}
+              </>
+            )}
+          </>
         ),
         resultHost,
       )}

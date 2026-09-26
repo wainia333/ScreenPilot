@@ -1,10 +1,15 @@
 import { Check, Clipboard, Languages, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useDesktop } from '../../desktop/use-desktop'
 import { loadHistory, saveHistory, upsertHistory } from '../history/storage'
 import { translationMethodOptions } from '../settings/translation-methods'
-import type { AppSettings, TranslationLanguage, TranslationMethod } from '../settings/types'
+import type {
+  AppSettings,
+  ModelSelection,
+  TranslationLanguage,
+  TranslationMethod,
+} from '../settings/types'
 import { isValidModelSelection, normalizeAiAvailability } from '../settings/sanitize'
 import { DEFAULT_SETTINGS } from '../settings/defaults'
 import type { TranslationSettingsPatch, Unlisten } from '../../desktop/contract'
@@ -17,12 +22,37 @@ import { nextTranslationGeneration } from './translation-generation'
 
 type TargetLanguage = TranslationLanguage
 
+type TranslationHistorySession = {
+  sourceLanguage: TranslationLanguage
+  targetLanguage: string
+  method: TranslationMethod
+  model: ModelSelection | null
+}
+
 type TranslationHistory = {
   id: string
   input: string
   output: string
-  method: TranslationMethod
+  schemaVersion: 1
+  sourceLanguage: TranslationLanguage | null
+  targetLanguage: string | null
+  method: string
+  model: ModelSelection | null
+  originalOutput?: string
   updatedAt: number
+}
+
+type StoredTranslationHistory = {
+  id: string
+  input: string
+  output: string
+  method: string
+  updatedAt: number
+  schemaVersion?: number
+  sourceLanguage?: string
+  targetLanguage?: string
+  model?: unknown
+  originalOutput?: string
 }
 
 type TranslatorListenerKind = 'prepare' | 'selection'
@@ -33,6 +63,13 @@ type TranslatorSelectionDelivery = 'event' | 'snapshot'
 type AppliedTranslatorSelection = {
   text: string
   delivery: TranslatorSelectionDelivery
+}
+
+type TranslationFailureKind = 'unconfigured' | 'network' | 'authentication' | 'cancelled' | 'unknown'
+
+type TranslationFailure = {
+  kind: TranslationFailureKind
+  detail: string
 }
 
 const translationSettingKeys = ['method', 'sourceLanguage', 'targetLanguage'] as const
@@ -67,25 +104,144 @@ function translatorRecoveryCopy(language: AppSettings['language']) {
 const historyKey = 'screenpilot:translator-history'
 export const TRANSLATOR_INPUT_DEBOUNCE_MS = 1500
 const goldenSectionRatio = (3 - Math.sqrt(5)) / 2
-function translationRequestKey(input: string, settings: AppSettings): string {
+const supportedTranslationLanguages: readonly TranslationLanguage[] = ['auto', 'zh-CN', 'en', 'ja', 'ko']
+
+function isTranslationLanguage(value: unknown): value is TranslationLanguage {
+  return typeof value === 'string' && supportedTranslationLanguages.includes(value as TranslationLanguage)
+}
+
+function isTranslationMethod(value: string): value is TranslationMethod {
+  return translationMethodOptions.some((option) => option.value === value)
+}
+
+function isModelSelection(value: unknown): value is ModelSelection {
+  if (typeof value !== 'object' || value === null) return false
+  const model = value as Partial<ModelSelection>
+  return typeof model.providerId === 'string'
+    && model.providerId.trim().length > 0
+    && typeof model.model === 'string'
+    && model.model.trim().length > 0
+}
+
+function translationRequestKey(input: string, session: TranslationHistorySession): string {
   return JSON.stringify([
     input,
-    settings.translation.method,
-    settings.translation.sourceLanguage,
-    settings.translation.targetLanguage,
+    session.method,
+    session.sourceLanguage,
+    session.targetLanguage,
   ])
 }
 
-function validHistory(value: unknown): value is TranslationHistory {
+function validHistory(value: unknown): value is StoredTranslationHistory {
   if (typeof value !== 'object' || value === null) return false
-  const item = value as Partial<TranslationHistory>
+  const item = value as Partial<StoredTranslationHistory>
   return (
     typeof item.id === 'string' &&
     typeof item.input === 'string' &&
     typeof item.output === 'string' &&
     typeof item.method === 'string' &&
-    typeof item.updatedAt === 'number'
+    item.method.length > 0 &&
+    typeof item.updatedAt === 'number' &&
+    (item.schemaVersion === undefined || item.schemaVersion === 1) &&
+    (item.sourceLanguage === undefined || typeof item.sourceLanguage === 'string') &&
+    (item.targetLanguage === undefined || typeof item.targetLanguage === 'string') &&
+    (item.model === undefined || item.model === null || isModelSelection(item.model))
   )
+}
+
+function normalizeHistory(item: StoredTranslationHistory): TranslationHistory {
+  const versioned = item.schemaVersion === 1
+  const sourceLanguage = versioned && isTranslationLanguage(item.sourceLanguage)
+    ? item.sourceLanguage
+    : null
+  const targetLanguage = versioned && typeof item.targetLanguage === 'string' && item.targetLanguage.length > 0
+    ? item.targetLanguage
+    : null
+  return {
+    id: item.id,
+    input: item.input,
+    output: item.output,
+    schemaVersion: 1,
+    sourceLanguage,
+    targetLanguage,
+    method: item.method,
+    model: versioned && isModelSelection(item.model) ? item.model : null,
+    ...(typeof item.originalOutput === 'string' ? { originalOutput: item.originalOutput } : {}),
+    updatedAt: item.updatedAt,
+  }
+}
+
+function technicalError(reason: unknown): string {
+  if (reason instanceof Error && reason.message.trim().length > 0) return reason.message
+  if (typeof reason === 'string' && reason.trim().length > 0) return reason
+  try {
+    const serialized = JSON.stringify(reason)
+    if (typeof serialized === 'string' && serialized.length > 0) return serialized
+  } catch {
+    // Fall through to the generic string representation below.
+  }
+  return String(reason)
+}
+
+function classifyTranslationFailure(reason: unknown): TranslationFailure {
+  const detail = technicalError(reason)
+  const normalized = detail.toLocaleLowerCase()
+  if (/(cancel|abort|取消)/u.test(normalized)) {
+    return { kind: 'cancelled', detail }
+  }
+  if (/(required|not configured|select .*model|no .*provider|disabled|must be configured|未配置|必须|请选择|禁用|凭据.*必需|密钥.*必需)/u.test(normalized)) {
+    return { kind: 'unconfigured', detail }
+  }
+  if (/(401|403|unauthori[sz]ed|forbidden|invalid (?:api )?key|authentication|access denied|认证|鉴权|密钥无效)/u.test(normalized)) {
+    return { kind: 'authentication', detail }
+  }
+  if (/(network|timeout|timed out|connect|dns|resolve|fetch|connection|temporarily unavailable|\b5\d\d\b|网络|超时|连接|服务不可用)/u.test(normalized)) {
+    return { kind: 'network', detail }
+  }
+  return { kind: 'unknown', detail }
+}
+
+function sessionFromHistory(item: TranslationHistory): TranslationHistorySession | null {
+  if (
+    item.sourceLanguage === null
+    || item.targetLanguage === null
+    || !isTranslationMethod(item.method)
+    || (item.method === 'ai' && item.model === null)
+  ) return null
+  return {
+    sourceLanguage: item.sourceLanguage,
+    targetLanguage: item.targetLanguage,
+    method: item.method,
+    model: item.model,
+  }
+}
+
+function settingsSession(settings: AppSettings): TranslationHistorySession {
+  return {
+    sourceLanguage: settings.translation.sourceLanguage,
+    targetLanguage: settings.translation.targetLanguage,
+    method: settings.translation.method,
+    model: settings.translation.method === 'ai' ? settings.translation.aiModel : null,
+  }
+}
+
+function historySourceLabel(item: TranslationHistory, language: AppSettings['language']): string {
+  const t = copyFor(language)
+  const method = isTranslationMethod(item.method)
+    ? translationMethodLabel(item.method, language)
+    : item.method
+  if (item.sourceLanguage === null || item.targetLanguage === null) {
+    return `${method} · ${t.translationLanguageUnknown}`
+  }
+  const languages = translationLanguageOptions(language)
+  const source = languages.find((option) => option.value === item.sourceLanguage)?.label ?? item.sourceLanguage
+  const target = languages.find((option) => option.value === item.targetLanguage)?.label ?? item.targetLanguage
+  const model = item.method === 'ai'
+    ? item.model === null
+      ? ` · ${t.translationModelUnknown}`
+      : ` · ${item.model.providerId}/${item.model.model}`
+    : ''
+  return `${method} · ${source} → ${target}${model}`
 }
 
 export function TranslatorPage() {
@@ -96,10 +252,12 @@ export function TranslatorPage() {
   const [output, setOutput] = useState('')
   const [outputInput, setOutputInput] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [translationFailure, setTranslationFailure] = useState<TranslationFailure | null>(null)
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
+  const [settingsLoading, setSettingsLoading] = useState(false)
   const [listenerErrors, setListenerErrors] = useState<TranslatorListenerErrors>({})
   const [listenerRetrying, setListenerRetrying] = useState<TranslatorListenerState>({
     prepare: false,
@@ -107,20 +265,71 @@ export function TranslatorPage() {
   })
   const [arrivalCycle, setArrivalCycle] = useState(0)
   const [selectionCycle, setSelectionCycle] = useState(0)
-  const [history, setHistory] = useState(() => loadHistory(localStorage, historyKey, validHistory))
+  const [history, setHistory] = useState(() => (
+    loadHistory(localStorage, historyKey, validHistory).map(normalizeHistory)
+  ))
+  const historyRef = useRef(history)
+  const persistedHistoryRef = useRef(history)
+  const activeHistoryId = useRef<string>(crypto.randomUUID())
+  const [historySaveFailed, setHistorySaveFailed] = useState(false)
+  const [historyContext, setHistoryContext] = useState<TranslationHistory | null>(null)
+  const historyEditTimer = useRef<number | null>(null)
+  const pendingHistoryEdit = useRef<{ id: string; output: string } | null>(null)
+  const activeHistorySession = useMemo(
+    () => historyContext === null ? null : sessionFromHistory(historyContext),
+    [historyContext],
+  )
+  useEffect(() => {
+    historyRef.current = history
+  }, [history])
+  const persistHistory = useCallback((next: TranslationHistory[]) => {
+    const result = saveHistory(localStorage, historyKey, next, persistedHistoryRef.current)
+    historyRef.current = result.history
+    setHistory(result.history)
+    if (result.ok) {
+      persistedHistoryRef.current = result.persistedHistory
+      setHistorySaveFailed(false)
+    } else {
+      setHistorySaveFailed(true)
+    }
+  }, [])
+  const retryHistorySave = useCallback(() => persistHistory(historyRef.current), [persistHistory])
+  const flushHistoryEdit = useCallback(() => {
+    if (historyEditTimer.current !== null) {
+      window.clearTimeout(historyEditTimer.current)
+      historyEditTimer.current = null
+    }
+    const pending = pendingHistoryEdit.current
+    pendingHistoryEdit.current = null
+    if (pending === null) return
+    const next = historyRef.current.map((item) => item.id === pending.id
+      ? { ...item, output: pending.output, updatedAt: Date.now() }
+      : item)
+    if (next.some((item, index) => item !== historyRef.current[index])) persistHistory(next)
+  }, [persistHistory])
+  const scheduleHistoryEdit = useCallback((output: string) => {
+    pendingHistoryEdit.current = { id: activeHistoryId.current, output }
+    if (historyEditTimer.current !== null) window.clearTimeout(historyEditTimer.current)
+    historyEditTimer.current = window.setTimeout(() => {
+      historyEditTimer.current = null
+      flushHistoryEdit()
+    }, 300)
+  }, [flushHistoryEdit])
   const activeGeneration = useRef(0)
+  const translationInFlight = useRef(false)
+  const settingsLoadingRef = useRef(false)
   const inputRevision = useRef(0)
   const manualInputRevision = useRef(0)
   const settingsRequest = useRef(0)
   const selectionRequest = useRef(0)
   const lastAppliedSelection = useRef<AppliedTranslatorSelection | null>(null)
-  const roundId = useRef<string>(crypto.randomUUID())
   const composing = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const immediateRequest = useRef<string | null>(null)
   const immediateSelectionInput = useRef<string | null>(null)
   const skipNextInputRequest = useRef<string | null>(null)
   const copyRequest = useRef(0)
+  const commitRequest = useRef(0)
   const componentActive = useRef(false)
   const confirmedSettings = useRef<AppSettings | null>(null)
   const desiredSettings = useRef<AppSettings | null>(null)
@@ -143,12 +352,14 @@ export function TranslatorPage() {
   const cancelTranslation = useCallback(() => {
     const cancelGeneration = nextTranslationGeneration()
     activeGeneration.current = cancelGeneration
+    translationInFlight.current = false
     void desktop.cancelTranslation(cancelGeneration).catch((reason: unknown) => {
       console.error('[translator] failed to cancel active translation', reason)
     })
     return cancelGeneration
   }, [desktop])
   const hideTranslator = useCallback(async () => {
+    flushHistoryEdit()
     cancelTranslation()
     try {
       await desktop.hideWindow()
@@ -156,7 +367,7 @@ export function TranslatorPage() {
       setLoading(false)
       setError(String(reason))
     }
-  }, [cancelTranslation, desktop])
+  }, [cancelTranslation, desktop, flushHistoryEdit])
   useEffect(() => {
     document.documentElement.lang = interfaceLanguage === 'zh' ? 'zh-CN' : 'en'
     document.title = `ScreenPilot — ${t.translatorTitle}`
@@ -198,7 +409,10 @@ export function TranslatorPage() {
           desiredSettings.current = rollback
           if (componentActive.current) {
             cancelTranslation()
-            immediateRequest.current = translationRequestKey(inputRef.current?.value ?? '', rollback)
+            immediateRequest.current = translationRequestKey(
+              inputRef.current?.value ?? '',
+              settingsSession(rollback),
+            )
             setOutput('')
             setLoading(false)
             setSettings(rollback)
@@ -214,6 +428,85 @@ export function TranslatorPage() {
     settingsWriteTask.current = task
     return task
   }, [cancelTranslation, desktop])
+  const executeTranslation = useCallback((text: string, requestSession: TranslationHistorySession): boolean => {
+    if (text.trim().length === 0 || translationInFlight.current) return false
+    const requestGeneration = nextTranslationGeneration()
+    activeGeneration.current = requestGeneration
+    translationInFlight.current = true
+    setLoading(true)
+    setError(null)
+    setTranslationFailure(null)
+    void desktop.translate({
+      text,
+      method: requestSession.method,
+      sourceLanguage: requestSession.sourceLanguage,
+      targetLanguage: requestSession.targetLanguage,
+      generation: requestGeneration,
+    }).then((result) => {
+      if (requestGeneration !== activeGeneration.current || result.generation !== requestGeneration) return
+      translationInFlight.current = false
+      setOutput(result.text)
+      setOutputInput(text)
+      copyRequest.current += 1
+      setCopied(false)
+      setCopyError(null)
+      setLoading(false)
+      setTranslationFailure(null)
+      const entry: TranslationHistory = {
+        id: activeHistoryId.current,
+        input: text,
+        output: result.text,
+        schemaVersion: 1,
+        sourceLanguage: requestSession.sourceLanguage,
+        targetLanguage: requestSession.targetLanguage,
+        method: requestSession.method,
+        model: requestSession.model,
+        originalOutput: historyRef.current.find((item) => item.id === activeHistoryId.current)?.originalOutput ?? result.text,
+        updatedAt: Date.now(),
+      }
+      persistHistory(upsertHistory(historyRef.current, entry))
+    }).catch((reason: unknown) => {
+      if (requestGeneration !== activeGeneration.current) return
+      translationInFlight.current = false
+      setLoading(false)
+      setTranslationFailure(classifyTranslationFailure(reason))
+    })
+    return true
+  }, [desktop, persistHistory])
+  const reloadSettings = useCallback(() => {
+    if (settingsLoadingRef.current) return
+    const request = settingsRequest.current + 1
+    settingsRequest.current = request
+    settingsLoadingRef.current = true
+    setSettingsLoading(true)
+    setSettingsError(null)
+    if (settingsWriteTask.current === null) setSettings(null)
+    if (translationInFlight.current) {
+      cancelTranslation()
+      setLoading(false)
+    }
+    void flushTranslationSettings()
+      .then(() => desktop.loadSettings())
+      .then((loaded) => {
+        if (!componentActive.current || request !== settingsRequest.current) return
+        syncDocumentTheme(loaded.theme)
+        confirmedSettings.current = loaded
+        desiredSettings.current = loaded
+        pendingSettings.current = null
+        setSettingsError(null)
+        setSettings(loaded)
+      })
+      .catch((reason: unknown) => {
+        if (!componentActive.current || request !== settingsRequest.current) return
+        setSettingsError(technicalError(reason))
+      })
+      .finally(() => {
+        if (componentActive.current && request === settingsRequest.current) {
+          settingsLoadingRef.current = false
+          setSettingsLoading(false)
+        }
+      })
+  }, [cancelTranslation, desktop, flushTranslationSettings])
   useEffect(() => {
     const lifecycle = { active: true }
     const unlisteners: Record<TranslatorListenerKind, Unlisten | null> = {
@@ -259,38 +552,25 @@ export function TranslatorPage() {
       }
       lastAppliedSelection.current = { text: selected, delivery }
       inputRevision.current += 1
+      flushHistoryEdit()
       cancelTranslation()
       immediateRequest.current = null
       immediateSelectionInput.current = selected.trim().length > 0 ? selected : null
       skipNextInputRequest.current = null
-      roundId.current = crypto.randomUUID()
+      activeHistoryId.current = crypto.randomUUID()
+      setHistoryContext(null)
       setSelectionCycle((value) => value + 1)
       setInput(selected)
       setOutput('')
       setOutputInput(null)
+      commitRequest.current += 1
       setError(null)
+      setTranslationFailure(null)
       setLoading(false)
       copyRequest.current += 1
       setCopied(false)
       setCopyError(null)
       if (delivery === 'event' || selected.trim().length > 0) focusInput()
-    }
-    const refreshSettings = () => {
-      const request = settingsRequest.current + 1
-      settingsRequest.current = request
-      if (settingsWriteTask.current === null) setSettings(null)
-      void flushTranslationSettings().then(() => desktop.loadSettings()).then((loaded) => {
-        if (lifecycle.active && request === settingsRequest.current) {
-          syncDocumentTheme(loaded.theme)
-          confirmedSettings.current = loaded
-          desiredSettings.current = loaded
-          pendingSettings.current = null
-          setSettingsError(null)
-          setSettings(loaded)
-        }
-      }).catch((reason: unknown) => {
-        if (lifecycle.active && request === settingsRequest.current) setError(String(reason))
-      })
     }
     const syncStoredSelection = () => {
       const request = selectionRequest.current + 1
@@ -309,6 +589,7 @@ export function TranslatorPage() {
     }
     const onPrepare = () => {
       if (!lifecycle.active) return
+      flushHistoryEdit()
       pendingCaptureRevision = manualInputRevision.current
       inputRevision.current += 1
       cancelTranslation()
@@ -317,17 +598,20 @@ export function TranslatorPage() {
       immediateRequest.current = null
       immediateSelectionInput.current = null
       skipNextInputRequest.current = null
-      roundId.current = crypto.randomUUID()
+      activeHistoryId.current = crypto.randomUUID()
+      setHistoryContext(null)
       setInput('')
       setOutput('')
       setOutputInput(null)
+      commitRequest.current += 1
       setError(null)
+      setTranslationFailure(null)
       setLoading(false)
       copyRequest.current += 1
       setCopied(false)
       setCopyError(null)
       setArrivalCycle((value) => value + 1)
-      refreshSettings()
+      reloadSettings()
     }
     const onSelection = (selected: string) => {
       if (!lifecycle.active) return
@@ -392,7 +676,7 @@ export function TranslatorPage() {
         syncStoredSelection()
       }
     })
-    refreshSettings()
+    reloadSettings()
     window.addEventListener('focus', syncStoredSelection)
     return () => {
       lifecycle.active = false
@@ -409,11 +693,13 @@ export function TranslatorPage() {
       }
       window.removeEventListener('focus', syncStoredSelection)
       settingsRequest.current += 1
+      settingsLoadingRef.current = false
       selectionRequest.current += 1
       copyRequest.current += 1
+      flushHistoryEdit()
       cancelTranslation()
     }
-  }, [cancelTranslation, desktop, flushTranslationSettings])
+  }, [cancelTranslation, desktop, flushHistoryEdit, reloadSettings])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -429,62 +715,36 @@ export function TranslatorPage() {
       skipNextInputRequest.current = null
       return
     }
-    const requestKey = translationRequestKey(input, settings)
+    const requestSession = activeHistorySession ?? settingsSession(settings)
+    const requestKey = translationRequestKey(input, requestSession)
     const selectionIsImmediate = immediateSelectionInput.current === input
     const delay = selectionIsImmediate || immediateRequest.current === requestKey
       ? 0
       : TRANSLATOR_INPUT_DEBOUNCE_MS
     if (delay === 0) immediateRequest.current = null
-    const requestGeneration = nextTranslationGeneration()
-    activeGeneration.current = requestGeneration
     const timer = window.setTimeout(() => {
       if (selectionIsImmediate && immediateSelectionInput.current === input) {
         immediateSelectionInput.current = null
       }
-      setLoading(true)
-      setError(null)
-      void desktop.translate({
-        text: input,
-        method: settings.translation.method,
-        sourceLanguage: settings.translation.sourceLanguage,
-        targetLanguage: settings.translation.targetLanguage,
-        generation: requestGeneration,
-      }).then((result) => {
-        if (result.generation !== activeGeneration.current) return
-        setOutput(result.text)
-        setOutputInput(input)
-        copyRequest.current += 1
-        setCopied(false)
-        setCopyError(null)
-        setLoading(false)
-        const entry: TranslationHistory = {
-          id: roundId.current,
-          input,
-          output: result.text,
-          method: settings.translation.method,
-          updatedAt: Date.now(),
-        }
-        setHistory((items) => saveHistory(localStorage, historyKey, upsertHistory(items, entry)))
-      }).catch((reason: unknown) => {
-        if (requestGeneration !== activeGeneration.current) return
-        setLoading(false)
-        setError(String(reason))
-      })
+      executeTranslation(input, requestSession)
     }, delay)
     return () => window.clearTimeout(timer)
-  }, [desktop, input, selectionCycle, settings])
+  }, [activeHistorySession, executeTranslation, input, selectionCycle, settings])
   const updateTranslationSettings = (patch: TranslationSettingsPatch) => {
     if (settings === null) return
+    flushHistoryEdit()
     const translation = { ...settings.translation, ...patch }
     const next = normalizeAiAvailability({ ...settings, translation })
     desiredSettings.current = next
     pendingSettings.current = next
-    immediateRequest.current = translationRequestKey(input, next)
+    setHistoryContext(null)
+    immediateRequest.current = translationRequestKey(input, settingsSession(next))
     cancelTranslation()
     setOutput('')
     setOutputInput(null)
     setLoading(false)
     setError(null)
+    setTranslationFailure(null)
     copyRequest.current += 1
     setCopied(false)
     setCopyError(null)
@@ -494,6 +754,7 @@ export function TranslatorPage() {
   }
   const updateInput = (value: string) => {
     if (value === input) return
+    flushHistoryEdit()
     inputRevision.current += 1
     manualInputRevision.current += 1
     cancelTranslation()
@@ -505,43 +766,55 @@ export function TranslatorPage() {
       setOutput('')
     }
     setOutputInput(null)
+    commitRequest.current += 1
     setLoading(false)
     setError(null)
+    setTranslationFailure(null)
     copyRequest.current += 1
     setCopied(false)
     setCopyError(null)
     if (value.trim().length === 0) {
-      roundId.current = crypto.randomUUID()
+      activeHistoryId.current = crypto.randomUUID()
     }
   }
   const commit = async () => {
     const text = outputInput === input && output.trim().length > 0 ? output : input
     if (text.trim().length === 0) return
+    const request = commitRequest.current + 1
+    commitRequest.current = request
     cancelTranslation()
     setError(null)
     try {
       await desktop.commitText(text, settings?.general.autoPaste ?? false)
     } catch (reason) {
+      if (request !== commitRequest.current) return
       setLoading(false)
       setError(String(reason))
     }
   }
   const restoreHistory = (item: TranslationHistory) => {
+    flushHistoryEdit()
     inputRevision.current += 1
     manualInputRevision.current += 1
     cancelTranslation()
     immediateRequest.current = null
     immediateSelectionInput.current = null
-    skipNextInputRequest.current = item.input === input ? null : item.input
-    setInput(item.input)
-    setOutput(item.output)
-    setOutputInput(item.input)
+    // Restoring is a view/session operation. Even when the text is unchanged,
+    // changing the history context must not kick off a fresh translation.
+    const current = historyRef.current.find((entry) => entry.id === item.id) ?? item
+    skipNextInputRequest.current = current.input
+    setHistoryContext(current)
+    setInput(current.input)
+    setOutput(current.output)
+    setOutputInput(current.input)
+    commitRequest.current += 1
     setError(null)
+    setTranslationFailure(null)
     setLoading(false)
     copyRequest.current += 1
     setCopied(false)
     setCopyError(null)
-    roundId.current = item.id
+    activeHistoryId.current = current.id
     queueMicrotask(() => inputRef.current?.focus())
   }
   const canUseAi = settings !== null
@@ -557,7 +830,23 @@ export function TranslatorPage() {
     if (listenerRetrying[kind]) return
     void listenerInstallers.current[kind]()
   }
+  const retryTranslation = () => {
+    if (settings === null || input.trim().length === 0 || translationInFlight.current) return
+    executeTranslation(input, activeHistorySession ?? settingsSession(settings))
+  }
   const recoveryCopy = translatorRecoveryCopy(interfaceLanguage)
+  const translationFailureSummary = translationFailure === null
+    ? null
+    : {
+        unconfigured: t.translationErrorUnconfigured,
+        network: t.translationErrorNetwork,
+        authentication: t.translationErrorAuthentication,
+        cancelled: t.translationErrorCancelled,
+        unknown: t.translationErrorUnknown,
+      }[translationFailure.kind]
+  const historyContextLabel = historyContext === null
+    ? null
+    : historySourceLabel(historyContext, interfaceLanguage)
   const copyOutput = async () => {
     const request = copyRequest.current + 1
     copyRequest.current = request
@@ -596,19 +885,37 @@ export function TranslatorPage() {
             title={t.translationHistory}
             countAnnouncementId="translator-history-count"
             language={interfaceLanguage}
-            getMeta={(item) => translationMethodLabel(item.method, interfaceLanguage)}
+            getMeta={(item) => historySourceLabel(item, interfaceLanguage)}
             onRestore={restoreHistory}
-            onRemove={(id) => setHistory((items) => saveHistory(localStorage, historyKey, items.filter((entry) => entry.id !== id)))}
-            onClear={() => setHistory((items) => saveHistory(localStorage, historyKey, items.length === 0 ? items : []))}
+            onRemove={(id) => persistHistory(historyRef.current.filter((entry) => entry.id !== id))}
+            onClear={() => persistHistory(historyRef.current.length === 0 ? historyRef.current : [])}
           />
           <button type="button" className="ocr-header-button" aria-label={t.closeTranslator} onClick={() => void hideTranslator()}>
             <X size={14} />
           </button>
         </div>
       </header>
+      {historySaveFailed ? (
+        <aside className="mx-3 mt-2 shrink-0 rounded-lg bg-white/95 px-3 py-2 text-[11px] text-red-600 shadow-md ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-red-400 dark:ring-white/10" role="alert">
+          <span>{t.historyNotSaved}</span>
+          <button type="button" className="text-button ml-2 h-6 px-1" onClick={retryHistorySave}>{t.retryHistory}</button>
+        </aside>
+      ) : null}
       {settingsError === null && Object.keys(listenerErrors).length === 0 ? null : (
         <aside className="mx-3 mt-2 shrink-0 rounded-lg bg-white/95 px-3 py-2 text-[11px] text-red-600 shadow-md ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-red-400 dark:ring-white/10" role="alert">
-          {settingsError === null ? null : <p className="break-words">{settingsError}</p>}
+          {settingsError === null ? null : (
+            <div className="flex items-center gap-2">
+              <p className="min-w-0 flex-1 break-words">{settingsError}</p>
+              <button
+                type="button"
+                className="text-button h-6 shrink-0 px-1"
+                disabled={settingsLoading}
+                onClick={reloadSettings}
+              >
+                {settingsLoading ? t.reloadingSettings : t.reloadSettings}
+              </button>
+            </div>
+          )}
           {(['prepare', 'selection'] as const).map((kind) => listenerErrors[kind] === undefined ? null : (
             <div className="flex items-center gap-2" key={kind}>
               <span className="min-w-0 flex-1 break-words">{recoveryCopy[kind]} {listenerErrors[kind]}</span>
@@ -677,6 +984,15 @@ export function TranslatorPage() {
         <section className="ocr-result-section ocr-result-output">
           <div className="ocr-result-section-heading">
             <label>{t.translatedText}</label>
+            {historyContextLabel === null ? null : (
+              <span
+                className="ocr-result-status translator-history-context"
+                role="status"
+                title={historyContextLabel}
+              >
+                {t.translationHistoryContext}: {historyContextLabel}
+              </span>
+            )}
             <button
               type="button"
               className="ocr-section-button"
@@ -713,7 +1029,24 @@ export function TranslatorPage() {
           </div>
           {loading && output.length === 0 ? <div className="ocr-result-skeleton"><span /><span /><span /></div> : null}
           {!loading && error !== null ? <div className="ocr-result-error" role="alert">{error}</div> : null}
-          {error === null && (!loading || output.length > 0) ? (
+          {!loading && translationFailure !== null ? (
+            <div className="ocr-result-error" role="alert">
+              <p>{translationFailureSummary}</p>
+              <details>
+                <summary>{t.translationErrorDetails}</summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words">{translationFailure.detail}</pre>
+              </details>
+              <button
+                type="button"
+                className="text-button mt-1 h-6 px-1"
+                disabled={settings === null || input.trim().length === 0 || loading}
+                onClick={retryTranslation}
+              >
+                {t.retryTranslation}
+              </button>
+            </div>
+          ) : null}
+          {(output.length > 0 || (error === null && translationFailure === null && (!loading || output.length > 0))) ? (
             <textarea
               id="translator-output"
               aria-label={t.translatedText}
@@ -725,7 +1058,9 @@ export function TranslatorPage() {
                 setOutputInput(input)
                 setCopied(false)
                 setCopyError(null)
+                scheduleHistoryEdit(event.target.value)
               }}
+              onBlur={flushHistoryEdit}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !composing.current) {
                   event.preventDefault()
