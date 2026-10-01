@@ -68,6 +68,8 @@ export type PermissionStatus = {
 export type Unlisten = () => void
 
 export type DesktopPort = {
+  karakeepConfigured(): Promise<boolean>
+  testKarakeep(baseUrl: string, apiKey?: string): Promise<{ connected: boolean; effectiveMode: string; message: string }>
   loadSettings(): Promise<AppSettings>
   loadSettingsSnapshot(): Promise<SettingsSnapshot>
   takeStartupNotice(): Promise<string | null>

@@ -2,8 +2,12 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
+import type { BookmarkReference, KarakeepConfig, KnowledgeEvent, KnowledgeRequest, SearchRunSummary } from '../../../features/karakeep/types'
 
 export type ExplainMessage = {
+  id?: string
+  sources?: BookmarkReference[]
+  searchSummary?: SearchRunSummary
   role: 'user' | 'assistant'
   content: string
   reasoning?: string
@@ -24,6 +28,8 @@ export type VisionStreamPayload = {
 }
 
 export type VisionAskResult = {
+  sources?: BookmarkReference[]
+  summary?: SearchRunSummary
   success: boolean
   requestId: string
   response?: string
@@ -72,6 +78,8 @@ export type ProviderConnectionInput = {
 }
 
 export type Settings = {
+  karakeep?: KarakeepConfig
+  karakeepKeyConfigured?: boolean
   hotkey: string
   theme: 'system' | 'light' | 'dark'
   targetLang: string
@@ -256,6 +264,10 @@ export const api = {
     on('vision-capture-ready', listener),
   onVisionStream: (listener: (payload: VisionStreamPayload) => void) =>
     on<VisionStreamPayload>('vision-stream', (payload) => listener(payload)),
+  onVisionKnowledge: (listener: (payload: KnowledgeEvent) => void) => on<KnowledgeEvent>('vision-knowledge', listener),
+  onKarakeepSettingsChanged: (listener: (config: KarakeepConfig) => void) => on<{ settings: { karakeep: KarakeepConfig } }>('screenpilot:settings-changed', payload => listener(payload.settings.karakeep)),
+  onKarakeepCredentialChanged: (listener: (configured: boolean) => void) => on<boolean>('screenpilot:karakeep-credential-changed', listener),
+  openKnowledgeSettings: () => invoke<void>('integration_open_settings'),
   onVisionTranslateStream: (listener: (payload: VisionTranslateStreamPayload) => void) =>
     on<VisionTranslateStreamPayload>('vision-translate-stream', (payload) => listener(payload)),
   onVisionClosing: (listener: () => void) =>
@@ -300,8 +312,8 @@ export const api = {
     invoke<{ success: boolean; data?: string; error?: string }>(
       'synthesize_speech', { text }
     ),
-  visionAsk: (imageId: string, messages: ExplainMessage[], requestId: string) =>
-    invoke<VisionAskResult>('vision_ask', { imageId, messages, requestId }),
+  visionAsk: (imageId: string, messages: { role: 'user' | 'assistant'; content: string }[], requestId: string, knowledge?: KnowledgeRequest) =>
+    invoke<VisionAskResult>('vision_ask', { imageId, messages, requestId, ...(knowledge ? { knowledge } : {}) }),
   visionCancelStream: () => invoke<void>('vision_cancel_stream'),
   visionClose: () => invoke<void>('vision_close'),
   visionCommitImageToHistory: (imageId: string) =>

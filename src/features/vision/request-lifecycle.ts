@@ -30,10 +30,10 @@ export function mergeVisionResponse(existing: string, canonical: string): string
   return canonical
 }
 
-export function appendVisionError(existing: string, error: string): string {
+export function appendVisionError(existing: string, error: string, label?: string): string {
   const normalized = error.trim()
   if (!normalized) return existing
-  const marker = `⚠️ ${normalized}`
+  const marker = `⚠️ ${label ? `${label}: ` : ''}${normalized}`
   if (existing.includes(marker) || existing.includes(normalized)) return existing
   return existing ? `${existing}\n\n${marker}` : marker
 }

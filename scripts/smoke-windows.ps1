@@ -27,7 +27,22 @@ if ([System.IO.Path]::GetExtension($resolvedExecutable) -ne '.exe') {
     throw "SMOKE_FAILED: 构建产物不是 Windows 可执行文件：$resolvedExecutable"
 }
 
-$stream = [System.IO.File]::OpenRead($resolvedExecutable)
+$fileReadyDeadline = [DateTime]::UtcNow.AddSeconds(10)
+$stream = $null
+while ($null -eq $stream) {
+    try {
+        $stream = [System.IO.File]::OpenRead($resolvedExecutable)
+    }
+    catch {
+        # A newly copied EXE can still be held by a file scanner. Keep the
+        # preflight bounded and preserve other I/O failures as real failures.
+        $ioFailure = if ($_.Exception.InnerException -is [System.IO.IOException]) { $_.Exception.InnerException } else { $_.Exception }
+        $temporaryIoFailure = $ioFailure -is [System.IO.IOException] -and
+            (($ioFailure.HResult -band 0xFFFF) -in @(32, 33))
+        if (-not $temporaryIoFailure -or [DateTime]::UtcNow -ge $fileReadyDeadline) { throw }
+        Start-Sleep -Milliseconds 250
+    }
+}
 try {
     if ($stream.Length -lt 2 -or $stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
         throw "SMOKE_FAILED: 构建产物缺少有效 PE 文件头：$resolvedExecutable"

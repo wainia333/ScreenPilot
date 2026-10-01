@@ -82,6 +82,17 @@ const provider: ProviderSettings = {
 }
 
 describe('TauriDesktopPort command contract', () => {
+  it('tests Karakeep drafts without saving or reading back its credential', async () => {
+    const api = new RecordingTauriApi(), port = new TauriDesktopPort(api)
+    await port.karakeepConfigured()
+    await port.testKarakeep('https://saved.example/')
+    await port.testKarakeep('https://saved.example/sub/', 'draft-secret')
+    expect(api.invocations).toEqual([
+      { command: 'integration_karakeep_configured' },
+      { command: 'integration_karakeep_test', args: { baseUrl: 'https://saved.example/', apiKey: null } },
+      { command: 'integration_karakeep_test', args: { baseUrl: 'https://saved.example/sub/', apiKey: 'draft-secret' } },
+    ])
+  })
   it('maps the settings, credential and provider operations to typed Tauri commands', async () => {
     const api = new RecordingTauriApi()
     const port = new TauriDesktopPort(api)

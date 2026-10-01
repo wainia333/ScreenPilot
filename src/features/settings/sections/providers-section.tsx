@@ -94,6 +94,7 @@ export function ProvidersSection({
   onKeyDraftChange,
   onKeyDraftRemove,
   saving,
+  onTestResult,
 }: {
   settings: AppSettings
   onChange: SettingsUpdater
@@ -101,6 +102,7 @@ export function ProvidersSection({
   onKeyDraftChange: (providerId: string, value: string) => void
   onKeyDraftRemove: (providerId: string) => void
   saving: boolean
+  onTestResult: (message: string, failed?: boolean) => void
 }) {
   const t = copyFor(settings.language)
   const desktop = useDesktop()
@@ -374,26 +376,20 @@ export function ProvidersSection({
                         t.providerRequestTimeout,
                       )
                       if (!requestIsCurrent(request)) return
-                      setStatus(provider.id, {
-                        tone: result.success ? 'success' : 'error',
-                        message: result.success
+                      onTestResult(
+                        result.success
                           ? t.connectionSucceeded
                           : redactKeyError(result.error ?? t.connectionFailed, values ?? []),
-                      })
+                        !result.success,
+                      )
                     } catch (error) {
                       if (!requestIsCurrent(request)) return
                       if (error instanceof ProviderRequestTimeout) {
                         invalidateProviderOperation(request)
-                        setStatus(provider.id, {
-                          tone: 'error',
-                          message: error.message,
-                        })
+                        onTestResult(error.message, true)
                         return
                       }
-                      setStatus(provider.id, {
-                        tone: 'error',
-                        message: redactKeyError(String(error), values ?? []),
-                      })
+                      onTestResult(redactKeyError(String(error), values ?? []), true)
                     } finally {
                       finishProviderRequest(request)
                     }
@@ -448,7 +444,7 @@ export function ProvidersSection({
                   {t.addModel}
                 </button>
               </div>
-              <div className="model-list" aria-label={formatCopy(t.modelList, { name: provider.name })}>
+              <div className="model-list" role="group" aria-label={formatCopy(t.modelList, { name: provider.name })}>
                 {provider.availableModels.map((model) => {
                   const enabled = provider.enabledModels.includes(model)
                   return (

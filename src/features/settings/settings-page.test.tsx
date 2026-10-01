@@ -241,27 +241,32 @@ describe('SettingsPage', () => {
     expect(screen.getByText('This project references several excellent projects during development:')).toBeVisible()
   })
 
-  it('explains built-in data destinations without a first-use prompt', async () => {
+  it('keeps built-in settings configurable without row help text', async () => {
     const desktop = new ClosingDesktop()
     render(<DesktopProvider port={desktop}><SettingsPage /></DesktopProvider>)
     await act(async () => Promise.resolve())
 
     fireEvent.click(screen.getByRole('button', { name: '翻译' }))
-    expect(screen.getByText('输入文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
+    expect(screen.getByRole('combobox', { name: '翻译接口' })).toHaveValue('microsoft')
     expect(screen.queryByRole('note')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
-    expect(screen.getByText('截图会发送给所选 OCR 服务：ai.chaoxing.com。')).toBeVisible()
-    expect(screen.getByText('识别文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
+    expect(screen.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('chaoxing')
     expect(screen.queryByRole('note')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('switch', { name: '启用OCR翻译' }))
-    expect(screen.getAllByText('已关闭，不会发送相关内容。')).toHaveLength(2)
+    expect(screen.getByRole('switch', { name: '启用OCR翻译' })).toHaveAttribute('aria-checked', 'false')
 
     fireEvent.click(screen.getByRole('button', { name: '常规' }))
-    expect(screen.getByText(/仅控制截图是否写入所选本地归档目录/u)).toBeVisible()
+    fireEvent.click(screen.getByRole('switch', { name: '开机启动' }))
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'AltSnap' }))
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
+    expect(document.querySelector('.altsnap-hints')).toHaveTextContent('起始拖动方向决定缩放边界')
   })
 
-  it('updates data destinations when an AI provider and model are selected', async () => {
+  it('retains selected AI models and interfaces after removing row help text', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS)
     settings.providers = [{
       id: 'gateway',
@@ -293,10 +298,14 @@ describe('SettingsPage', () => {
     await act(async () => Promise.resolve())
 
     fireEvent.click(screen.getByRole('button', { name: '翻译' }))
-    expect(screen.getByText('输入文字和翻译提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
+    expect(screen.getByRole('combobox', { name: '翻译接口' })).toHaveValue('ai')
+    expect(screen.getByRole('combobox', { name: '文本翻译 AI 模型' })).toHaveValue(JSON.stringify(selection))
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
     fireEvent.click(screen.getByRole('button', { name: 'OCR' }))
-    expect(screen.getByText('截图和 OCR 提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
-    expect(screen.getByText('识别文字和 OCR 翻译提示词会发送给所选模型提供商：Gateway · https://gateway.example/v1。')).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'OCR 接口' })).toHaveValue('ai')
+    expect(screen.getByRole('combobox', { name: 'OCR翻译接口' })).toHaveValue('ai')
+    expect(screen.getByRole('combobox', { name: 'OCR 模型' })).toHaveValue(JSON.stringify(selection))
+    expect(document.querySelectorAll('.setting-row__description')).toHaveLength(0)
   })
 
   it('keeps a startup recovery notice until the visible settings window acknowledges it', async () => {
@@ -1522,7 +1531,10 @@ describe('SettingsPage', () => {
     expect(desktop.providerTestCalls).toHaveLength(1)
     expect(desktop.providerTestCalls[0]?.provider.baseUrl).toBe('https://draft.example/v1/responses')
     expect(desktop.providerTestCalls[0]?.keys).toEqual(['draft-primary'])
-    expect(screen.getByText('连接成功')).toBeVisible()
+    const toast = screen.getByRole('status', { name: '连接成功' })
+    expect(toast.parentElement).toBe(document.querySelector('.settings-window'))
+    expect(toast.querySelector('.save-success-toast')).toHaveTextContent('连接成功')
+    expect(document.querySelector('.provider-form .inline-status')).not.toHaveTextContent('连接成功')
   })
 
   it('uses the persisted provider key when the API Keys field is untouched', async () => {
@@ -1588,6 +1600,8 @@ describe('SettingsPage', () => {
     const status = screen.getByText('Provider URL and primary key are required')
     expect(status).toBeVisible()
     expect(status).not.toHaveTextContent('persisted-primary')
+    expect(status.closest('.save-success-toast-region')).toHaveAttribute('role', 'alert')
+    expect(document.querySelector('.provider-form .inline-status')).not.toBeInTheDocument()
   })
 
   it('uses an entered key instead of a persisted provider key', async () => {

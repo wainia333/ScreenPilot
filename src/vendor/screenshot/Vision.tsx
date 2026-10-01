@@ -25,6 +25,9 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard, dataUrlToBase64, getClipboardImage, readBlobAsDataUrl } from './utils/clipboard'
+import { useVisionKnowledge } from '../../features/karakeep/use-vision-knowledge'
+import { modelMessages } from '../../features/karakeep/types'
+import type { VisionKnowledgeUi } from '../../features/karakeep/vision-knowledge-ui'
 import { buildVisionMarkdown, buildVisionMessageMarkdown, defaultVisionExportFileName } from '../../features/vision/vision-export'
 import {
   shouldPromoteVisionBarLayer,
@@ -677,7 +680,7 @@ type VisionTranslateFailureKind = 'original' | 'translated'
 type PendingVisionImage = { imageId: string; dataUrl: string }
 
 function stripVisionMessageImages(messages: readonly ExplainMessage[]): ExplainMessage[] {
-  return messages.map(({ imagePreview, ...message }) => message)
+  return modelMessages(messages)
 }
 
 export function resolveVisionTranslateFailureKind(
@@ -1384,7 +1387,7 @@ function ShareXInfoLabel({ rect, text, viewport }: { rect: Rect; text: string; v
   )
 }
 
-export default function Vision() {
+export default function Vision({ knowledgeUi }: { knowledgeUi?: VisionKnowledgeUi } = {}) {
   const [stage, setStage] = useState<Stage>('select')
   const [windows, setWindows] = useState<VisionWindowInfo[]>([])
   const [hovered, setHovered] = useState<VisionWindowInfo | null>(null)
@@ -1899,6 +1902,16 @@ export default function Vision() {
     visionRequestLifecycleRef.current.isCurrent(requestId)
   ), [])
 
+  const knowledge = useVisionKnowledge(isVisionRequestCurrent, event => {
+    if (!event.sources || !isVisionRequestCurrent(event.requestId)) return
+    setMessages(prev => {
+      const last = prev[prev.length - 1]
+      if (!last || last.role !== 'assistant' || last.id !== event.requestId) return prev
+      return [...prev.slice(0, -1), { ...last, sources: event.sources ?? [], ...(event.summary ? { searchSummary: event.summary } : {}) }]
+    })
+  })
+  const configureKnowledge = knowledge.configure
+
   const cancelPromptOptimization = useCallback(() => {
     promptOptimizeSeqRef.current += 1
     setPromptOptimizing(false)
@@ -1991,6 +2004,7 @@ export default function Vision() {
     void (async () => {
       try {
         const settings = await api.getSettings()
+        configureKnowledge(settings.karakeep, settings.karakeepKeyConfigured)
         setLang((settings.settingsLanguage as Lang) || 'zh')
         setActiveVisionModel(resolveVisionModelLabel(settings))
         visionStreamEnabledRef.current = settings.vision?.streamEnabled !== false
@@ -2005,9 +2019,9 @@ export default function Vision() {
         }
       } catch (err) { console.error('Failed to load settings', err) }
     })()
-  }, [])
+  }, [configureKnowledge])
 
-  const focusVisionInput = useCallback((delays: number[] = [0, 40, 120, 240, 420]) => {
+  const focusVisionInput = useCallback((delays: number[] = [0, 40, 120, 240, 420], preserveOtherControls = false) => {
     if (historyOpenRef.current) {
       focusReqIdRef.current += 1
       return
@@ -2016,6 +2030,9 @@ export default function Vision() {
     const canFocus = () => (
       requestId === focusReqIdRef.current
       && document.hasFocus()
+      && (!preserveOtherControls || document.activeElement === inputRef.current
+        || !(document.activeElement instanceof Element)
+        || !document.activeElement.closest('button, select, textarea, input, a[href], summary, [contenteditable="true"]'))
       && modeRef.current === 'chat'
       && !historyOpenRef.current
       && !capturingRef.current
@@ -2528,8 +2545,15 @@ export default function Vision() {
           }
           if (!payload.delta?.includes(payload.error)) {
             const reason = payload.incompleteReason ? ` (${payload.incompleteReason})` : ''
-            visionStreamBufferRef.current.content += `\n\n${appendVisionError('', `${payload.error}${reason}`)}`
-            scheduleVisionStreamFlush()
+            clearVisionStreamFlushTimer()
+            flushVisionStreamBuffer(true)
+            const error = `${payload.error}${reason}`
+            setMessages(prev => {
+              const last = prev[prev.length - 1]
+              if (!last || last.role !== 'assistant' || last.id !== payload.requestId) return prev
+              const content = appendVisionError(last.content, error)
+              return content === last.content ? prev : [...prev.slice(0, -1), { ...last, content }]
+            })
           }
         }
       }
@@ -2607,7 +2631,7 @@ export default function Vision() {
     if (stageRef.current !== 'answering' && stageRef.current !== 'ready') return
 
     const id = setTimeout(() => {
-      focusVisionInput([0, 60, 160])
+      focusVisionInput([0, 60, 160], true)
     }, 30)
     return () => clearTimeout(id)
   }, [streaming, mode, historyOpen, focusVisionInput])
@@ -4216,17 +4240,28 @@ export default function Vision() {
       }
       if (!isVisionRequestCurrent(requestId)) return
       preparingSendRef.current = false
-      const result = await api.visionAsk(effectiveImageId || '', stripVisionMessageImages(sendMessages), requestId)
+      if (!await knowledge.prepare(requestId)) return
+      const knowledgeRequest = knowledge.request(sendMessages)
+      const result = knowledge.configured || knowledge.mode !== 'auto' || knowledge.selected
+        ? await api.visionAsk(effectiveImageId || '', stripVisionMessageImages(sendMessages), requestId, knowledgeRequest)
+        : await api.visionAsk(effectiveImageId || '', stripVisionMessageImages(sendMessages), requestId)
       if (!isVisionRequestCurrent(requestId) || !visionRequestLifecycleRef.current.matchesResult(requestId, result)) return
       if (!visionRequestLifecycleRef.current.acceptResult(requestId, result.requestId)) return
       clearVisionStreamFlushTimer()
       flushVisionStreamBuffer(true)
+      if (result.sources) {
+        setMessages(prev => {
+          const last = prev[prev.length - 1]
+          if (!last || last.role !== 'assistant' || last.id !== requestId) return prev
+          return [...prev.slice(0, -1), { ...last, sources: result.sources ?? [], ...(result.summary ? { searchSummary: result.summary } : {}) }]
+        })
+      }
       if (!result.success) {
-        const errText = `${t.visionError}: ${result.error}`
+        const errText = result.error || t.visionError
         setMessages(prev => {
           const last = prev[prev.length - 1]
           if (!last || last.role !== 'assistant') return prev
-          const content = appendVisionError(last.content, errText)
+          const content = appendVisionError(last.content, errText, t.visionError)
           return [...prev.slice(0, -1), { ...last, content }]
         })
       } else if (result.response) {
@@ -4249,7 +4284,7 @@ export default function Vision() {
       setMessages(prev => {
         const last = prev[prev.length - 1]
         if (!last || last.role !== 'assistant') return prev
-        return [...prev.slice(0, -1), { ...last, content: appendVisionError(last.content, `${t.visionError}: ${msg}`) }]
+        return [...prev.slice(0, -1), { ...last, content: appendVisionError(last.content, msg, t.visionError) }]
       })
     } finally {
       if (!visionRequestLifecycleRef.current.canFinalize(requestId)) return
@@ -4327,7 +4362,7 @@ export default function Vision() {
         ? { imagePreview: pendingPastedImage.dataUrl }
         : {}),
     }
-    const placeholder: ExplainMessage = { role: 'assistant', content: '' }
+    const placeholder: ExplainMessage = { id: requestId, role: 'assistant', content: '' }
     const sendMessages: ExplainMessage[] = [...conversationMessages, userMsg]
     const nextMessages = [...sendMessages, placeholder]
     chatAutoFollowRef.current = true
@@ -4354,6 +4389,7 @@ export default function Vision() {
   }
 
   const handleStop = async () => {
+    knowledge.reset()
     const stopSequence = invalidateVisionRequest()
     try { await api.visionCancelStream() } catch (err) { console.error(err) }
     if (!visionRequestLifecycleRef.current.isCurrentInvalidation(stopSequence)) return
@@ -4412,7 +4448,7 @@ export default function Vision() {
     const prefix = currentMessages.slice(0, userIndex)
     const userMessage: ExplainMessage = { ...originalUser, content: userContent }
     const sendMessages = [...prefix, userMessage]
-    const nextMessages: ExplainMessage[] = [...sendMessages, { role: 'assistant', content: '' }]
+    const nextMessages: ExplainMessage[] = [...sendMessages, { id: requestId, role: 'assistant', content: '' }]
     chatAutoFollowRef.current = true
     resetVisionStreamBuffer()
     preparingSendRef.current = true
@@ -4710,6 +4746,7 @@ export default function Vision() {
     // question. Keep the answer hidden in `ready` while the one-line bar moves;
     // only expand it after the native promise reaches the shared top slot.
     const expectedFlySeq = nativeFlySeqRef.current + 1
+    knowledge.reset()
     const restoredMessages = item.messages.map(message => ({ ...message }))
     const firstRestoredUserIndex = restoredMessages.findIndex(message => message.role === 'user')
     const firstRestoredUser = firstRestoredUserIndex >= 0
@@ -5769,6 +5806,7 @@ export default function Vision() {
             onAnimationEnd={handleJellyAnimationEnd}
             data-tauri-drag-region="false"
           >
+            {mode === 'chat' && knowledgeUi && <knowledgeUi.Controls mode={knowledge.mode} includeWeb={knowledge.includeWeb} configured={knowledge.configured} selected={knowledge.selected} disabled={streaming} onChange={knowledge.change} onClear={() => knowledge.select(null)} onSettings={() => { void api.openKnowledgeSettings().catch(err => showArchiveWarning(String(err))) }} language={lang === 'zh' ? 'zh' : 'en'} />}
             <div className="shrink-0 flex items-center gap-2">
               {capturePreparing && !pastedImage?.dataUrl ? (
                 <Loader2
@@ -6215,6 +6253,7 @@ export default function Vision() {
                               </div>
                             ) : (
                               <div className="prose prose-sm dark:prose-invert max-w-none text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
+                                {isLast && knowledgeUi && knowledge.event?.requestId === m.id && <knowledgeUi.Progress event={knowledge.event} language={lang === 'zh' ? 'zh' : 'en'} />}
                                 {m.reasoning && (
                                   <ThinkingBlock
                                     reasoning={m.reasoning}
@@ -6231,6 +6270,8 @@ export default function Vision() {
                                     <span className="text-[12px]">{formatVisionAsking(t.visionAsking, activeVisionModel)}</span>
                                   </div>
                                 ) : null}
+                                {knowledgeUi && (m.sources ?? []).map((source, index) => <knowledgeUi.Source key={source.instanceId + ':' + source.bookmarkId} source={source} index={index} disabled={streaming} language={lang === 'zh' ? 'zh' : 'en'} onAsk={reference => { knowledge.select(reference); setInput(lang === 'zh' ? '根据这篇，请整理操作步骤。' : 'Based on this bookmark, summarize the steps.'); focusVisionInput([0, 60]) }} onOpen={api.openExternal} onCopy={async url => { if (!await copyToClipboard(url)) throw new Error('Copy failed') }} />)}
+                                {m.content.includes('KARAKEEP_CONFIG') && <button type="button" className="bookmark-actions" onClick={() => void api.openKnowledgeSettings().catch(err => showArchiveWarning(String(err)))}>{lang === 'zh' ? '打开设置 → 资料来源' : 'Open Settings → Sources'}</button>}
                               </div>
                             )
                           )}

@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Copy, Loader2, Play } from 'lucide-react'
 import { createPortal } from 'react-dom'
+import { karakeepVisionUi } from '../karakeep/default-vision-ui'
 import ReferenceVision from '../../vendor/screenshot/Vision'
 import { api as referenceVisionApi } from '../../vendor/screenshot/api/tauri'
 import '../../vendor/screenshot/index.css'
@@ -983,7 +984,7 @@ export default function ReferenceVisionAdapter() {
 
   return (
     <main ref={adapterRootRef} data-screenpilot-vision-adapter="true">
-      <ReferenceVision />
+      <ReferenceVision knowledgeUi={karakeepVisionUi} />
       {createPortal(
         <span className="screenpilot-source-language-control">
           <label htmlFor="screenpilot-source-language">{t.sourceLanguage}</label>

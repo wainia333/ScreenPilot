@@ -111,6 +111,7 @@ export type PromptOptimizerSettings = {
 }
 
 export type AppSettings = {
+  karakeep: import('../karakeep/types').KarakeepConfig
   schemaVersion: 1
   theme: ThemeMode
   language: InterfaceLanguage
@@ -139,6 +140,7 @@ export type SettingsSecrets = {
   schemaVersion: 1
   providers: Record<string, string[]>
   adapters: Record<string, string[]>
+  integrations?: Record<string, string[]>
 }
 
 export type SettingsIssue = {

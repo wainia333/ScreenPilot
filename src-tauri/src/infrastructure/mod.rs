@@ -1,10 +1,12 @@
 pub mod ai_http;
 pub mod credentials;
 pub mod images;
+pub mod karakeep_http;
 pub mod ocr;
 pub(crate) mod ocr_text;
 pub mod provider_http;
 pub mod settings_store;
 pub mod speech;
 pub mod sse;
+pub mod tool_session;
 pub mod translation;

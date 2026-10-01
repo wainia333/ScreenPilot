@@ -45,6 +45,9 @@ export class TauriDesktopPort implements DesktopPort {
   constructor(private readonly api: TauriApi = defaultTauriApi) {}
 
   loadSettings = () => this.api.invoke<AppSettings>('settings_load')
+  karakeepConfigured = () => this.api.invoke<boolean>('integration_karakeep_configured')
+  testKarakeep = (baseUrl: string, apiKey?: string) =>
+    this.api.invoke<{ connected: boolean; effectiveMode: string; message: string }>('integration_karakeep_test', { baseUrl, apiKey: apiKey ?? null })
   loadSettingsSnapshot = () => this.api.invoke<SettingsSnapshot>('settings_snapshot_load')
   takeStartupNotice = () => this.api.invoke<string | null>('startup_notice_take')
   acknowledgeStartupNotice = () => this.api.invoke<boolean>('startup_notice_acknowledge')

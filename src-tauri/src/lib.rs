@@ -41,6 +41,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_external,
             settings_load,
+            integration_karakeep_configured,
+            integration_open_settings,
+            integration_karakeep_test,
             startup_notice_take,
             startup_notice_peek,
             startup_notice_acknowledge,

@@ -13,6 +13,7 @@
     "dev": "tauri dev",
     "dev:ui": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tauri build",
+    "build:portable": "node scripts/build-portable.mjs",
     "build:ui": "vite build",
     "check": "npm run check:frontend && npm run check:rust",
     "check:frontend": "npm run typecheck && npm run lint -- --max-warnings 0",

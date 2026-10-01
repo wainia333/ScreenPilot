@@ -27,6 +27,8 @@ const LEGACY_OPTIMIZER_PROMPT: &str =
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    #[serde(default)]
+    pub karakeep: crate::domain::integrations::karakeep::KarakeepConfig,
     pub schema_version: u8,
     pub theme: ThemeMode,
     pub language: InterfaceLanguage,
@@ -245,6 +247,8 @@ pub struct SettingsSecrets {
     pub schema_version: u8,
     pub providers: HashMap<String, Vec<String>>,
     pub adapters: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub integrations: HashMap<String, Vec<String>>,
 }
 
 impl SettingsSecrets {
@@ -256,6 +260,7 @@ impl SettingsSecrets {
             schema_version: SETTINGS_SECRETS_SCHEMA_VERSION,
             providers,
             adapters,
+            integrations: HashMap::new(),
         }
     }
 }
@@ -273,6 +278,8 @@ impl<'de> Deserialize<'de> for SettingsSecrets {
             providers: HashMap<String, Vec<String>>,
             #[serde(default)]
             adapters: HashMap<String, Vec<String>>,
+            #[serde(default)]
+            integrations: HashMap<String, Vec<String>>,
         }
 
         #[derive(Deserialize)]
@@ -287,6 +294,7 @@ impl<'de> Deserialize<'de> for SettingsSecrets {
                 schema_version: value.schema_version,
                 providers: value.providers,
                 adapters: value.adapters,
+                integrations: value.integrations,
             }),
             SecretsWire::Legacy(providers) => Ok(Self::new(providers, HashMap::new())),
         }
@@ -296,6 +304,7 @@ impl<'de> Deserialize<'de> for SettingsSecrets {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            karakeep: Default::default(),
             schema_version: SETTINGS_SCHEMA_VERSION,
             theme: ThemeMode::System,
             language: InterfaceLanguage::Zh,
@@ -426,6 +435,14 @@ impl AppSettings {
     }
 
     pub fn normalize_ai_options(&mut self) {
+        if let Ok(url) =
+            crate::domain::integrations::karakeep::instance_url(&self.karakeep.base_url)
+        {
+            self.karakeep.base_url = url.to_string();
+            self.karakeep.instance_id = url.to_string();
+        } else {
+            self.karakeep.instance_id.clear();
+        }
         if !valid_optional_model_selection(&self.providers, &mut self.translation.ai_model) {
             self.translation.ai_model = None;
         }
@@ -489,6 +506,9 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.karakeep.enabled || !self.karakeep.base_url.is_empty() {
+            crate::domain::integrations::karakeep::instance_url(&self.karakeep.base_url)?;
+        }
         crate::domain::altsnap::HeldShortcut::parse(&self.alt_snap.shortcut)?;
         if self.schema_version != SETTINGS_SCHEMA_VERSION {
             return Err("Unsupported settings schema".into());

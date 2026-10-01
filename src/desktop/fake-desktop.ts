@@ -51,6 +51,13 @@ function hasPatchConflict(base: unknown, current: unknown, patch: unknown): bool
 }
 
 export class FakeDesktopPort implements DesktopPort {
+  private integrationConfigured = false
+  readonly karakeepTestCalls: { baseUrl: string; apiKey?: string }[] = []
+  karakeepConfigured = () => Promise.resolve(this.integrationConfigured)
+  testKarakeep = (baseUrl: string, apiKey?: string) => {
+    this.karakeepTestCalls.push({ baseUrl, ...(apiKey ? { apiKey } : {}) })
+    return Promise.resolve({ connected: true, effectiveMode: 'unknown', message: '测试连接成功（测试替身）' })
+  }
   private settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
   private revision = 0
   private readonly settingsHistory = new Map<number, AppSettings>([[0, structuredClone(DEFAULT_SETTINGS)]])
@@ -183,6 +190,7 @@ export class FakeDesktopPort implements DesktopPort {
       return Promise.reject(new Error(this.importedSecretsSaveError))
     }
     providerDeletionIds.forEach((providerId) => this.keys.delete(providerId))
+    if (secrets.integrations?.karakeep?.length) this.integrationConfigured = true
     Object.entries({ ...secrets.providers, ...secrets.adapters }).forEach(([credentialId, keys]) => {
       this.keys.set(credentialId, keys.filter((key) => key.trim().length > 0))
     })
@@ -367,6 +375,7 @@ export class FakeDesktopPort implements DesktopPort {
  * runtime fallback must never claim that a native side effect happened.
  */
 export class BrowserPreviewDesktopPort extends FakeDesktopPort {
+  override testKarakeep = (baseUrl: string, apiKey?: string) => { void baseUrl; void apiKey; return Promise.reject(this.unsupported('连接 Karakeep；浏览器预览无法使用原生集成')) }
   private unsupported(action: string): Error {
     return new Error(`浏览器预览不支持${action}，请使用 npm run dev 启动 Windows 原生版本。`)
   }

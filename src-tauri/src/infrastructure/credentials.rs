@@ -16,6 +16,75 @@ pub const ADAPTER_CREDENTIAL_SPECS: [(&str, usize); 4] = [
 ];
 
 impl CredentialVault {
+    pub fn integration_key() -> Result<Option<String>, String> {
+        match Entry::new(SERVICE, "integration-karakeep")
+            .map_err(|_| "无法访问集成凭据库")?
+            .get_password()
+        {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err("无法读取集成凭据库".into()),
+        }
+    }
+    pub fn set_integration_key(value: Option<&str>) -> Result<(), String> {
+        let entry =
+            Entry::new(SERVICE, "integration-karakeep").map_err(|_| "无法访问集成凭据库")?;
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            if value.len() > 16384 {
+                return Err("集成密钥超过长度限制".into());
+            }
+            entry
+                .set_password(value.trim())
+                .map_err(|_| "无法保存集成密钥".into())
+        } else {
+            entry
+                .delete_credential()
+                .or_else(|e| {
+                    if matches!(e, keyring::Error::NoEntry) {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|_| "无法删除集成密钥".into())
+        }
+    }
+    pub fn integration_keys_for_export() -> Result<HashMap<String, Vec<String>>, String> {
+        Ok(Self::integration_key()?
+            .map(|key| HashMap::from([("karakeep".into(), vec![key])]))
+            .unwrap_or_default())
+    }
+    pub fn import_all_secrets(
+        providers: &HashMap<String, Vec<String>>,
+        adapters: &HashMap<String, Vec<String>>,
+        integrations: &HashMap<String, Vec<String>>,
+        deletions: &[String],
+    ) -> Result<(), String> {
+        validate_integration_secrets(integrations)?;
+        let mut changes = imported_provider_changes(providers, deletions)?;
+        validate_adapter_key_batch_shape(adapters)?;
+        changes.extend(adapters.clone());
+        if let Some(keys) = integrations.get("karakeep") {
+            changes.insert("integration-karakeep".into(), keys.clone());
+        }
+        set_keys_batch_transaction_with(
+            &changes,
+            &mut |id| {
+                if id == "integration-karakeep" {
+                    Ok(Self::integration_key()?.into_iter().collect())
+                } else {
+                    Self::provider_keys(id)
+                }
+            },
+            &mut |id, keys| {
+                if id == "integration-karakeep" {
+                    Self::set_integration_key(keys.first().map(String::as_str))
+                } else {
+                    Self::write_provider_keys(id, keys)
+                }
+            },
+        )
+    }
     pub fn set_provider_keys(provider_id: &str, keys: &[String]) -> Result<(), String> {
         if let Some(expected_count) = adapter_credential_field_count(provider_id) {
             validate_adapter_key_entry(provider_id, keys, expected_count)?;
@@ -97,20 +166,6 @@ impl CredentialVault {
         })
     }
 
-    pub fn set_imported_secrets_batch(
-        providers: &HashMap<String, Vec<String>>,
-        adapters: &HashMap<String, Vec<String>>,
-        provider_deletion_ids: &[String],
-    ) -> Result<(), String> {
-        set_imported_secrets_batch_with(
-            providers,
-            adapters,
-            provider_deletion_ids,
-            Self::provider_keys,
-            Self::write_provider_keys,
-        )
-    }
-
     fn entry(provider_id: &str) -> Result<Entry, String> {
         if provider_id.is_empty()
             || provider_id.len() > 80
@@ -133,7 +188,9 @@ pub(crate) fn validate_provider_key_batch_shape(
         ));
     }
     for (provider_id, keys) in changes {
-        if adapter_credential_field_count(provider_id).is_some() {
+        if adapter_credential_field_count(provider_id).is_some()
+            || provider_id.starts_with("integration-")
+        {
             return Err("Provider key batch cannot modify adapter credentials".into());
         }
         if provider_id.is_empty()
@@ -157,6 +214,16 @@ pub(crate) fn validate_provider_key_batch_shape(
         }
     }
     Ok(())
+}
+
+pub fn validate_integration_secrets(values: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    if values.iter().any(|(id, keys)| {
+        id != "karakeep" || keys.len() != 1 || keys[0].trim().is_empty() || keys[0].len() > 16384
+    }) {
+        Err("集成凭据格式无效".into())
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_imported_provider_key_batch_shape(
@@ -260,6 +327,7 @@ where
     set_keys_batch_transaction_with(changes, &mut read, &mut write)
 }
 
+#[cfg(test)]
 fn set_imported_secrets_batch_with<R, W>(
     providers: &HashMap<String, Vec<String>>,
     adapters: &HashMap<String, Vec<String>>,

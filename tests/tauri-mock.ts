@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 import { DEFAULT_SETTINGS } from '../src/features/settings/defaults'
+import type { BookmarkReference, KnowledgeRequest } from '../src/features/karakeep/types'
 
 export type MockWindowLabel = 'main' | 'translator' | 'vision' | 'ocr'
 
@@ -21,8 +22,9 @@ export async function installVisionTauriMock(
   initialTranslationMethod: 'ai' | 'google' | 'baidu' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft' = 'microsoft',
   explicitWindowLabel?: MockWindowLabel,
   simulateNativeResize = false,
+  knowledgeFixture?: { sources: BookmarkReference[]; nonStream?: boolean; error?: string },
 ): Promise<void> {
-  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod, requestedWindowLabel, desktopSettings, simulateNativeResize: simulateNativeResizeEnabled }) => {
+  await page.addInitScript(({ image, sourceText, keepFullscreen, translatedResult, streamDelayMs, deferSetResponses, nativeWidthDelta, archiveWarningText, directTranslateEnabled, initialListenerFailures, initialMethod, requestedWindowLabel, desktopSettings, simulateNativeResize: simulateNativeResizeEnabled, knowledgeFixtureData }) => {
     const callbacks = new Map<number, (payload: unknown) => void>()
     const listeners = new Map<string, Map<number, number>>()
     const listenerTargets = new Map<number, { kind: string; label?: string }>()
@@ -58,6 +60,12 @@ export async function installVisionTauriMock(
     const floatingPadding = 8
     const floatingInset = floatingPadding * 2
     const visionTestState = {
+      knowledgeRequests: [] as (KnowledgeRequest | undefined)[],
+      karakeepConfigured: false,
+      karakeepTestError: '',
+      karakeepTestCalls: [] as { baseUrl: string; apiKey: string | null }[],
+      providerTestError: '',
+      emitKnowledge: (payload: unknown): void => { void payload },
       showCount: 0,
       emitWindowEvent: (label: string, event: string, payload: unknown): void => {
         void label
@@ -141,6 +149,10 @@ export async function installVisionTauriMock(
       },
       emitVisionAnswerDelta: (delta: string) => {
         void delta
+        return false
+      },
+      emitVisionAnswerPayload: (payload: unknown) => {
+        void payload
         return false
       },
       interfaceLanguage: 'zh' as 'zh' | 'en',
@@ -308,6 +320,11 @@ export async function installVisionTauriMock(
       })
       return true
     }
+    visionTestState.emitKnowledge = payload => { emit('vision-knowledge', payload) }
+    visionTestState.emitVisionAnswerPayload = (payload: unknown) => {
+      emit('vision-stream', payload)
+      return true
+    }
     visionTestState.emitVisionTranslatePayload = (payload: unknown) => {
       emit('vision-translate-stream', payload)
       return true
@@ -432,10 +449,23 @@ export async function installVisionTauriMock(
         emit('screenpilot:settings-changed', { settings: structuredClone(desktopSettings), revision: desktopSettingsRevision })
         return null
       }
+      if (command === 'integration_karakeep_configured') return visionTestState.karakeepConfigured
+      if (command === 'providers_test') {
+        return { success: !visionTestState.providerTestError, error: visionTestState.providerTestError || null }
+      }
+      if (command === 'integration_karakeep_test') {
+        visionTestState.karakeepTestCalls.push({ baseUrl: String(args.baseUrl), apiKey: args.apiKey as string | null })
+        if (visionTestState.karakeepTestError) throw new Error(visionTestState.karakeepTestError)
+        return { connected: true, effectiveMode: 'unknown', message: '只读API连接成功' }
+      }
+      if (command === 'credentials_set_imported_secrets') {
+        const secrets = args.secrets as { integrations?: { karakeep?: string[] } } | undefined
+        if (secrets?.integrations?.karakeep?.length) visionTestState.karakeepConfigured = true
+        return null
+      }
       if (
         command === 'credentials_set_provider_keys_batch'
         || command === 'credentials_set_adapter_keys_batch'
-        || command === 'credentials_set_imported_secrets'
         || command === 'credentials_set_provider_keys'
         || command === 'credentials_delete_provider_keys'
       ) return null
@@ -471,7 +501,7 @@ export async function installVisionTauriMock(
       }
       if (command === 'vision_runtime_settings_load') {
         settings.settingsLanguage = visionTestState.interfaceLanguage
-        return structuredClone(settings)
+        return { ...structuredClone(settings), ...(knowledgeFixtureData ? { karakeep: { ...desktopSettings.karakeep, enabled: true, baseUrl: 'https://saved.example/', instanceId: 'https://saved.example/', defaultSearchMode: 'hybrid', visionPolicy: 'auto' }, karakeepKeyConfigured: true } : {}) }
       }
       if (command === 'screenshot_translation_settings_update') {
         const patch = args.patch as Partial<typeof settings.screenshotTranslation>
@@ -537,10 +567,24 @@ export async function installVisionTauriMock(
       }
       if (command === 'vision_ask') {
         visionTestState.visionAskCalls += 1
+        visionTestState.knowledgeRequests.push(args.knowledge as KnowledgeRequest | undefined)
         const imageId = stringArgument(args.imageId)
         const requestId = stringArgument(args.requestId)
         visionTestState.activeVisionImageId = imageId
         visionTestState.activeVisionRequestId = requestId
+        if (knowledgeFixtureData) {
+          if (knowledgeFixtureData.error) {
+            emit('vision-knowledge', { requestId, imageId, stage: 'failed', message: knowledgeFixtureData.error })
+            if (!knowledgeFixtureData.nonStream) emit('vision-stream', { requestId, imageId, delta: '', done: true, reason: 'error', error: knowledgeFixtureData.error })
+            return { success: false, requestId, error: knowledgeFixtureData.error }
+          }
+          const summary = { runId: `run-${requestId}`, requestedMode: 'hybrid', effectiveMode: 'unknown', status: 'ready', readCount: knowledgeFixtureData.sources.length, recommendationCount: knowledgeFixtureData.sources.length, warnings: [] }
+          if (!knowledgeFixtureData.nonStream) {
+            for (const stage of ['searching', 'searched', 'reading', 'selecting']) emit('vision-knowledge', { requestId, imageId, stage })
+            emit('vision-knowledge', { requestId, imageId, stage: 'ready', sources: knowledgeFixtureData.sources, summary })
+          }
+          return { success: true, requestId, response: '已根据收藏正文整理回答。', sources: knowledgeFixtureData.sources, summary }
+        }
         emit('vision-stream', {
           imageId,
           requestId,
@@ -912,6 +956,7 @@ export async function installVisionTauriMock(
     initialMethod: initialTranslationMethod,
     requestedWindowLabel: explicitWindowLabel,
     desktopSettings: structuredClone(DEFAULT_SETTINGS),
+    knowledgeFixtureData: knowledgeFixture ?? null,
     simulateNativeResize,
   })
 }

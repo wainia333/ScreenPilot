@@ -58,4 +58,14 @@ describe('Vision request lifecycle', () => {
     expect(withError).toBe('partial answer\n\n⚠️ provider failed')
     expect(appendVisionError(withError, 'provider failed')).toBe(withError)
   })
+
+  it('deduplicates the same terminal error across stream and localized command responses', () => {
+    const error = 'KARAKEEP_BUDGET: 检索未完成'
+    const streamed = appendVisionError('partial answer', error)
+    expect(appendVisionError(streamed, error, '出错了')).toBe(streamed)
+    const returned = appendVisionError('partial answer', error, '出错了')
+    expect(appendVisionError(returned, error)).toBe(returned)
+    expect(returned).toContain('partial answer')
+    expect(returned).toContain('⚠️ 出错了:')
+  })
 })

@@ -22,6 +22,7 @@ base64 = "=0.22.1"
 chrono = { version = "=0.4.42", features = ["serde"] }
 futures-util = "=0.3.31"
 hmac = "=0.12.1"
+html2text = "=0.16.7"
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 md-5 = "=0.10.6"

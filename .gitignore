@@ -13,4 +13,4 @@ src-tauri/gen/
 /综合审查.md
 docs
 release
-test*
+tests

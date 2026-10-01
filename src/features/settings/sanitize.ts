@@ -117,6 +117,8 @@ function provider(value: unknown, index: number): ProviderSettings | null {
 
 export function sanitizeSettings(value: unknown): AppSettings {
   const root = record(value)
+  const karakeep = record(root.karakeep)
+  const karakeepUrl = text(karakeep.baseUrl, '', 2048).trim().replace(/\/+$/u, '')
   const retry = record(root.retry)
   const general = record(root.general)
   const shortcuts = record(root.shortcuts)
@@ -137,6 +139,13 @@ export function sanitizeSettings(value: unknown): AppSettings {
   const ocrModel = validModel(modelSelection(screenshot.ocrModel))
   const screenshotTranslationModel = validModel(modelSelection(screenshot.translationModel))
   const sanitized: AppSettings = {
+    karakeep: {
+      enabled: flag(karakeep.enabled, false), baseUrl: karakeepUrl ? `${karakeepUrl}/` : '',
+      instanceId: karakeepUrl ? `${karakeepUrl}/` : '',
+      defaultSearchMode: choice(karakeep.defaultSearchMode, new Set<import('../karakeep/types').SearchMode>(['fts', 'semantic', 'hybrid']), 'fts'),
+      visionPolicy: choice(karakeep.visionPolicy, new Set<import('../karakeep/types').SourcePolicy>(['off', 'auto', 'only']), 'auto'),
+      systemPrompt: text(karakeep.systemPrompt, DEFAULT_SETTINGS.karakeep.systemPrompt),
+    },
     altSnap: {
       enabled: flag(altSnap.enabled, DEFAULT_SETTINGS.altSnap.enabled),
       shortcut: normalizeShortcut(text(altSnap.shortcut, DEFAULT_SETTINGS.altSnap.shortcut, 80)),
@@ -315,6 +324,13 @@ export function validateSettings(settings: AppSettings): SettingsIssue[] {
     screenshotTranslation: settings.screenshotTranslation.enabled,
     promptOptimizer: settings.promptOptimizer.enabled,
   })
+  if (settings.karakeep.enabled || settings.karakeep.baseUrl) {
+    try {
+      const url = new URL(settings.karakeep.baseUrl)
+      const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+      if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) || url.username || url.password || url.search || url.hash) throw new Error('unsafe')
+    } catch { issues.push({ path: 'karakeep.baseUrl', code: 'unsafe', message: 'Karakeep 地址必须使用 HTTPS，不能包含凭据或查询参数' }) }
+  }
   if (settings.altSnap.shortcut.trim().length === 0) {
     issues.push({ path: 'altSnap.shortcut', code: 'missing', message: 'AltSnap shortcut cannot be empty' })
   }

@@ -67,7 +67,7 @@ export function GeneralSection({
             }
           />
         </SettingRow>
-        <SettingRow label={t.autoPaste} description={t.autoPasteDescription}>
+        <SettingRow label={t.autoPaste}>
           <Toggle
             checked={settings.general.autoPaste}
             label={t.autoPaste}
@@ -85,7 +85,6 @@ export function GeneralSection({
           <SettingRow
             nested
             label={t.launchAsAdministrator}
-            description={t.launchAsAdministratorDescription}
           >
             <Toggle
               checked={settings.general.launchAtStartupAsAdministrator}
@@ -96,7 +95,7 @@ export function GeneralSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.screenshotArchive} description={t.archiveDataFlowDescription}>
+        <SettingRow label={t.screenshotArchive}>
           <Toggle
             checked={settings.general.imageArchiveEnabled}
             label={t.screenshotArchive}

@@ -41,6 +41,7 @@ export function AdapterCredentials({
                 {adapter.fields.map((field, index) => (
                   <TextField
                     key={field}
+                    className="connection-input"
                     value={hasDraft ? values[index] ?? '' : ''}
                     label={`${adapterLabel} ${field}`}
                     type="password"

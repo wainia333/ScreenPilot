@@ -13,6 +13,12 @@ vi.mock('@tauri-apps/api/window', () => ({
 import { api } from '../../vendor/screenshot/api/tauri'
 
 describe('Vision request API contract', () => {
+  it('sends structured historical IDs for text-only followups', async () => {
+    invokeMock.mockResolvedValue({ success: true, requestId: 'vision-8', sources: [] })
+    const knowledge = { mode: 'only' as const, includeWeb: false, references: [{ instanceId: 'https://saved.example/', bookmarkId: 'compose' }] }
+    await api.visionAsk('', [{ role: 'user', content: '根据第一篇，整理步骤' }], 'vision-8', knowledge)
+    expect(invokeMock).toHaveBeenCalledWith('vision_ask', { imageId: '', messages: [{ role: 'user', content: '根据第一篇，整理步骤' }], requestId: 'vision-8', knowledge })
+  })
   it('serializes requestId with vision_ask arguments', async () => {
     invokeMock.mockResolvedValue({ success: true, requestId: 'vision-7' })
     const messages = [{ role: 'user' as const, content: 'Describe this' }]

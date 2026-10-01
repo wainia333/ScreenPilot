@@ -1,0 +1,21 @@
+.bookmark-source-controls { display:flex; align-items:center; gap:3px; flex-shrink:0; font-size:11px; color:inherit; }
+.bookmark-source-controls button { padding:3px; cursor:pointer; }
+.bookmark-source-card { font-size:12px; line-height:1.6; margin:10px 0; padding:10px 12px; border:1px solid #8884; border-radius:10px; overflow-wrap:anywhere; }
+.bookmark-source-heading { display:flex; gap:8px; align-items:baseline; }
+.bookmark-source-heading strong { min-width:0; font-size:13px; font-weight:600; }
+.bookmark-source-card p { margin:5px 0; }
+.bookmark-source-card small { opacity:.72; }
+.bookmark-tags { display:flex; gap:5px; flex-wrap:wrap; margin-top:5px; }
+.bookmark-tags span { border-radius:4px; padding:0 5px; background:#8882; }
+.bookmark-source-card summary { cursor:pointer; padding:5px 0; }
+.bookmark-source-card blockquote { margin:6px 0; padding-left:8px; border-left:2px solid #8886; font-style:normal; font-weight:400; }
+.bookmark-source-card pre { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; background:transparent; color:inherit; margin:0; }
+.bookmark-actions { display:flex; flex-wrap:wrap; gap:4px 10px; margin-top:6px; }
+.bookmark-actions button { cursor:pointer; padding:2px 0; text-decoration:underline; text-underline-offset:3px; }
+.bookmark-actions button:disabled { opacity:.5; cursor:default; }
+.bookmark-source-card button:focus-visible, .bookmark-source-card summary:focus-visible, .bookmark-source-controls :focus-visible { outline:2px solid var(--kv-accent,#D97757); outline-offset:3px; border-radius:3px; }
+.bookmark-progress { font-size:12px; line-height:1.5; margin:6px 0; opacity:.8; overflow-wrap:anywhere; }
+
+.karakeep-settings .setting-row:has(.connection-input) .setting-row__control {
+  flex: 0 1 280px;
+}

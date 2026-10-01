@@ -6,10 +6,8 @@ import { DEFAULT_SETTINGS } from '../defaults'
 import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
 import {
   copyFor,
-  formatCopy,
   translationLanguageOptions,
   translationMethodLabel,
-  translationServiceDestination,
 } from '../../../shared/ui-copy'
 
 export function TranslationSection({
@@ -33,10 +31,6 @@ export function TranslationSection({
     .filter((option) => option.value !== 'ai' || canUseAi)
     .map((option) => ({ ...option, label: translationMethodLabel(option.value, settings.language) }))
   const usesAdapterCredentials = new Set<TranslationMethod>(['baidu', 'tencent', 'caiyun2']).has(settings.translation.method)
-  const destination = translationServiceDestination(settings, method, settings.translation.aiModel) ?? t.noSelection
-  const dataFlowDescription = method === 'ai'
-    ? formatCopy(t.aiTextTranslationDataFlow, { destination })
-    : formatCopy(t.textTranslationDataFlow, { destination })
   return (
     <>
       <SettingGroup title={t.translationBehavior}>
@@ -74,7 +68,7 @@ export function TranslationSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.translationInterface} description={dataFlowDescription}>
+        <SettingRow label={t.translationInterface}>
           <SelectField
             value={method}
             label={t.translationInterface}
@@ -83,7 +77,7 @@ export function TranslationSection({
           />
         </SettingRow>
         {usesAdapterCredentials && onOpenCredentials === undefined ? null : usesAdapterCredentials ? (
-          <SettingRow label={t.credentialGroup} description={t.configureCredentials}>
+          <SettingRow label={t.credentialGroup}>
             <button type="button" className="secondary-button" onClick={onOpenCredentials}>
               {t.configureCredentials}
             </button>

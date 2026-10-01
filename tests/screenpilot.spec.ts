@@ -2,6 +2,75 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { VISION_FLOATING_PADDING } from '../src/features/vision/dialog-sizing'
 import { installVisionTauriMock } from './tauri-mock'
+import type { BookmarkReference, KnowledgeRequest } from '../src/features/karakeep/types'
+
+const savedSourceFixture: BookmarkReference = {
+  instanceId: 'https://saved.example/', bookmarkId: 'compose', title: 'Karakeep Docker Compose 部署教程：很长的标题也应当在窄浮窗内正常换行', contentType: 'link',
+  sourceUrl: 'https://article.example/install', karakeepUrl: 'https://saved.example/dashboard/preview/compose', tags: ['Docker', '自托管'],
+  reason: '正文包含 Compose 文件、环境变量与启动步骤。', evidence: [{ passageId: 'p1', quote: '设置 NEXTAUTH_SECRET，然后执行 docker compose up -d。' }], verification: 'content', retrievedAt: '2026-10-01T00:00:00Z',
+}
+for (const nonStream of [false, true]) {
+  test(`Karakeep terminal errors appear once across progress, stream and result (${nonStream ? 'JSON' : 'stream'})`, async ({ page }) => {
+    const error = 'KARAKEEP_BUDGET: 检索未完成'
+    await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', undefined, false, { sources: [], nonStream, error })
+    await page.goto('/?window=vision#vision?mode=chat')
+    await waitForVisionSelection(page)
+    await page.getByPlaceholder('问点什么...').fill('在我的书签中查找在线 SVG 编辑网站')
+    await page.locator('[data-screenpilot-vision-send="true"]').click()
+    const log = page.getByRole('log')
+    await expect(log).toHaveAttribute('aria-busy', 'false')
+    await expect(log).toContainText(error)
+    expect((await log.innerText()).split(error).length - 1).toBe(1)
+    await expect(page.getByText('收藏库检索失败，详情见下方')).toBeVisible()
+    // A late repeat of the terminal stream event must not append another copy.
+    await page.evaluate(message => {
+      const state = (window as typeof window & { __SCREENPILOT_TEST__: { activeVisionRequestId: string; emitVisionAnswerPayload: (event: unknown) => void } }).__SCREENPILOT_TEST__
+      state.emitVisionAnswerPayload({ requestId: state.activeVisionRequestId, imageId: '', delta: '', done: true, reason: 'error', error: message })
+    }, error)
+    expect((await log.innerText()).split(error).length - 1).toBe(1)
+  })
+  test(`Karakeep Vision sources, historical followup and late event isolation (${nonStream ? 'JSON' : 'stream'})`, async ({ page }) => {
+    await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', undefined, false, { sources: [savedSourceFixture], nonStream })
+    await page.setViewportSize({ width: 760, height: 640 })
+    await page.goto('/?window=vision#vision?mode=chat')
+    await waitForVisionSelection(page)
+    const prompt = page.getByPlaceholder('问点什么...')
+    await expect(page.getByRole('combobox', { name: '收藏库来源模式' })).toHaveCount(0)
+    await prompt.fill('帮我在书签中找一下，怎么用 Docker 安装 Karakeep。')
+    await page.locator('[data-screenpilot-vision-send="true"]').click()
+    await expect(page.getByRole('article', { name: `1. ${savedSourceFixture.title}` })).toBeVisible()
+    await expect(page.getByRole('log')).toHaveAttribute('aria-busy', 'false')
+    const evidenceToggle = page.getByText('正文依据')
+    await evidenceToggle.focus()
+    await evidenceToggle.press('Enter')
+    // Cover all delayed WebView2 focus retries after completion.
+    await page.waitForTimeout(300)
+    await expect(evidenceToggle).toBeFocused()
+    await expect(page.getByText(savedSourceFixture.evidence[0]?.quote ?? '')).toBeVisible()
+    await page.getByRole('button', { name: `打开原文：${savedSourceFixture.title}` }).click()
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { __SCREENPILOT_TEST__: { externalUrls: string[] } }).__SCREENPILOT_TEST__.externalUrls)).toContain(savedSourceFixture.sourceUrl)
+    await page.screenshot({ path: `.task/karakeep-${nonStream ? 'json' : 'stream'}-light.png` })
+    await page.getByRole('button', { name: '基于这篇继续问' }).click()
+    await expect(prompt).toHaveValue('根据这篇，请整理操作步骤。')
+    await page.locator('[data-screenpilot-vision-send="true"]').click()
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { __SCREENPILOT_TEST__: { knowledgeRequests: KnowledgeRequest[] } }).__SCREENPILOT_TEST__.knowledgeRequests[1]?.selected)).toEqual({ instanceId: savedSourceFixture.instanceId, bookmarkId: savedSourceFixture.bookmarkId })
+    await expect(page.getByRole('log')).toHaveAttribute('aria-busy', 'false')
+    await page.evaluate(() => (window as typeof window & { __SCREENPILOT_TEST__: { emitKnowledge: (event: unknown) => void } }).__SCREENPILOT_TEST__.emitKnowledge({ requestId: 'vision-1', imageId: '', stage: 'ready', sources: [{ bookmarkId: 'late', title: '迟到来源不得插入' }] }))
+    await expect(page.getByText('迟到来源不得插入')).toHaveCount(0)
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; document.documentElement.classList.add('dark'); document.documentElement.style.colorScheme = 'dark' })
+    await expect(page.getByRole('article').last().locator('strong')).toHaveCSS('color', 'rgb(255, 255, 255)')
+    await page.screenshot({ path: `.task/karakeep-${nonStream ? 'json' : 'stream'}-dark.png` })
+    await page.reload()
+    await waitForVisionSelection(page)
+    await page.getByRole('button', { name: '历史', exact: true }).click()
+    await page.getByRole('button', { name: /帮我在书签中找一下/u }).click()
+    await expect(page.getByRole('article').first()).toBeVisible()
+    await prompt.fill('根据第一篇，整理安装步骤。')
+    await page.locator('[data-screenpilot-vision-send="true"]').click()
+    await expect.poll(() => page.evaluate(() => (window as typeof window & { __SCREENPILOT_TEST__: { knowledgeRequests: KnowledgeRequest[] } }).__SCREENPILOT_TEST__.knowledgeRequests[0]?.references)).toEqual([{ instanceId: savedSourceFixture.instanceId, bookmarkId: savedSourceFixture.bookmarkId }])
+  })
+}
 
 async function expectAccessible(page: Page) {
   const result = await new AxeBuilder({ page }).analyze()
@@ -474,7 +543,7 @@ async function settingsNavigationKeyframes(page: Page) {
   })
 }
 
-test('settings supports eight sections, unsaved close choices and accessible layout', async ({ page }) => {
+test('settings supports nine sections, unsaved close choices and accessible layout', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/')
@@ -498,10 +567,10 @@ test('settings supports eight sections, unsaved close choices and accessible lay
   await expect(savedDot).toHaveCSS('background-color', 'rgb(52, 118, 86)')
   await expectEdgeSafeFrame(page.locator('.settings-window'))
   await expect(page.locator('.settings-footer').getByRole('button', { name: '保存' })).toBeVisible()
-  await expect.soft(settingsNavigation.getByRole('button')).toHaveCount(8)
+  await expect.soft(settingsNavigation.getByRole('button')).toHaveCount(9)
   expect.soft(await settingsNavigation.getByRole('button').evaluateAll((buttons) => (
     buttons.map((button) => button.textContent.trim())
-  ))).toEqual(['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', '模型提供商', '关于'])
+  ))).toEqual(['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于'])
   const settingsFooter = page.locator('.settings-footer')
   const cancelSettings = settingsFooter.getByRole('button', { name: '取消' })
   await expect(cancelSettings).toBeVisible()
@@ -547,31 +616,42 @@ test('settings supports eight sections, unsaved close choices and accessible lay
   await expect(page).toHaveScreenshot('settings-dark.png')
 })
 
-test('A17 settings explains data destinations and disabled network paths', async ({ page }) => {
+test('settings removes row help text and preserves the bottom AltSnap instructions', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/')
 
   await page.getByRole('button', { name: '翻译', exact: true }).click()
-  await expect(page.getByText('输入文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+  await expect(page.locator('.setting-row__description')).toHaveCount(0)
+  await expect(page.getByRole('combobox', { name: '翻译接口', exact: true })).toHaveValue('microsoft')
+  await page.getByRole('combobox', { name: '翻译接口', exact: true }).selectOption('baidu')
+  await expect(page.getByRole('button', { name: '配置接口凭据' })).toBeVisible()
+  await expect(page.locator('.setting-row__description')).toHaveCount(0)
   await expect(page.getByRole('note')).toHaveCount(0)
 
   await page.getByRole('button', { name: 'OCR', exact: true }).click()
-  await expect(page.getByText('截图会发送给所选 OCR 服务：ai.chaoxing.com。')).toBeVisible()
-  await expect(page.getByText('识别文字会发送给所选翻译服务：edge.microsoft.com。')).toBeVisible()
+  await expect(page.locator('.setting-row__description')).toHaveCount(0)
   await expect(page.getByRole('note')).toHaveCount(0)
   await page.getByRole('switch', { name: '启用OCR翻译' }).click()
-  await expect(page.getByText('已关闭，不会发送相关内容。')).toHaveCount(2)
+  await expect(page.getByRole('switch', { name: '启用OCR翻译' })).toHaveAttribute('aria-checked', 'false')
 
   await page.getByRole('button', { name: '常规', exact: true }).click()
-  await expect(page.getByText(/仅控制截图是否写入所选本地归档目录/u)).toBeVisible()
+  await page.getByRole('switch', { name: '开机启动' }).click()
+  await expect(page.getByRole('switch', { name: '管理员身份' })).toBeVisible()
+  await expect(page.locator('.setting-row__description')).toHaveCount(0)
+  await page.getByRole('button', { name: 'AltSnap', exact: true }).click()
+  await expect(page.locator('.setting-row__description')).toHaveCount(0)
+  await expect(page.locator('.altsnap-hints li')).toHaveText([
+    '起始拖动方向决定缩放边界，对边保持固定；按住右键反向拖动可放大。',
+    '控制管理员窗口时，请从托盘选择“重启（管理员）”。',
+  ])
   await expectAccessible(page)
 })
 
 test('A06 settings contrast stays accessible across themes and navigation states', async ({ page }) => {
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 680, height: 520 })
-  const sections = ['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', '模型提供商', '关于']
+  const sections = ['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于']
   const themes = [
     { radio: '浅色', documentTheme: 'light', colorScheme: 'light' },
     { radio: '深色', documentTheme: 'dark', colorScheme: 'dark' },
@@ -599,6 +679,9 @@ test('A06 settings contrast stays accessible across themes and navigation states
       if (await selected.count() === 0) continue
       await selected.click()
       await expect(selected).toHaveAttribute('aria-current', 'page')
+      for (const dropdown of await page.getByRole('combobox').all()) {
+        expect((await dropdown.boundingBox())?.width).toBe(187.5)
+      }
 
       await expectAccessible(page)
 
@@ -793,6 +876,114 @@ test('provider key drafts use the global footer save and cancel actions', async 
   await expect(keys).toHaveValue('')
   await expect(save).toBeDisabled()
   expect(pageErrors).toEqual([])
+})
+
+test('KaraKeep settings masks saved keys and uses upper connection toasts in both themes', async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 620 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
+  await page.goto('/')
+  await page.getByRole('button', { name: 'KaraKeep', exact: true }).click()
+  const card = page.locator('.karakeep-settings')
+  const url = page.getByRole('textbox', { name: 'Karakeep 实例地址' })
+  const key = page.getByLabel('Karakeep API Key')
+  await expect(card.locator('.setting-row__description')).toHaveCount(0)
+  await expect(page.getByRole('combobox', { name: '调用策略' })).toHaveValue('auto')
+  const systemPrompt = page.getByRole('textbox', { name: 'KaraKeep 系统提示词' })
+  const resetPrompt = page.getByRole('button', { name: '恢复默认：KaraKeep 系统提示词' })
+  const defaultPrompt = await systemPrompt.inputValue()
+  expect(defaultPrompt).toContain('先完整使用用户当前的原始问题搜索')
+  await expect(resetPrompt).toBeDisabled()
+  await url.fill('https://saved.example/')
+  await key.fill('synthetic-key')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(key).toHaveValue('')
+  await expect(key).toHaveAttribute('placeholder', '************')
+
+  for (const theme of ['light', 'dark'] as const) {
+    await page.getByRole('button', { name: '常规', exact: true }).click()
+    await page.getByRole('radio', { name: theme === 'light' ? '浅色' : '深色', exact: true }).click()
+    await page.getByRole('button', { name: 'KaraKeep', exact: true }).click()
+    const scrollBefore = await page.locator('.settings-scroll').boundingBox()
+    await page.getByRole('button', { name: '测试连接' }).click()
+    const region = page.getByRole('status', { name: '只读API连接成功', exact: true })
+    await expect(region.locator('.save-success-toast')).toBeVisible()
+    expect(await page.locator('.settings-scroll').boundingBox()).toEqual(scrollBefore)
+    expect(await region.evaluate(element => element.parentElement?.classList.contains('settings-window'))).toBe(true)
+    for (const input of [url, key]) {
+      await expect(input).toHaveCSS('border-top-width', '0px')
+      expect((await input.boundingBox())?.width).toBe(280)
+    }
+    await expectAccessible(page)
+    await page.screenshot({ path: `.task/karakeep-prompt-settings-${theme}.png`, animations: 'disabled' })
+  }
+  const testCalls = await page.evaluate(() => (window as typeof window & { __SCREENPILOT_TEST__: { karakeepTestCalls: { apiKey: string | null }[] } }).__SCREENPILOT_TEST__.karakeepTestCalls)
+  expect(testCalls).toHaveLength(2)
+  expect(testCalls.every(call => call.apiKey === null)).toBe(true)
+  await page.evaluate(() => { (window as typeof window & { __SCREENPILOT_TEST__: { karakeepTestError: string } }).__SCREENPILOT_TEST__.karakeepTestError = 'synthetic authentication failed' })
+  await page.getByRole('button', { name: '测试连接' }).click()
+  await expect(page.getByRole('alert').locator('.save-success-toast.is-error')).toContainText('synthetic authentication failed')
+  await expect(card.locator('.status-banner')).toHaveCount(0)
+  await systemPrompt.fill('请优先推荐可直接在线编辑 SVG 的网站。')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '常规', exact: true }).click()
+  await page.getByRole('button', { name: 'KaraKeep', exact: true }).click()
+  await expect(systemPrompt).toHaveValue('请优先推荐可直接在线编辑 SVG 的网站。')
+  await resetPrompt.click()
+  await expect(systemPrompt).toHaveValue(defaultPrompt)
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+})
+
+test('provider connection results use upper toasts and OCR credential fields match KaraKeep in both themes', async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 620 })
+  await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
+  await page.goto('/')
+  await page.getByRole('button', { name: '模型提供商', exact: true }).click()
+  await page.getByRole('button', { name: '新增', exact: true }).click()
+  const keys = page.getByRole('textbox', { name: 'OpenAI Compatible API Keys' })
+  await keys.fill('synthetic-provider-key')
+  const before = await page.locator('.provider-form').boundingBox()
+  await page.getByRole('button', { name: '模型列表连接检查', exact: true }).click()
+  const success = page.getByRole('status', { name: '连接成功', exact: true })
+  await expect(success.locator('.save-success-toast')).toBeVisible()
+  expect(await success.evaluate(element => element.parentElement?.classList.contains('settings-window'))).toBe(true)
+  expect(await page.locator('.provider-form').boundingBox()).toEqual(before)
+  await expect(page.locator('.provider-form .inline-status')).toHaveCount(0)
+  await page.screenshot({ path: '.task/settings-cleanup-provider-success.png', animations: 'disabled' })
+  await page.evaluate(() => {
+    (window as typeof window & { __SCREENPILOT_TEST__: { providerTestError: string } }).__SCREENPILOT_TEST__.providerTestError = 'Invalid synthetic-provider-key'
+  })
+  await page.getByRole('button', { name: '模型列表连接检查', exact: true }).click()
+  const failure = page.getByRole('alert', { name: 'Invalid ***', exact: true })
+  await expect(failure.locator('.save-success-toast.is-error')).toBeVisible()
+  await expect(failure).not.toContainText('synthetic-provider-key')
+  await expect(page.locator('.provider-form .inline-status')).toHaveCount(0)
+  await expectAccessible(page)
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+
+  for (const theme of ['light', 'dark'] as const) {
+    await page.getByRole('button', { name: '常规', exact: true }).click()
+    await page.getByRole('radio', { name: theme === 'light' ? '浅色' : '深色', exact: true }).click()
+    await page.getByRole('button', { name: 'KaraKeep', exact: true }).click()
+    const karaInput = page.getByRole('textbox', { name: 'Karakeep 实例地址' })
+    await karaInput.click()
+    const appearance = (element: Element) => {
+      const style = getComputedStyle(element)
+      return { border: style.borderTopWidth, radius: style.borderRadius, background: style.backgroundColor, height: style.height, padding: style.padding, outline: style.outline, outlineOffset: style.outlineOffset, shadow: style.boxShadow }
+    }
+    const expected = await karaInput.evaluate(appearance)
+    await page.getByRole('button', { name: 'OCR', exact: true }).click()
+    const inputs = page.locator('.adapter-credentials input')
+    await expect(inputs).toHaveCount(7)
+    for (const input of await inputs.all()) {
+      await input.click()
+      await expect(input).toHaveCSS('border-top-width', '0px')
+      expect(await input.evaluate(appearance)).toEqual(expected)
+    }
+    await expectAccessible(page)
+    await page.screenshot({ path: `.task/settings-cleanup-ocr-${theme}.png`, animations: 'disabled' })
+  }
 })
 
 test('settings save success uses a floating replayable toast without shifting content', async ({ page }) => {
@@ -1114,7 +1305,7 @@ test('provider add controls stay on one line at supported and stress widths', as
 test('prompt reset controls stay beside original titles without overlap', async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 620 })
   await page.goto('/')
-  const expectedPromptGroups = { 翻译: 1, OCR: 2, Vision: 2, 提示词优化: 2 }
+  const expectedPromptGroups = { 翻译: 1, OCR: 2, Vision: 2, 提示词优化: 2, KaraKeep: 1 }
   for (const [section, expectedCount] of Object.entries(expectedPromptGroups)) {
     await page.getByRole('button', { name: section, exact: true }).click()
     const groups = page.locator('.setting-group:has(textarea.prompt-field)')
@@ -1253,6 +1444,7 @@ test('pointer-focused settings and Vision optimizer controls stay free of red fo
     await page.getByRole('button', { name: '模型提供商', exact: true }).click()
     await page.getByRole('button', { name: '新增', exact: true }).click()
     const providerName = page.getByRole('textbox', { name: '提供商名称' })
+    await expect(page.getByRole('combobox', { name: '接口协议' })).toHaveCSS('width', '187.5px')
     await providerName.click()
     const providerFocus = await focusPaintStyle(providerName)
     expect(providerFocus.outlineStyle).toBe('solid')
@@ -1301,6 +1493,7 @@ test('settings prompt fields match the provider focus frame in both themes', asy
     { section: 'Vision', label: 'Vision 问答提示词' },
     { section: '提示词优化', label: '优化器系统提示词' },
     { section: '提示词优化', label: '优化提示词' },
+    { section: 'KaraKeep', label: 'KaraKeep 系统提示词' },
   ] as const
 
   for (const colorScheme of ['light', 'dark'] as const) {

@@ -374,10 +374,10 @@ pub async fn settings_export(
             }
         }
         validate_provider_key_batch_shape(&providers)?;
-        Some(SettingsSecrets::new(
-            providers,
-            CredentialVault::adapter_keys_for_export()?,
-        ))
+        let mut secrets =
+            SettingsSecrets::new(providers, CredentialVault::adapter_keys_for_export()?);
+        secrets.integrations = CredentialVault::integration_keys_for_export()?;
+        Some(secrets)
     } else {
         None
     };
@@ -458,6 +458,7 @@ fn validate_imported_secrets(export: &mut SettingsExport) -> Result<(), String> 
     {
         return Err("Settings secrets contain a provider that is not present in settings".into());
     }
+    crate::infrastructure::credentials::validate_integration_secrets(&secrets.integrations)?;
     validate_adapter_key_batch_shape(&secrets.adapters)
 }
 
@@ -498,17 +499,26 @@ pub fn credentials_set_adapter_keys_batch(
 
 #[tauri::command]
 pub fn credentials_set_imported_secrets(
+    app: AppHandle,
     state: State<'_, AppState>,
     secrets: SettingsSecrets,
     provider_deletion_ids: Vec<String>,
 ) -> Result<(), String> {
     let settings = state.current()?;
     validate_imported_secret_save(&settings, &secrets, &provider_deletion_ids)?;
-    CredentialVault::set_imported_secrets_batch(
+    if !secrets.integrations.is_empty() {
+        state.cancel_reference_vision_stream();
+    }
+    CredentialVault::import_all_secrets(
         &secrets.providers,
         &secrets.adapters,
+        &secrets.integrations,
         &provider_deletion_ids,
-    )
+    )?;
+    if !secrets.integrations.is_empty() {
+        let _ = app.emit("screenpilot:karakeep-credential-changed", true);
+    }
+    Ok(())
 }
 
 fn validate_imported_secret_save(
@@ -522,6 +532,7 @@ fn validate_imported_secret_save(
     validate_imported_provider_key_batch_shape(&secrets.providers)?;
     validate_imported_provider_deletions(&secrets.providers, provider_deletion_ids)?;
     validate_adapter_key_batch_shape(&secrets.adapters)?;
+    crate::infrastructure::credentials::validate_integration_secrets(&secrets.integrations)?;
     let provider_ids = settings
         .providers
         .iter()
@@ -686,6 +697,9 @@ impl SettingsEffects for RuntimeSettingsEffects<'_> {
     }
 
     fn replace_runtime(&mut self, settings: &AppSettings) -> Result<(), String> {
+        if self.state.current()?.karakeep != settings.karakeep {
+            self.state.cancel_reference_vision_stream();
+        }
         self.state.replace(settings)?;
         #[cfg(target_os = "windows")]
         crate::platform::windows::altsnap::update(&settings.alt_snap)?;
@@ -981,6 +995,7 @@ mod tests {
             schema_version: SETTINGS_SECRETS_SCHEMA_VERSION + 1,
             providers: HashMap::new(),
             adapters: HashMap::new(),
+            integrations: HashMap::new(),
         });
         assert_eq!(
             validate_imported_secrets(&mut unsupported_schema),

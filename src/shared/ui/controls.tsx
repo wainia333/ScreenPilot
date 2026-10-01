@@ -114,6 +114,7 @@ export function TextField({
   type = 'text',
   disabled = false,
   issuePath,
+  className = '',
   onChange,
 }: {
   value: string
@@ -122,11 +123,12 @@ export function TextField({
   type?: 'text' | 'password' | 'url'
   disabled?: boolean
   issuePath?: string
+  className?: string
   onChange: (value: string) => void
 }) {
   return (
     <input
-      className="text-field"
+      className={`text-field ${className}`.trim()}
       value={value}
       type={type}
       disabled={disabled}

@@ -8,11 +8,8 @@ import { DEFAULT_SETTINGS } from '../defaults'
 import { isValidModelSelection, normalizeAiAvailability } from '../sanitize'
 import {
   copyFor,
-  formatCopy,
-  ocrServiceDestination,
   translationLanguageOptions,
   translationMethodLabel,
-  translationServiceDestination,
 } from '../../../shared/ui-copy'
 
 export function ScreenshotSection({
@@ -49,21 +46,6 @@ export function ScreenshotSection({
   const methods = translationMethodOptions
     .filter((option) => option.value !== 'ai' || canUseTranslationAi)
     .map((option) => ({ ...option, label: translationMethodLabel(option.value, settings.language) }))
-  const ocrDestination = ocrServiceDestination(settings, ocrMethod) ?? t.noSelection
-  const translationDestination = translationServiceDestination(
-    settings,
-    translationMethod,
-    current.translationModel,
-  ) ?? t.noSelection
-  const ocrDataFlowDescription = current.enabled
-    ? formatCopy(ocrMethod === 'ai' ? t.aiOcrDataFlow : t.ocrDataFlow, { destination: ocrDestination })
-    : t.dataFlowDisabled
-  const translationDataFlowDescription = current.enabled
-    ? formatCopy(
-      translationMethod === 'ai' ? t.aiScreenshotTranslationDataFlow : t.screenshotTranslationDataFlow,
-      { destination: translationDestination },
-    )
-    : t.dataFlowDisabled
   return (
     <>
       <SettingGroup title={t.screenshotTranslation}>
@@ -104,7 +86,7 @@ export function ScreenshotSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.ocrInterface} description={ocrDataFlowDescription}>
+        <SettingRow label={t.ocrInterface}>
           <SelectField<OcrMethod>
             value={ocrMethod}
             label={t.ocrInterface}
@@ -134,7 +116,7 @@ export function ScreenshotSection({
             />
           </SettingRow>
         ) : null}
-        <SettingRow label={t.translationInterface} description={translationDataFlowDescription}>
+        <SettingRow label={t.translationInterface}>
           <SelectField
             value={translationMethod}
             label={t.screenshotTranslationInterface}

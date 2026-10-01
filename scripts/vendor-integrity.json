@@ -5,9 +5,9 @@
   "description": "Reviewed integrity baseline for vendored screenshot sources and their native support files. Update only with npm run vendor:lock -- --accept-reviewed-changes after reviewing the complete diff.",
   "files": {
     "src/vendor/screenshot/accessibility.ts": "D7217B6874AAEBEA26B78BB5735A10E8085F05160253D0ACF9165F6E09E6E1B7",
-    "src/vendor/screenshot/history.ts": "7F4F01784D85FC08B1A9BC6EF920BFAB0C27B7F44FF42C330018703CD1910B5E",
-    "src/vendor/screenshot/Vision.tsx": "A1D61A6A1E6AE8478FE6E2394B776581B403BA2384B7DBD0B99A0D85B3CF472F",
-    "src/vendor/screenshot/api/tauri.ts": "7F90E249862AAB1B6CD9F246353F857FF7984AC97A4AB651AE9F2E3AAF38DE8A",
+    "src/vendor/screenshot/history.ts": "5A2DBA07B1FCBD8F391AB0791A7D59FE376E9E15795CE77E039C3D3A200A1173",
+    "src/vendor/screenshot/Vision.tsx": "4F7E101780B24DD111F96B58575893000B809266292B81E67A8146802252D743",
+    "src/vendor/screenshot/api/tauri.ts": "08441654F902236DE5AD3B2A76C7F931CAD62299D897D9B06F2D7739B7D80D9A",
     "src/vendor/screenshot/settings/i18n.ts": "E35680395C28D9F4560B31C2885D4E10544E8EA9987436B795DF99598FE68355",
     "src/vendor/screenshot/utils/clipboard.ts": "467F2B9A9317F5F0FAFCCF786586CCD165ABD90C714F655668616B9C2281FE1C",
     "src/vendor/screenshot/index.css": "E04B25146204F72CF2D4C232D8EF2A8C4F7C728007F6ED0236B482B7ECC5CA0A",

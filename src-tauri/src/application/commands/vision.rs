@@ -1854,6 +1854,8 @@ fn vision_runtime_settings_projection(mut settings: AppSettings) -> Result<Value
     let (optimizer_provider, optimizer_model) = model_parts(&settings.prompt_optimizer.model);
     Ok(json!({
         "hotkey": settings.shortcuts.translator,
+        "karakeep": settings.karakeep,
+        "karakeepKeyConfigured": CredentialVault::integration_key()?.is_some(),
         "theme": settings.theme,
         "targetLang": settings.translation.target_language,
         "source": settings.translation.source_language,
@@ -2065,7 +2067,50 @@ pub async fn vision_ask(
     image_id: String,
     messages: Vec<ExplainMessage>,
     request_id: String,
+    knowledge: Option<crate::application::vision_agent::KnowledgeRequest>,
 ) -> Result<Value, String> {
+    let settings = state.current()?;
+    let mut knowledge = knowledge.unwrap_or_default();
+    if knowledge.mode.is_none() {
+        knowledge.mode = Some(settings.karakeep.vision_policy);
+    }
+    let question = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+    let mode = knowledge.mode.unwrap_or(settings.karakeep.vision_policy);
+    let requires = crate::application::vision_agent::requires_saved(question, &knowledge);
+    let disabled = mode == crate::domain::integrations::karakeep::SourcePolicy::Off
+        || crate::application::vision_agent::explicitly_off(question);
+    let key_configured = settings.karakeep.enabled && CredentialVault::integration_key()?.is_some();
+    if requires
+        && (disabled
+            || !settings.karakeep.enabled
+            || settings.karakeep.base_url.is_empty()
+            || !key_configured)
+    {
+        return Ok(
+            json!({"success":false,"requestId":request_id,"error":"KARAKEEP_CONFIG: 收藏库尚未启用或配置。请打开设置 → KaraKeep，配置后重试"}),
+        );
+    }
+    if !disabled
+        && settings.karakeep.enabled
+        && !settings.karakeep.base_url.is_empty()
+        && key_configured
+    {
+        return Ok(
+            match run_knowledge_request(&app, &state, &image_id, &messages, &request_id, &knowledge)
+                .await
+            {
+                Ok(answer) => {
+                    json!({"success":true,"requestId":request_id,"response":answer.text,"sources":answer.sources,"summary":answer.summary})
+                }
+                Err(error) => json!({"success":false,"requestId":request_id,"error":error}),
+            },
+        );
+    }
     Ok(
         match run_vision_request(&app, &state, &image_id, &messages, &request_id).await {
             Ok(Some(response)) => json!({
@@ -2081,6 +2126,142 @@ pub async fn vision_ask(
             }),
         },
     )
+}
+
+fn prepare_vision_messages(
+    messages: &[ExplainMessage],
+    image_id: &str,
+    question_prompt: &str,
+) -> Vec<ExplainMessage> {
+    let mut prepared = messages.to_vec();
+    if !image_id.is_empty() && !question_prompt.trim().is_empty() {
+        if let Some(last_user) = prepared
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == "user")
+        {
+            last_user.content = format!("{}\n\n用户问题：{}", question_prompt, last_user.content);
+        }
+    }
+    prepared
+}
+
+fn last_vision_question(messages: &[ExplainMessage]) -> &str {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .unwrap_or("")
+}
+
+async fn run_knowledge_request(
+    app: &AppHandle,
+    state: &AppState,
+    image_id: &str,
+    messages: &[ExplainMessage],
+    request_id: &str,
+    knowledge: &crate::application::vision_agent::KnowledgeRequest,
+) -> Result<crate::application::vision_agent::AgentAnswer, String> {
+    use crate::application::{
+        karakeep_retrieval::RetrievalRun,
+        vision_agent::{run_agent, AgentContext},
+    };
+    use crate::infrastructure::karakeep_http::KarakeepService;
+    let settings = state.current()?;
+    ensure_vision_enabled(&settings)?;
+    let selection = settings
+        .vision
+        .model
+        .as_ref()
+        .ok_or("Select a Vision model in settings")?;
+    let (provider, keys) = provider_and_keys(&settings, selection)?;
+    let key = CredentialVault::integration_key()?
+        .ok_or("KARAKEEP_AUTH: 请在设置 → KaraKeep 中配置 API Key")?;
+    let service = KarakeepService::new(&settings.karakeep.base_url, key)?;
+    let image = if image_id.is_empty() {
+        None
+    } else {
+        Some(state.images.read_data_url(image_id)?)
+    };
+    let prepared_messages =
+        prepare_vision_messages(messages, image_id, &settings.vision.question_prompt);
+    let ai_messages = prepared_messages
+        .iter()
+        .filter(|m| matches!(m.role.as_str(), "user" | "assistant"))
+        .map(|m| AiMessage {
+            role: &m.role,
+            content: &m.content,
+        })
+        .collect::<Vec<_>>();
+    let generation = state.begin_active_reference_stream(ReferenceSurface::Vision)?;
+    let signal = state
+        .reference_vision_signal(generation)
+        .ok_or("Request cancelled")?;
+    let mut refs = knowledge.references.clone();
+    if let Some(r) = knowledge.selected.clone() {
+        refs = vec![r];
+    }
+    let retrieval = RetrievalRun::new(service, settings.karakeep.default_search_mode, &refs);
+    let mut ledgers = StreamLedgers::default();
+    let mut citations = Vec::new();
+    let emit = |event: &str, payload: Value| -> Result<(), String> {
+        if !state.reference_vision_stream_current(generation) {
+            return Ok(());
+        }
+        app.emit_to("vision", event, payload)
+            .map_err(|e| e.to_string())
+    };
+    let result=run_agent(VisionCompletion{provider,model:&selection.model,keys:&keys,system:&settings.vision.system_prompt,
+        messages:&ai_messages,image_url:image.as_deref(),policy:AiRequestPolicy::new(settings.retry.enabled,settings.retry.attempts,settings.vision.stream)},
+        VisionRequestOptions::new(settings.vision.thinking,settings.vision.thinking_effort,crate::application::vision_agent::public_search_allowed(last_vision_question(messages),knowledge.include_web)),
+        retrieval,AgentContext { request: knowledge, system_prompt: &settings.karakeep.system_prompt },signal.clone(),|delta| {
+            if !ledgers.dispatch(&delta){return Ok(());}
+            match delta {
+                SseDelta::TextDelta{text,..}|SseDelta::TextDone{text,..}|SseDelta::TextForItemDelta{text,..}|SseDelta::TextForItemDone{text,..}|SseDelta::RefusalDelta{text,..}|SseDelta::RefusalDone{text,..}=>{
+                    if settings.vision.stream {emit("vision-stream",json!({"imageId":image_id,"requestId":request_id,"kind":"answer","delta":text}))?;}
+                }
+                SseDelta::Reasoning{text,..}|SseDelta::ReasoningDone{text,..}=>{if settings.vision.thinking {emit("vision-stream",json!({"imageId":image_id,"requestId":request_id,"kind":"answer","delta":"","reasoningDelta":text}))?;}}
+                SseDelta::Citation{title,url,..}=>{if !citations.iter().any(|(_,u)|u==&url){citations.push((title,url));}}
+                _=>{}
+            }Ok(())
+        },|mut payload|{payload["requestId"]=json!(request_id);payload["imageId"]=json!(image_id);emit("vision-knowledge",payload)}).await;
+    if !state.reference_vision_stream_current(generation) {
+        return Err("Request cancelled".into());
+    }
+    match result {
+        Ok(mut answer) => {
+            answer
+                .text
+                .push_str(&citation_sources(&citations).replace("来源：", "公网来源："));
+            if answer.summary.status != "unused" {
+                emit(
+                    "vision-knowledge",
+                    json!({"requestId":request_id,"imageId":image_id,"stage":"ready","sources":answer.sources,"summary":answer.summary}),
+                )?;
+            }
+            if settings.vision.stream {
+                emit(
+                    "vision-stream",
+                    json!({"requestId":request_id,"imageId":image_id,"kind":"answer","delta":"","done":true,"reason":"done","full":answer.text}),
+                )?;
+            }
+            Ok(answer)
+        }
+        Err(error) => {
+            emit(
+                "vision-knowledge",
+                json!({"requestId":request_id,"imageId":image_id,"stage":if signal.is_cancelled(){"cancelled"}else{"failed"},"message":error}),
+            )?;
+            if settings.vision.stream {
+                emit(
+                    "vision-stream",
+                    json!({"requestId":request_id,"imageId":image_id,"kind":"answer","delta":"","done":true,"reason":"error","error":error}),
+                )?;
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn run_vision_request(
@@ -2103,19 +2284,8 @@ async fn run_vision_request(
     } else {
         Some(state.images.read_data_url(image_id)?)
     };
-    let mut prepared_messages = messages.to_vec();
-    if !image_id.is_empty() && !settings.vision.question_prompt.trim().is_empty() {
-        if let Some(last_user) = prepared_messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == "user")
-        {
-            last_user.content = format!(
-                "{}\n\n用户问题：{}",
-                settings.vision.question_prompt, last_user.content
-            );
-        }
-    }
+    let prepared_messages =
+        prepare_vision_messages(messages, image_id, &settings.vision.question_prompt);
     let ai_messages = prepared_messages
         .iter()
         .map(|message| AiMessage {
@@ -2131,7 +2301,11 @@ async fn run_vision_request(
     let request_options = VisionRequestOptions::new(
         settings.vision.thinking,
         settings.vision.thinking_effort,
-        settings.vision.web_search,
+        settings.vision.web_search
+            && crate::application::vision_agent::public_search_allowed(
+                last_vision_question(messages),
+                true,
+            ),
     );
     let stream_generation = state.begin_active_reference_stream(ReferenceSurface::Vision)?;
     let cancellation = state
@@ -3154,6 +3328,46 @@ pub fn permissions_status() -> PermissionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vision_question_prompt_applies_only_to_the_latest_user_question_with_an_image() {
+        let messages = vec![
+            ExplainMessage {
+                role: "user".into(),
+                content: "上一个问题".into(),
+            },
+            ExplainMessage {
+                role: "assistant".into(),
+                content: "上一个回答".into(),
+            },
+            ExplainMessage {
+                role: "user".into(),
+                content: "这些教程适合截图中的系统吗？不要联网搜索".into(),
+            },
+            ExplainMessage {
+                role: "assistant".into(),
+                content: String::new(),
+            },
+        ];
+        let prepared = prepare_vision_messages(&messages, "image-1", "识别系统和部署约束");
+        assert_eq!(prepared[0].content, "上一个问题");
+        assert_eq!(
+            prepared[2].content,
+            "识别系统和部署约束\n\n用户问题：这些教程适合截图中的系统吗？不要联网搜索"
+        );
+        assert_eq!(
+            messages[2].content,
+            "这些教程适合截图中的系统吗？不要联网搜索"
+        );
+        assert_eq!(
+            prepare_vision_messages(&messages, "", "识别系统")[2].content,
+            messages[2].content
+        );
+        assert!(!crate::application::vision_agent::public_search_allowed(
+            last_vision_question(&messages),
+            true
+        ));
+    }
     use std::cell::Cell;
 
     #[test]

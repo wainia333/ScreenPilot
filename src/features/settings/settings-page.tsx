@@ -1,5 +1,6 @@
 import {
   Aperture,
+  BookMarked,
   Bot,
   Info,
   Languages,
@@ -19,6 +20,7 @@ import { OptimizerSection } from './sections/optimizer-section'
 import { ProvidersSection, type ProviderKeyTextDrafts } from './sections/providers-section'
 import { ScreenshotSection } from './sections/screenshot-section'
 import { TranslationSection } from './sections/translation-section'
+import { IntegrationsSection } from './sections/integrations-section'
 import { VisionSection } from './sections/vision-section'
 import type { AppSettings, SettingsExport, SettingsIssue, SettingsSecrets } from './types'
 import type {
@@ -40,7 +42,7 @@ import {
   type AdapterCredentialId,
 } from './adapter-credential-specs'
 
-type Section = 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'altsnap' | 'providers' | 'about'
+type Section = 'integrations' | 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'altsnap' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
 type SettingsOperation = 'directory' | 'export' | 'import'
 type StatusTone = 'status' | 'error'
@@ -70,6 +72,7 @@ type SaveSuccessToast = {
   key: number
   message: string
   phase: 'visible' | 'leaving'
+  tone: StatusTone
 }
 
 const navigation = [
@@ -79,6 +82,7 @@ const navigation = [
   { id: 'vision', label: 'navVision', icon: Aperture },
   { id: 'optimizer', label: 'navOptimizer', icon: Sparkles },
   { id: 'altsnap', label: 'navAltSnap', icon: Move },
+  { id: 'integrations', label: 'navIntegrations', icon: BookMarked },
   { id: 'providers', label: 'navProviders', icon: Bot },
   { id: 'about', label: 'navAbout', icon: Info },
 ] satisfies { id: Section; label: keyof UiCopy; icon: typeof Settings2 }[]
@@ -240,6 +244,7 @@ function settingsIssueMessage(issue: SettingsIssue | undefined, t: UiCopy): stri
 }
 
 function sectionForIssuePath(path: string): Section {
+  if (path.startsWith('karakeep.')) return 'integrations'
   if (path.startsWith('providers.')) return 'providers'
   if (path.startsWith('credentials.')) return 'screenshot'
   if (path.startsWith('shortcuts.') || path.startsWith('altSnap.')) return 'general'
@@ -281,6 +286,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
   const [providerKeyDrafts, setProviderKeyDrafts] = useState<ProviderKeyTextDrafts>({})
   const [adapterCredentialDrafts, setAdapterCredentialDrafts] = useState<AdapterCredentialDrafts>({})
   const [adapterCredentialCounts, setAdapterCredentialCounts] = useState<AdapterCredentialCounts>({})
+  const [integrationKeyDraft, setIntegrationKeyDraft] = useState<string | null>(null)
   const [importedSecrets, setImportedSecrets] = useState<SettingsSecrets | null>(null)
   const [loadingError, setLoadingError] = useState<string | null>(null)
   const [status, setStatusState] = useState<string | null>(null)
@@ -311,7 +317,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     label: 'navGeneral' as const,
     icon: Settings2,
   }
-  const dirty = !sameSettings(saved, draft)
+  const dirty = integrationKeyDraft !== null || !sameSettings(saved, draft)
     || Object.keys(providerKeyDrafts).length > 0
     || Object.keys(adapterCredentialDrafts).length > 0
     || importedSecrets !== null
@@ -341,7 +347,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     setStatusTone(tone)
     setStatusState(message)
   }, [dismissSaveSuccessToast])
-  const showSaveSuccessToast = useCallback(() => {
+  const showSaveSuccessToast = useCallback((message = t.settingsSaved, tone: StatusTone = 'status') => {
     clearSaveSuccessToastTimer()
     setStatusState(null)
     setStatusTone('status')
@@ -349,8 +355,9 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     saveSuccessToastSequence.current = key
     setSaveSuccessToast({
       key,
-      message: t.settingsSaved,
+      message,
       phase: 'visible',
+      tone,
     })
     saveSuccessToastTimer.current = setTimeout(() => {
       saveSuccessToastTimer.current = null
@@ -401,6 +408,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
       setAdapterCredentialDrafts({})
       setAdapterCredentialCounts(Object.fromEntries(adapterCounts))
       setImportedSecrets(null)
+    setIntegrationKeyDraft(null)
       setPermissionStatus(permissions)
       if (startupNotice !== null) {
         setStatus(startupNotice)
@@ -489,7 +497,8 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     }
     const keyDraftSnapshot = structuredClone(providerKeyDrafts)
     const adapterCredentialDraftSnapshot = structuredClone(adapterCredentialDrafts)
-    const importedSecretsSnapshot = importedSecrets === null ? null : structuredClone(importedSecrets)
+    const importedSecretsSnapshot = importedSecrets === null ? (integrationKeyDraft === null ? null : { schemaVersion: 1 as const, providers: {}, adapters: {} }) : structuredClone(importedSecrets)
+    const integrationSecrets = integrationKeyDraft === null ? importedSecrets?.integrations : { karakeep: [integrationKeyDraft.trim()] }
     const normalizedKeyDraftSnapshot = normalizeProviderKeyDrafts(keyDraftSnapshot)
     const normalizedAdapterCredentialDraftSnapshot = normalizeAdapterCredentialDrafts(adapterCredentialDraftSnapshot)
     const invalidAdapter = ADAPTER_CREDENTIALS.find((adapter) => {
@@ -535,6 +544,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
               schemaVersion: 1,
               providers,
               adapters: normalizedAdapterCredentialDraftSnapshot,
+              ...(integrationSecrets ? { integrations: integrationSecrets } : {}),
             }, providerDeletionIds)
           } else {
             if (Object.keys(changes).length > 0) await desktop.saveProviderKeyChanges(changes)
@@ -594,6 +604,8 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
       setImportedSecrets((current) => (
         JSON.stringify(current) === JSON.stringify(importedSecretsSnapshot) ? null : current
       ))
+      setIntegrationKeyDraft(null)
+      setImportedSecrets(null)
       showSaveSuccessToast()
       return { ok: true }
     } catch (error) {
@@ -610,7 +622,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     } finally {
       setSaving(false)
     }
-  }, [adapterCredentialDrafts, desktop, draft, importedSecrets, issues, language, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast, t])
+  }, [adapterCredentialDrafts, desktop, draft, importedSecrets, integrationKeyDraft, issues, language, providerKeyDrafts, saved, saving, setStatus, showSaveSuccessToast, t])
   const acknowledgeNavigation = useCallback(async (accepted: boolean) => {
     const request = navigationRequestRef.current
     if (request === null || navigationAckRef.current === request.requestId) return
@@ -721,6 +733,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     setProviderKeyDrafts({})
     setAdapterCredentialDrafts({})
     setImportedSecrets(null)
+    setIntegrationKeyDraft(null)
     setStatus(null)
     setPendingImport(null)
     setCloseSaveFailure(null)
@@ -762,6 +775,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
       setImportedSecrets(value.includesSecrets && value.secrets !== undefined
         ? structuredClone(value.secrets)
         : null)
+      setIntegrationKeyDraft(null)
       setSection('general')
       setStatus(copyFor(imported.language).settingsLoadedPendingSave)
       setPendingImport(null)
@@ -851,6 +865,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     return <main className="load-state" aria-label={t.settingsLoading} onPointerDown={beginWindowDrag}><div className="spinner" /></main>
   }
   const content = {
+    integrations: <IntegrationsSection config={draft.karakeep} onChange={karakeep => setDraft({ ...draft, karakeep })} keyDraft={integrationKeyDraft} onKeyChange={setIntegrationKeyDraft} saving={saving} language={language} onTestResult={(message, failed) => showSaveSuccessToast(message, failed ? 'error' : 'status')} />,
     general: (
       <GeneralSection
         settings={draft}
@@ -909,6 +924,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
           })
         }
         saving={saving}
+        onTestResult={(message, failed) => showSaveSuccessToast(message, failed ? 'error' : 'status')}
       />
     ),
     about: (
@@ -1013,15 +1029,15 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
       </section>
       <div
         className="save-success-toast-region"
-        role="status"
-        aria-live="polite"
+        role={saveSuccessToast?.tone === 'error' ? 'alert' : 'status'}
+        aria-live={saveSuccessToast?.tone === 'error' ? 'assertive' : 'polite'}
         aria-atomic="true"
         aria-label={saveSuccessToast?.message}
       >
         {saveSuccessToast === null ? null : (
           <div
             key={saveSuccessToast.key}
-            className={`save-success-toast${saveSuccessToast.phase === 'leaving' ? ' is-leaving' : ''}`}
+            className={`save-success-toast${saveSuccessToast.tone === 'error' ? ' is-error' : ''}${saveSuccessToast.phase === 'leaving' ? ' is-leaving' : ''}`}
             data-toast-sequence={saveSuccessToast.key}
             data-toast-phase={saveSuccessToast.phase}
           >

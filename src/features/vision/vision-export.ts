@@ -1,4 +1,5 @@
 export type VisionExportMessage = {
+  sources?: import('../karakeep/types').BookmarkReference[]
   role: 'user' | 'assistant'
   content: string
   reasoning?: string
@@ -18,7 +19,14 @@ const pad = (value: number) => String(value).padStart(2, '0')
 export function buildVisionMessageMarkdown(
   message: VisionExportMessage,
 ): string {
-  return message.content.trim()
+  const escape = (text: string) => text.replace(/[\\[\]]/gu, '\\$&')
+  const sources = (message.sources ?? []).slice(0, 5).map((source, index) => {
+    const url = source.sourceUrl ?? source.karakeepUrl
+    const heading = url && /^https?:\/\//u.test(url) ? `[${escape(source.title)}](<${url.replace(/[<>\r\n]/gu, '')}>)` : escape(source.title)
+    const evidence = source.evidence.slice(0, 3).map(e => `> ${e.quote.replace(/\n/gu, '\n> ')}`).join('\n\n')
+    return [`${index + 1}. ${heading}`, source.reason, source.applicability, source.verification === 'metadata' ? '仅元数据，正文未验证' : '', evidence].filter(Boolean).join('\n\n')
+  })
+  return [message.content.trim(), sources.length ? `收藏库来源：\n\n${sources.join('\n\n')}` : ''].filter(Boolean).join('\n\n')
 }
 
 export function defaultVisionExportFileName(date = new Date()): string {

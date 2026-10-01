@@ -551,6 +551,36 @@ select:focus-visible {
   min-width: 130px;
 }
 
+.settings-window .select-field {
+  width: 187.5px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 187.5px;
+}
+
+.connection-input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--sp-window);
+  color: var(--sp-text);
+  user-select: text;
+}
+
+.connection-input::placeholder {
+  color: var(--sp-text-muted);
+  opacity: 1;
+}
+
+.connection-input:focus-visible {
+  outline: 1px solid var(--sp-provider-focus) !important;
+  outline-offset: 1px !important;
+  box-shadow: none !important;
+}
+
 .shortcut-recorder {
   width: auto;
   min-width: 112px;
@@ -1047,6 +1077,12 @@ select:focus-visible {
   width: min(320px, calc(100% - 32px));
   pointer-events: none;
   transform: translateX(-50%);
+}
+
+.save-success-toast.is-error {
+  border-color: color-mix(in srgb, var(--sp-error) 42%, var(--sp-border-strong));
+  background: color-mix(in srgb, var(--sp-error) 12%, var(--sp-surface-raised));
+  color: var(--sp-error);
 }
 
 .save-success-toast.is-leaving {

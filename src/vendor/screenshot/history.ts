@@ -1,4 +1,5 @@
 import type { ExplainMessage } from './api/tauri'
+import { cleanSources, cleanSummary } from '../../features/karakeep/history-metadata'
 
 export type VisionCapturedFrame = {
   x: number
@@ -146,7 +147,12 @@ export function loadVisionHistory(storage: Storage): VisionHistoryLoadResult {
     return { items: [], rejectedCount: 1 }
   }
 
-  const validItems = parsed.filter(isVisionHistoryItem)
+  const validItems = parsed.filter(isVisionHistoryItem).map(item => ({ ...item, messages: item.messages.map(message => {
+    const summary = cleanSummary(message.searchSummary)
+    return { role: message.role, content: message.content, ...(message.id ? { id: message.id } : {}),
+      ...(message.reasoning === undefined ? {} : { reasoning: message.reasoning }), ...(message.imagePreview === undefined ? {} : { imagePreview: message.imagePreview }),
+      ...(message.sources === undefined ? {} : { sources: cleanSources(message.sources) }), ...(summary ? { searchSummary: summary } : {}) }
+  }) }))
   const items = validItems.slice(0, VISION_HISTORY_MAX)
   const rejectedCount = parsed.length - validItems.length
   writeRepairNotice(storage, rejectedCount)

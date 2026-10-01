@@ -519,7 +519,7 @@ pub async fn complete_vision_with_options_result_cancelled(
     .await
 }
 
-fn build_vision_request(
+pub(crate) fn build_vision_request(
     provider: &ProviderSettings,
     model: &str,
     system: &str,
@@ -819,6 +819,26 @@ enum RequestFailure {
     Error(String),
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_tool_response(
+    provider: &ProviderSettings,
+    model: &str,
+    keys: &[String],
+    body: &Value,
+    policy: AiRequestPolicy,
+    endpoint: Url,
+    signal: Arc<CancellationSignal>,
+) -> Result<reqwest::Response, String> {
+    request_with_failover_at_cancelled(provider, model, keys, body, policy, endpoint, Some(signal))
+        .await.map_err(|failure| {
+            let message = failure.into_message(keys);
+            let lower = message.to_lowercase();
+            if (lower.contains("tool") || lower.contains("function")) && (lower.contains("support") || lower.contains("unknown") || lower.contains("invalid")) {
+                "MODEL_TOOLS_UNSUPPORTED: 当前模型不支持函数工具，请在 Vision 设置中切换支持工具的模型".into()
+            } else { message }
+        })
+}
+
 impl RequestFailure {
     fn into_message(self, keys: &[String]) -> String {
         match self {
@@ -1062,7 +1082,7 @@ fn reasoning_effort(effort: ThinkingEffort) -> &'static str {
     }
 }
 
-fn redact_provider_message(message: &str, keys: &[String]) -> String {
+pub(crate) fn redact_provider_message(message: &str, keys: &[String]) -> String {
     keys.iter()
         .filter(|key| !key.is_empty())
         .fold(message.to_string(), |redacted, key| {

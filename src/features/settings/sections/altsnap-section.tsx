@@ -14,10 +14,10 @@ export function AltSnapSection({ settings, onChange }: {
   const shortcut = displayShortcut(settings.altSnap.shortcut)
   return (
     <SettingGroup title="AltSnap">
-      <SettingRow label={t.altSnapEnabled} description={t.altSnapDescription}>
+      <SettingRow label={t.altSnapEnabled}>
         <Toggle checked={settings.altSnap.enabled} label={t.altSnapEnabled} onChange={(enabled) => update({ enabled })} />
       </SettingRow>
-      <SettingRow label={t.altSnapShortcut} description={t.altSnapShortcutDescription}>
+      <SettingRow label={t.altSnapShortcut}>
         <ShortcutRecorder value={settings.altSnap.shortcut} label={t.altSnapShortcut}
           recordingLabel={t.pressShortcut} allowModifierOnly onChange={(value) => update({ shortcut: value })} />
       </SettingRow>
