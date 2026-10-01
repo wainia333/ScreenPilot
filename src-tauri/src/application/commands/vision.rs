@@ -2927,7 +2927,8 @@ async fn translate_source_cancelled(
     validate_screenshot_target_language(target_language)?;
     let target_language =
         translation::resolve_target_language_for_source(source, target_language, source_language);
-    if settings.screenshot_translation.translation_method == TranslationMethod::Ai {
+    let translated = if settings.screenshot_translation.translation_method == TranslationMethod::Ai
+    {
         let selection = settings
             .screenshot_translation
             .translation_model
@@ -2977,7 +2978,13 @@ async fn translate_source_cancelled(
             cancellation.as_deref(),
         )
         .await
-    }
+    }?;
+    Ok(
+        crate::infrastructure::ocr_text::normalize_text_typography_for_language(
+            &translated,
+            target_language,
+        ),
+    )
 }
 
 fn build_screenshot_translation_prompt(

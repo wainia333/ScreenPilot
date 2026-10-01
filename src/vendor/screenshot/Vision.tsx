@@ -240,57 +240,6 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function isAsciiAlphaNumeric(ch: string | undefined): boolean {
-  return !!ch && /^[A-Za-z0-9]$/.test(ch)
-}
-
-function isAsciiLetter(ch: string | undefined): boolean {
-  return !!ch && /^[A-Za-z]$/.test(ch)
-}
-
-function isAsciiUppercase(ch: string | undefined): boolean {
-  return !!ch && /^[A-Z]$/.test(ch)
-}
-
-function isUppercaseAcronymEnd(chars: string[], index: number): boolean {
-  if (chars[index] !== '.' || !isAsciiUppercase(chars[index - 1])) return false
-  let count = 1
-  let cursor = index - 2
-  while (cursor >= 1 && chars[cursor] === '.' && isAsciiUppercase(chars[cursor - 1])) {
-    count += 1
-    cursor -= 2
-  }
-  return count >= 2
-}
-
-function shouldAddSpaceAfterEnglishPunctuation(chars: string[], index: number): boolean {
-  const ch = chars[index]
-  if (!ch || !['.', ',', ';', ':', '?', '!'].includes(ch)) return false
-
-  const prev = chars[index - 1]
-  const prevPrev = chars[index - 2]
-  const next = chars[index + 1]
-  if (!isAsciiAlphaNumeric(next)) return false
-  if (next && /\s/.test(next)) return false
-  if ((ch === '.' || ch === ',' || ch === ':') && /\d/.test(prev || '') && /\d/.test(next ?? '')) return false
-  if (ch === '.' && isAsciiLetter(prev) && isAsciiLetter(next)) {
-    const singleLetterAbbrev = !isAsciiLetter(prevPrev) || prevPrev === '.'
-    if (singleLetterAbbrev && !(isUppercaseAcronymEnd(chars, index) && !isAsciiUppercase(next))) return false
-  }
-  return true
-}
-
-function normalizeEnglishPunctuationSpacing(value: string): string {
-  if (!value) return value
-  const chars = Array.from(value)
-  let out = ''
-  for (let i = 0; i < chars.length; i++) {
-    out += chars[i]
-    if (shouldAddSpaceAfterEnglishPunctuation(chars, i)) out += ' '
-  }
-  return out
-}
-
 function readableParagraphGapClass(value: string): string {
   return /[\u3400-\u9fff\uf900-\ufaff]/.test(value)
     ? 'vision-readable-cjk'
@@ -298,7 +247,7 @@ function readableParagraphGapClass(value: string): string {
 }
 
 function editableOcrHtml(value: string): string {
-  const normalized = normalizeEnglishPunctuationSpacing(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd()
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd()
   if (!normalized) return '<div data-ocr-paragraph><br></div>'
   return normalized
     .split(/\n{2,}/)
@@ -395,7 +344,7 @@ function splitSpeechText(value: string): string[] {
 }
 
 function ReadableMarkdownText({ text }: { text: string }) {
-  const normalized = normalizeEnglishPunctuationSpacing(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   return (
     <div className={`vision-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200`}>
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
@@ -3266,14 +3215,14 @@ export default function Vision() {
         return
       }
       if (r.original !== undefined) {
-        setTranslateOriginal(normalizeEnglishPunctuationSpacing(r.original))
+        setTranslateOriginal(r.original)
         setTranslateOriginalError('')
       }
       if (!r.success) {
         const message = r.error || 'Failed'
         reportTranslateFailure(message, r.kind)
       } else if (r.translated !== undefined) {
-        setTranslateText(normalizeEnglishPunctuationSpacing(r.translated))
+        setTranslateText(r.translated)
         setTranslateError('')
       }
       if (translateStartRef.current !== null) {
@@ -3295,8 +3244,7 @@ export default function Vision() {
   }, [ensureTranslateStreamListener, reportTranslateFailure])
 
   const handleTranslateOriginalChange = useCallback((value: string) => {
-    const normalizedValue = normalizeEnglishPunctuationSpacing(value)
-    if (normalizedValue === translateOriginal) return
+    if (value === translateOriginal) return
     void api.visionCancelStream().catch(err => console.error('[vision-translate] cancel stream failed:', err))
     translateRequestSeqRef.current++
     activeTranslateRequestIdRef.current = ''
@@ -3307,15 +3255,15 @@ export default function Vision() {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
     }
-    setTranslateOriginal(normalizedValue)
+    setTranslateOriginal(value)
     setTranslateOriginalError('')
-    if (!normalizedValue.trim()) setTranslateText('')
+    if (!value.trim()) setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
-    setTranslateRetranslating(!!normalizedValue.trim())
-    translateStartRef.current = normalizedValue.trim() ? Date.now() : null
+    setTranslateRetranslating(!!value.trim())
+    translateStartRef.current = value.trim() ? Date.now() : null
     setTranslateNow(Date.now())
-    setStage(normalizedValue.trim() ? 'translating' : 'translated')
+    setStage(value.trim() ? 'translating' : 'translated')
   }, [translateOriginal])
 
   useEffect(() => {
@@ -3357,7 +3305,7 @@ export default function Vision() {
               setTranslateError('')
             } else if (result.success) {
               setTranslateError('')
-              setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
+              setTranslateText(result.translated || '')
             } else {
               setTranslateError(result.error || 'Failed')
               setTranslateText('')
@@ -3397,7 +3345,7 @@ export default function Vision() {
   }, [])
 
   const runTranslateTextNow = useCallback(async (sourceText = translateOriginal) => {
-    const source = normalizeEnglishPunctuationSpacing(sourceText).trim()
+    const source = sourceText.trim()
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
@@ -3434,7 +3382,7 @@ export default function Vision() {
           setTranslateError('')
         } else if (result.success) {
           setTranslateError('')
-          setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
+          setTranslateText(result.translated || '')
         } else {
           setTranslateError(result.error || 'Failed')
           setTranslateText('')
@@ -3618,10 +3566,10 @@ export default function Vision() {
       if (!payload.delta) return
       if (payload.kind === 'original') {
         setTranslateOriginalError('')
-        setTranslateOriginal(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
+        setTranslateOriginal(prev => prev + payload.delta)
       } else if (payload.kind === 'translated') {
         setTranslateError('')
-        setTranslateText(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
+        setTranslateText(prev => prev + payload.delta)
       }
       }).then((dispose) => {
         if (cancelled) {

@@ -1,3 +1,4 @@
+use crate::infrastructure::ocr_text::{normalize_ocr_lines, normalize_ocr_paragraphs};
 use crate::infrastructure::provider_http::{
     client, read_json_response_limited, send_request, MAX_JSON_RESPONSE_BYTES,
 };
@@ -66,7 +67,7 @@ pub async fn chaoxing(image: &[u8]) -> Result<String, String> {
             .unwrap_or("Chaoxing OCR returned no visible text")
             .to_string())
     } else {
-        Ok(lines.join("\n"))
+        Ok(normalize_ocr_lines(&lines))
     }
 }
 
@@ -183,12 +184,68 @@ async fn baidu_with_endpoints(
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("words").and_then(Value::as_str))
+        .map(str::to_string)
         .collect::<Vec<_>>();
     if lines.is_empty() {
         Err("Baidu OCR returned no visible text".into())
     } else {
-        Ok(lines.join("\n"))
+        let paragraphs = baidu_paragraphs(&value, &lines);
+        if paragraphs.is_empty() {
+            Ok(normalize_ocr_lines(&lines))
+        } else {
+            Ok(normalize_ocr_paragraphs(&paragraphs))
+        }
     }
+}
+
+fn baidu_paragraphs(value: &Value, lines: &[String]) -> Vec<Vec<String>> {
+    let mut index_groups = value
+        .get("paragraphs_result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|paragraph| paragraph.get("words_result_idx").and_then(Value::as_array))
+        .filter_map(|indices| {
+            let mut indices = indices
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|index| usize::try_from(index).ok())
+                .filter(|index| *index < lines.len())
+                .collect::<Vec<_>>();
+            indices.sort_unstable();
+            indices.dedup();
+            (!indices.is_empty()).then_some(indices)
+        })
+        .collect::<Vec<_>>();
+    index_groups.sort_by_key(|indices| indices[0]);
+
+    let mut assigned = vec![false; lines.len()];
+    for indices in &index_groups {
+        for index in indices {
+            assigned[*index] = true;
+        }
+    }
+
+    let mut paragraphs = Vec::new();
+    let mut group_index = 0usize;
+    for line_index in 0..lines.len() {
+        while index_groups
+            .get(group_index)
+            .is_some_and(|indices| indices[0] == line_index)
+        {
+            paragraphs.push(
+                index_groups[group_index]
+                    .iter()
+                    .filter_map(|index| lines.get(*index).cloned())
+                    .collect(),
+            );
+            group_index += 1;
+        }
+        if !assigned[line_index] {
+            paragraphs.push(vec![lines[line_index].clone()]);
+        }
+    }
+    paragraphs
 }
 
 async fn read_baidu_json_response(
@@ -262,6 +319,31 @@ mod tests {
         let mut lines = Vec::new();
         collect_text(&value, &mut lines);
         assert_eq!(lines, ["first", "第二行"]);
+    }
+
+    #[test]
+    fn uses_baidu_paragraph_indices_in_reading_order() {
+        let value = json!({
+            "paragraphs_result": [
+                {"words_result_idx": [3]},
+                {"words_result_idx": [0, 1]}
+            ]
+        });
+        let lines = vec![
+            "First".into(),
+            "paragraph.".into(),
+            "Unassigned paragraph.".into(),
+            "Second paragraph.".into(),
+        ];
+
+        assert_eq!(
+            baidu_paragraphs(&value, &lines),
+            vec![
+                vec!["First".to_string(), "paragraph.".to_string()],
+                vec!["Unassigned paragraph.".to_string()],
+                vec!["Second paragraph.".to_string()]
+            ]
+        );
     }
 
     #[test]

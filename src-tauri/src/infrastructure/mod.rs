@@ -2,6 +2,7 @@ pub mod ai_http;
 pub mod credentials;
 pub mod images;
 pub mod ocr;
+pub(crate) mod ocr_text;
 pub mod provider_http;
 pub mod settings_store;
 pub mod speech;
