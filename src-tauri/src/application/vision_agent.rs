@@ -107,6 +107,21 @@ pub fn public_search_allowed(question: &str, ui_requested: bool) -> bool {
                 .iter()
                 .any(|s| q.contains(s)))
 }
+pub fn knowledge_public_search_allowed(
+    question: &str,
+    request: &KnowledgeRequest,
+    vision_web_search: bool,
+) -> bool {
+    // Automatic mode adds optional bookmark tools to ordinary Vision chat; it
+    // must not silently replace Vision's web-search setting with include_web,
+    // which defaults to false and only opts saved-library requests into the web.
+    let ordinary_chat =
+        request.mode != Some(SourcePolicy::Only) && !requires_saved(question, request);
+    public_search_allowed(
+        question,
+        request.include_web || (ordinary_chat && vision_web_search),
+    )
+}
 pub async fn run_agent<F, K>(
     input: VisionCompletion<'_>,
     options: VisionRequestOptions,

@@ -2212,9 +2212,18 @@ async fn run_knowledge_request(
         app.emit_to("vision", event, payload)
             .map_err(|e| e.to_string())
     };
+    let request_options = VisionRequestOptions::new(
+        settings.vision.thinking,
+        settings.vision.thinking_effort,
+        crate::application::vision_agent::knowledge_public_search_allowed(
+            last_vision_question(messages),
+            knowledge,
+            settings.vision.web_search,
+        ),
+    );
     let result=run_agent(VisionCompletion{provider,model:&selection.model,keys:&keys,system:&settings.vision.system_prompt,
         messages:&ai_messages,image_url:image.as_deref(),policy:AiRequestPolicy::new(settings.retry.enabled,settings.retry.attempts,settings.vision.stream)},
-        VisionRequestOptions::new(settings.vision.thinking,settings.vision.thinking_effort,crate::application::vision_agent::public_search_allowed(last_vision_question(messages),knowledge.include_web)),
+        request_options,
         retrieval,AgentContext { request: knowledge, system_prompt: &settings.karakeep.system_prompt },signal.clone(),|delta| {
             if !ledgers.dispatch(&delta){return Ok(());}
             match delta {

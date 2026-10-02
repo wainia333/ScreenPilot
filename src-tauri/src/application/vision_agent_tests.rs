@@ -673,6 +673,234 @@ fn historical_followup_forces_read_and_respects_opt_out() {
     assert!(!requires_saved("不要查书签，解释截图", &request));
 }
 
+#[test]
+fn automatic_chat_inherits_vision_web_search_without_widening_saved_requests() {
+    let ordinary_question = "请查一下今天的天气";
+    for mode in [None, Some(SourcePolicy::Auto), Some(SourcePolicy::Off)] {
+        let request = KnowledgeRequest {
+            mode,
+            ..Default::default()
+        };
+        assert!(knowledge_public_search_allowed(
+            ordinary_question,
+            &request,
+            true
+        ));
+        assert!(!knowledge_public_search_allowed(
+            ordinary_question,
+            &request,
+            false
+        ));
+        assert!(!knowledge_public_search_allowed(
+            "不要联网，解释这张截图",
+            &request,
+            true
+        ));
+        assert!(!knowledge_public_search_allowed(
+            "在我的书签里找 SVG 编辑器",
+            &request,
+            true
+        ));
+        assert!(knowledge_public_search_allowed(
+            "在我的书签里找 SVG 编辑器，同时结合公网搜索",
+            &request,
+            false
+        ));
+    }
+    let reference = HistoricalBookmark {
+        instance_id: "https://saved.example/".into(),
+        bookmark_id: "first-source".into(),
+    };
+    for request in [
+        KnowledgeRequest {
+            mode: Some(SourcePolicy::Only),
+            ..Default::default()
+        },
+        KnowledgeRequest {
+            selected: Some(reference.clone()),
+            ..Default::default()
+        },
+        KnowledgeRequest {
+            references: vec![reference],
+            ..Default::default()
+        },
+    ] {
+        let question = "根据第一篇，整理操作步骤";
+        assert!(!knowledge_public_search_allowed(question, &request, true));
+        let mixed_request = KnowledgeRequest {
+            include_web: true,
+            ..request
+        };
+        assert!(knowledge_public_search_allowed(
+            question,
+            &mixed_request,
+            false
+        ));
+        assert!(!knowledge_public_search_allowed(
+            "不要联网，整理第一篇",
+            &mixed_request,
+            true
+        ));
+    }
+    let unrelated_history = KnowledgeRequest {
+        references: vec![HistoricalBookmark {
+            instance_id: "https://saved.example/".into(),
+            bookmark_id: "old-source".into(),
+        }],
+        ..Default::default()
+    };
+    assert!(knowledge_public_search_allowed(
+        ordinary_question,
+        &unrelated_history,
+        true
+    ));
+}
+
+#[tokio::test]
+async fn automatic_chat_preserves_web_search_in_real_json_and_stream_requests() {
+    for stream in [false, true] {
+        for (vision_web_search, question, web_expected) in [
+            (true, "请查一下今天的天气", true),
+            (false, "请查一下今天的天气", false),
+            (true, "不要联网，解释这张截图", false),
+        ] {
+            let library = MockServer::start().await;
+            let model = MockServer::start().await;
+            let text = if web_expected {
+                "今天的天气已根据联网资料整理。"
+            } else {
+                "按当前问题直接回答。"
+            };
+            let mut response = protocol_response(ApiProtocol::Responses, stream, 0, vec![], text);
+            if web_expected {
+                let body = json!({
+                    "status":"completed",
+                    "output":[
+                        {"type":"web_search_call","id":"web-1","status":"completed","action":{"type":"search","query":"今日天气"}},
+                        {"type":"message","id":"m0","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[{"type":"url_citation","title":"天气资料","url":"https://weather.example/today"}]}]}
+                    ]
+                });
+                response = if stream {
+                    let events = [
+                        json!({"type":"response.output_item.done","output_index":0,"item":body["output"][0]}),
+                        json!({"type":"response.output_text.delta","item_id":"m0","content_index":0,"delta":text}),
+                        json!({"type":"response.output_item.done","output_index":1,"item":body["output"][1]}),
+                        json!({"type":"response.completed","response":body}),
+                    ];
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            events
+                                .iter()
+                                .map(|event| format!("data: {event}\n\n"))
+                                .collect::<String>(),
+                        )
+                } else {
+                    ResponseTemplate::new(200).set_body_json(body)
+                };
+            }
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&model)
+                .await;
+            let provider = ProviderSettings {
+                id: "ordinary-chat".into(),
+                name: "test".into(),
+                base_url: format!("{}/v1", model.uri()),
+                protocol: ApiProtocol::Responses,
+                key_count: 1,
+                available_models: vec![],
+                enabled_models: vec![],
+            };
+            let keys = vec!["synthetic-model-key".into()];
+            let request = KnowledgeRequest {
+                mode: Some(SourcePolicy::Auto),
+                ..Default::default()
+            };
+            let messages = [AiMessage {
+                role: "user",
+                content: question,
+            }];
+            let mut deltas = String::new();
+            let mut events = vec![];
+            let mut citations = vec![];
+            let answer = run_agent(
+                VisionCompletion {
+                    provider: &provider,
+                    model: "test-web",
+                    keys: &keys,
+                    system: "Vision assistant",
+                    messages: &messages,
+                    image_url: None,
+                    policy: AiRequestPolicy::new(false, 1, stream),
+                },
+                VisionRequestOptions {
+                    web_search: knowledge_public_search_allowed(
+                        question,
+                        &request,
+                        vision_web_search,
+                    ),
+                    ..Default::default()
+                },
+                RetrievalRun::new(
+                    KarakeepService::new(&library.uri(), "synthetic-library-key".into()).unwrap(),
+                    SearchMode::Fts,
+                    &[],
+                ),
+                AgentContext {
+                    request: &request,
+                    system_prompt: &default_karakeep_system_prompt(),
+                },
+                Arc::new(CancellationSignal::new()),
+                |delta| {
+                    match delta {
+                        SseDelta::TextDelta { text, .. }
+                        | SseDelta::TextForItemDelta { text, .. } => deltas.push_str(&text),
+                        SseDelta::Citation { title, url, .. } => citations.push((title, url)),
+                        _ => {}
+                    }
+                    Ok(())
+                },
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.text, text);
+            assert_eq!(deltas, text);
+            assert_eq!(answer.summary.status, "unused");
+            assert!(answer.sources.is_empty());
+            assert!(events.is_empty());
+            // Provider-side web search must not trigger a bookmark lookup or
+            // the bookmark source-selection phase.
+            assert!(library.received_requests().await.unwrap().is_empty());
+            if web_expected {
+                assert_eq!(
+                    citations,
+                    [("天气资料".into(), "https://weather.example/today".into())]
+                );
+            } else {
+                assert!(citations.is_empty());
+            }
+            let requests = model.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let tools = body["tools"].as_array().unwrap();
+            assert_eq!(
+                tools.iter().any(|tool| tool["type"] == "web_search"),
+                web_expected
+            );
+            assert!(tools.iter().any(|tool| tool["name"] == "search-bookmarks"));
+            assert!(body.get("tool_choice").is_none());
+            assert!(!body.to_string().contains("synthetic-library-key"));
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RecoveryCase {
     OfficialFlow,
