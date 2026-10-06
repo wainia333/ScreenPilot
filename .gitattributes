@@ -1,0 +1,2 @@
+# The Rust source manifest records normalized UTF-8/LF content.
+src-tauri/crates/** text eol=lf

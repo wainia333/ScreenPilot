@@ -68,6 +68,7 @@ export type PermissionStatus = {
 export type Unlisten = () => void
 
 export type DesktopPort = {
+  capture: import('../features/capture/types').CapturePort
   karakeepConfigured(): Promise<boolean>
   testKarakeep(baseUrl: string, apiKey?: string): Promise<{ connected: boolean; effectiveMode: string; message: string }>
   loadSettings(): Promise<AppSettings>

@@ -1,3 +1,5 @@
+import { sanitizeCaptureOptions, sanitizeCaptureTools, captureGestureIssues } from '../capture/settings-schema'
+import { filenameIssue } from '../capture/filename'
 import { DEFAULT_SETTINGS } from './defaults'
 import { normalizeShortcut, shortcutIssues } from './shortcuts'
 import type {
@@ -117,6 +119,7 @@ function provider(value: unknown, index: number): ProviderSettings | null {
 
 export function sanitizeSettings(value: unknown): AppSettings {
   const root = record(value)
+  const capture = record(root.capture)
   const karakeep = record(root.karakeep)
   const karakeepUrl = text(karakeep.baseUrl, '', 2048).trim().replace(/\/+$/u, '')
   const retry = record(root.retry)
@@ -139,6 +142,13 @@ export function sanitizeSettings(value: unknown): AppSettings {
   const ocrModel = validModel(modelSelection(screenshot.ocrModel))
   const screenshotTranslationModel = validModel(modelSelection(screenshot.translationModel))
   const sanitized: AppSettings = {
+    capture: {
+      enabled: flag(capture.enabled, DEFAULT_SETTINGS.capture.enabled),
+      pinsVisible: flag(capture.pinsVisible, DEFAULT_SETTINGS.capture.pinsVisible),
+      shortcut: normalizeShortcut(text(capture.shortcut, DEFAULT_SETTINGS.capture.shortcut, 80)),
+      nativeOptions: sanitizeCaptureOptions(capture.nativeOptions),
+      tools: sanitizeCaptureTools(capture.tools),
+    },
     karakeep: {
       enabled: flag(karakeep.enabled, false), baseUrl: karakeepUrl ? `${karakeepUrl}/` : '',
       instanceId: karakeepUrl ? `${karakeepUrl}/` : '',
@@ -264,6 +274,9 @@ export function sanitizeSettings(value: unknown): AppSettings {
     },
     providers,
   }
+  if (capture.shortcut === undefined && Object.values(sanitized.shortcuts).some((shortcut) => normalizeShortcut(shortcut) === sanitized.capture.shortcut)) {
+    sanitized.capture.shortcut = ''
+  }
   return normalizeAiAvailability(sanitized)
 }
 
@@ -324,6 +337,24 @@ export function validateSettings(settings: AppSettings): SettingsIssue[] {
     screenshotTranslation: settings.screenshotTranslation.enabled,
     promptOptimizer: settings.promptOptimizer.enabled,
   })
+  if (settings.capture.enabled && settings.capture.shortcut) {
+    const captureShortcut = normalizeShortcut(settings.capture.shortcut)
+    const enabledShortcuts = [settings.shortcuts.translator,
+      ...(settings.vision.enabled ? [settings.shortcuts.vision] : []),
+      ...(settings.screenshotTranslation.enabled ? [settings.shortcuts.screenshotTranslation] : []),
+      ...(settings.promptOptimizer.enabled ? [settings.shortcuts.promptOptimizer] : [])]
+    if (enabledShortcuts.some((shortcut) => normalizeShortcut(shortcut) === captureShortcut)) {
+      issues.push({ path: 'capture.shortcut', code: 'conflict', message: '截图快捷键与其他功能冲突 / Shortcut is already in use' })
+    }
+  }
+  for (const issue of captureGestureIssues(settings.capture.nativeOptions)) {
+    issues.push({ path: `capture.nativeOptions.${issue.key}`, code: 'conflict', message: issue.message })
+  }
+  const filename = settings.capture.nativeOptions.screenshot_filename
+  if (typeof filename === 'string') {
+    const message = filenameIssue(filename)
+    if (message) issues.push({ path: 'capture.nativeOptions.screenshot_filename', code: 'invalid', message })
+  }
   if (settings.karakeep.enabled || settings.karakeep.baseUrl) {
     try {
       const url = new URL(settings.karakeep.baseUrl)

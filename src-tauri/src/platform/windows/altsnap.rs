@@ -738,7 +738,13 @@ mod cursor_tests {
             };
             state.begin(button, POINT { x: 20, y: 30 }, edges);
             assert_eq!(state.cursor, Some(expected));
-            assert_ne!(state.saved_cursor, 0);
+            // Windows may have no current cursor (e.g. after a transparent
+            // WebView closes, or in a non-interactive desktop session). A null
+            // cursor is valid saved state and must still be cleared on release.
+            let current = current_system_cursor()
+                .or_else(|| unsafe { Some(GetCursor()) })
+                .map_or(0, |cursor| cursor.0 as usize);
+            assert_eq!(state.saved_cursor, current);
 
             state.restore_cursor();
             assert_eq!(state.cursor, None);

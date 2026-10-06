@@ -213,6 +213,66 @@ fn settings_save_result(settings: AppSettings, revision: u64) -> SettingsSaveRes
     }
 }
 
+/// Capture's in-place appearance controls share the host's transactional store.
+/// Only these controls may patch preferences from a capture window.
+pub(crate) fn save_capture_preferences(app: &AppHandle, patch: Value) -> Result<(), String> {
+    save_capture_configuration(app, patch, None)
+}
+
+pub(crate) fn save_capture_configuration(
+    app: &AppHandle,
+    patch: Value,
+    tools: Option<Value>,
+) -> Result<(), String> {
+    let fields = patch.as_object().ok_or("截图设置必须是对象")?;
+    const ALLOWED: &[&str] = &[
+        "screenshot_rounded_enabled",
+        "screenshot_rounded_radius",
+        "screenshot_border_enabled",
+        "screenshot_border_mode",
+        "screenshot_border_size",
+        "screenshot_border_color",
+        "screenshot_shadow_color",
+        "screenshot_border_persist",
+        "magnifier_zoom",
+        "gif_fps",
+    ];
+    if fields.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err("截图窗口不能修改此设置".into());
+    }
+    let state = app.state::<AppState>();
+    let _write = state.lock_settings_write()?;
+    let previous = state.current()?;
+    let mut next = previous.clone();
+    if let Some(tools) = tools {
+        crate::domain::capture::validate_tools(&tools)?;
+        // Merge only changed tools so an older pin cannot overwrite a newer capture.
+        let merged = merge_settings_patch_at(
+            serde_json::to_value(&next.capture.tools).map_err(|e| e.to_string())?,
+            &tools,
+            "settings.capture.tools",
+        )?;
+        next.capture.tools = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+    }
+    next.capture.native_options.extend(
+        fields
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    if next == previous {
+        return Ok(());
+    }
+    let mut effects = RuntimeSettingsEffects {
+        app,
+        state: &state,
+        synchronize_startup: false,
+    };
+    save_transaction(&mut effects, &previous, &next)?;
+    let revision = state.advance_settings_revision(&next)?;
+    emit_settings_changed(app, &next, revision);
+    Ok(())
+}
+
 fn emit_settings_changed(app: &AppHandle, settings: &AppSettings, revision: u64) {
     let _ = app.emit(
         "screenpilot:settings-changed",
@@ -223,7 +283,47 @@ fn emit_settings_changed(app: &AppHandle, settings: &AppSettings, revision: u64)
     );
 }
 
+pub fn toggle_pin_visibility(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _write = state.lock_settings_write()?;
+    if crate::application::capture_runtime::pin_count(app) == 0 {
+        return Ok(());
+    }
+    let previous = state.current()?;
+    let mut next = previous.clone();
+    next.capture.pins_visible = !previous.capture.pins_visible;
+    let mut effects = RuntimeSettingsEffects {
+        app,
+        state: &state,
+        synchronize_startup: false,
+    };
+    save_transaction(&mut effects, &previous, &next)?;
+    let revision = state.advance_settings_revision(&next)?;
+    emit_settings_changed(app, &next, revision);
+    Ok(())
+}
+
 fn validate_settings_patch_shape(current: &Value, patch: &Value, path: &str) -> Result<(), String> {
+    // These are schema-validated maps, whose valid keys need not have been saved yet.
+    if path == "settings.capture.nativeOptions" || path == "settings.capture.tools" {
+        if let Some(fields) = patch.as_object() {
+            for (key, value) in fields {
+                if value.is_null() && current.get(key).is_none() {
+                    return Err(format!("Invalid settings patch field: {path}.{key}"));
+                }
+            }
+        }
+        let merged = merge_settings_patch_at(current.clone(), patch, path)?;
+        let mut capture = crate::domain::capture::CaptureSettings::default();
+        let fields =
+            serde_json::from_value(merged).map_err(|e| format!("Invalid settings patch: {e}"))?;
+        if path.ends_with("nativeOptions") {
+            capture.native_options = fields;
+        } else {
+            capture.tools = fields;
+        }
+        return capture.validate();
+    }
     let Value::Object(patch_object) = patch else {
         return Err("Invalid settings patch: root must be an object".into());
     };
@@ -242,6 +342,9 @@ fn validate_settings_patch_shape(current: &Value, patch: &Value, path: &str) -> 
 }
 
 fn merge_settings_patch(current: Value, patch: &Value) -> Result<Value, String> {
+    merge_settings_patch_at(current, patch, "settings")
+}
+fn merge_settings_patch_at(current: Value, patch: &Value, path: &str) -> Result<Value, String> {
     let Value::Object(mut current_object) = current else {
         return Err("Invalid settings patch: current settings are not an object".into());
     };
@@ -249,9 +352,17 @@ fn merge_settings_patch(current: Value, patch: &Value) -> Result<Value, String> 
         return Err("Invalid settings patch: root must be an object".into());
     };
     for (key, value) in patch_object {
+        if value.is_null()
+            && (path == "settings.capture.nativeOptions"
+                || path == "settings.capture.tools"
+                || path.starts_with("settings.capture.tools."))
+        {
+            current_object.remove(key);
+            continue;
+        }
         let merged = match current_object.remove(key) {
             Some(current_value) if current_value.is_object() && value.is_object() => {
-                merge_settings_patch(current_value, value)?
+                merge_settings_patch_at(current_value, value, &format!("{path}.{key}"))?
             }
             _ => value.clone(),
         };
@@ -426,6 +537,7 @@ pub async fn settings_import(app: AppHandle) -> Result<Option<SettingsExport>, S
     }
     let raw_settings = raw_export.get("settings").cloned().unwrap_or_default();
     export.settings.migrate_missing_ai_toggles(&raw_settings);
+    export.settings.migrate_capture_shortcut(&raw_settings);
     export.settings.migrate_prompt_defaults();
     export.settings.normalize_ai_options();
     export.settings.validate()?;
@@ -697,12 +809,19 @@ impl SettingsEffects for RuntimeSettingsEffects<'_> {
     }
 
     fn replace_runtime(&mut self, settings: &AppSettings) -> Result<(), String> {
-        if self.state.current()?.karakeep != settings.karakeep {
+        let previous = self.state.current()?;
+        let pins_changed = previous.capture.pins_visible != settings.capture.pins_visible;
+        if previous.karakeep != settings.karakeep {
             self.state.cancel_reference_vision_stream();
         }
         self.state.replace(settings)?;
+        if pins_changed {
+            crate::application::capture_runtime::synchronize_pin_visibility(self.app);
+        }
         #[cfg(target_os = "windows")]
-        crate::platform::windows::altsnap::update(&settings.alt_snap)?;
+        if previous.alt_snap != settings.alt_snap {
+            crate::platform::windows::altsnap::update(&settings.alt_snap)?;
+        }
         Ok(())
     }
 
@@ -817,6 +936,48 @@ mod tests {
         .expect_err("unsupported source language should fail");
         assert_eq!(error, "Text translation source language is unsupported");
         assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn capture_patch_accepts_unsaved_schema_keys_and_preserves_other_settings() {
+        let baseline = serde_json::to_value(AppSettings::default()).unwrap();
+        let mut current = baseline.clone();
+        current["capture"]["nativeOptions"]["gif_fps"] = serde_json::json!(16);
+        let patch = serde_json::json!({"capture":{"nativeOptions":{"magnifier_zoom":5.5},"tools":{"pen":{"width":15},"lastRegion":{"x":-1200,"y":10,"width":320,"height":240}}}});
+        validate_settings_patch_shape(&current, &patch, "settings").unwrap();
+        let merged = merge_settings_patch(current.clone(), &patch).unwrap();
+        assert!(settings_conflict_paths(&baseline, &current, &merged, "settings").is_empty());
+        let settings: AppSettings = serde_json::from_value(merged).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(settings.capture.native_options["magnifier_zoom"], 5.5);
+        assert_eq!(settings.capture.native_options["gif_fps"], 16);
+        assert_eq!(settings.translation, AppSettings::default().translation);
+        let conflicting = serde_json::json!({"capture":{"nativeOptions":{"gif_fps":20}}});
+        let next = merge_settings_patch(current.clone(), &conflicting).unwrap();
+        assert_eq!(
+            settings_conflict_paths(&baseline, &current, &next, "settings"),
+            vec!["settings.capture.nativeOptions.gif_fps"]
+        );
+        for patch in [
+            serde_json::json!({"capture":{"nativeOptions":{"ocr_enabled":true}}}),
+            serde_json::json!({"capture":{"nativeOptions":{"magnifier_zoom":999}}}),
+            serde_json::json!({"capture":{"tools":{"layout":[{"key":"ocr","mode":"show"}]}}}),
+            serde_json::json!({"capture":{"tools":{"pen":{"width":-1}}}}),
+        ] {
+            assert!(validate_settings_patch_shape(&current, &patch, "settings").is_err());
+        }
+    }
+
+    #[test]
+    fn importing_capture_defaults_can_remove_saved_map_overrides() {
+        let mut current = serde_json::to_value(AppSettings::default()).unwrap();
+        current["capture"]["nativeOptions"]["magnifier_zoom"] = serde_json::json!(6);
+        current["capture"]["tools"]["pen"] = serde_json::json!({"width":30});
+        let patch = serde_json::json!({"capture":{"nativeOptions":{"magnifier_zoom":null},"tools":{"pen":null}}});
+        validate_settings_patch_shape(&current, &patch, "settings").unwrap();
+        let next: AppSettings =
+            serde_json::from_value(merge_settings_patch(current, &patch).unwrap()).unwrap();
+        assert_eq!(next.capture, AppSettings::default().capture);
     }
 
     #[test]

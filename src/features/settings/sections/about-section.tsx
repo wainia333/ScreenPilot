@@ -1,5 +1,6 @@
 import { Download, Upload } from 'lucide-react'
 import { useState } from 'react'
+import { version as appVersion } from '../../../../package.json'
 import { SettingGroup, SettingRow, Toggle } from '../../../shared/ui/controls'
 import { copyFor } from '../../../shared/ui-copy'
 import type { InterfaceLanguage } from '../types'
@@ -25,7 +26,7 @@ export function AboutSection({
         <img src="/app-mark.png" alt="ScreenPilot" />
         <div>
           <h1>ScreenPilot</h1>
-          <p>Version 0.1.6 · Wainia</p>
+          <p>Version {appVersion} · Wainia</p>
         </div>
       </div>
       <SettingGroup title={t.configurationManagement}>
@@ -60,6 +61,7 @@ export function AboutSection({
         <ul>
           <li><a href="https://github.com/ZMGID/kivio">https://github.com/ZMGID/kivio</a></li>
           <li><a href="https://github.com/RamonUnch/AltSnap">https://github.com/RamonUnch/AltSnap</a></li>
+          <li><a href="https://github.com/1003129155/jietuba">jietuba · JYAARU · MIT</a></li>
         </ul>
       </section>
     </>

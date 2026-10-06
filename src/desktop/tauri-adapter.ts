@@ -1,6 +1,7 @@
 import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from '../features/settings/types'
 import { providerCommandArgs } from './provider-command-args'
 import { defaultTauriApi, type TauriApi } from './tauri-api'
+import { NativeCapturePort } from '../features/capture/native-capture'
 import type {
   DesktopPort,
   PermissionStatus,
@@ -42,7 +43,8 @@ function command(api: TauriApi, name: string, args?: Record<string, unknown>): P
 }
 
 export class TauriDesktopPort implements DesktopPort {
-  constructor(private readonly api: TauriApi = defaultTauriApi) {}
+  readonly capture: NativeCapturePort
+  constructor(private readonly api: TauriApi = defaultTauriApi) { this.capture = new NativeCapturePort(api) }
 
   loadSettings = () => this.api.invoke<AppSettings>('settings_load')
   karakeepConfigured = () => this.api.invoke<boolean>('integration_karakeep_configured')

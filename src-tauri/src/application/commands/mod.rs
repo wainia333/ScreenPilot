@@ -9,3 +9,5 @@ pub use integrations::*;
 pub use settings::*;
 pub use text::*;
 pub use vision::*;
+mod capture;
+pub use capture::*;

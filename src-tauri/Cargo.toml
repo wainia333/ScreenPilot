@@ -1,6 +1,6 @@
 [package]
 name = "screenpilot"
-version = "0.1.6"
+version = "0.1.7"
 description = "ScreenPilot desktop screen assistant"
 authors = ["Wainia"]
 edition = "2021"
@@ -21,9 +21,10 @@ async-trait = "=0.1.89"
 base64 = "=0.22.1"
 chrono = { version = "=0.4.42", features = ["serde"] }
 futures-util = "=0.3.31"
+flate2 = "=1.1.9"
 hmac = "=0.12.1"
 html2text = "=0.16.7"
-image = { version = "=0.25.10", default-features = false, features = ["png"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 md-5 = "=0.10.6"
 reqwest = { version = "=0.13.4", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
@@ -43,12 +44,19 @@ url = "=2.5.7"
 uuid = { version = "=1.24.0", features = ["serde", "v4"] }
 
 [target.'cfg(windows)'.dependencies]
+hdrcapture = { path = "crates/hdrcapture", default-features = false }
+inputhub = { path = "crates/inputhub", default-features = false }
+gifrecorder = { path = "crates/gifrecorder" }
+longstitch = { path = "crates/longstitch" }
+rxing = { version = "=0.9.3", default-features = false, features = ["decoders", "full_barcode_format_support", "multi_barcode_readers", "encoding_rs"] }
 arboard = "=3.6.1"
 enigo = "=0.6.1"
 windows = { version = "=0.61.3", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
+  "Win32_Media_MediaFoundation",
+  "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",
@@ -64,11 +72,15 @@ windows = { version = "=0.61.3", features = [
 ] }
 xcap = "=0.9.8"
 winreg = "=0.55.0"
+webview2-com = "=0.38.2"
 
 [dev-dependencies]
 proptest = "=1.11.0"
 tempfile = "=3.23.0"
 wiremock = "=0.6.5"
+
+[target.'cfg(windows)'.dev-dependencies]
+rxing = { version = "=0.9.3", default-features = false, features = ["encoders"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

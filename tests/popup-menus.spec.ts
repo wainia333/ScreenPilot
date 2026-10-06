@@ -1,0 +1,71 @@
+import { expect, test } from '@playwright/test'
+
+for (const dpi of [1, 1.25, 1.5, 2]) for (const scale of [75, 100, 150, 200]) test(`pin menu fully fits without scroll at DPI ${dpi} and scale ${scale}%`, async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 800, height: 480 }, deviceScaleFactor: dpi })
+  const page = await context.newPage()
+  try {
+    await page.goto(`http://127.0.0.1:1420/?capture-lab=1&mode=pin&pin-width=240&pin-height=160&scale=${scale}`)
+    await expect.poll(() => page.evaluate(() => (window as unknown as { captureTestActions?: { action: string }[] }).captureTestActions?.some(c => c.action === 'pin_presented'))).toBe(true)
+    await page.locator('.jt-pin-input').hover()
+    await expect(page.locator('.jt-pin-buttons')).toHaveCount(0)
+    await page.locator('.jt-pin-input').click({ button: 'right' })
+    const menu = page.getByRole('menu', { name: '钉图菜单' })
+    await expect(menu).toBeVisible()
+    await expect(page.locator('.jt-pin-buttons')).toHaveCount(0)
+    await expect(menu).toHaveCSS('clip-path', 'inset(-8px round 17px)')
+    expect(await menu.evaluate(e => ({ height: e.clientHeight, content: e.scrollHeight, overflow: getComputedStyle(e).overflowY }))).toMatchObject({ height: 429, content: 429, overflow: 'visible' })
+    const box = await menu.boundingBox(); if (!box) throw new Error('Missing pin menu')
+    expect(box.x).toBeGreaterThanOrEqual(0); expect(box.y).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(801); expect(box.y + box.height).toBeLessThanOrEqual(481)
+    await expect(menu.getByRole('menuitem', { name: /关闭钉图/ })).toBeVisible()
+  } finally { await context.close() }
+})
+
+for (const en of [false, true]) test(`tray menu matches the pin style and fully aligns its content (${en ? 'English' : 'Chinese'})`, async ({ page }) => {
+  await page.goto(`/?tray-menu-lab=1${en ? '&en=1' : ''}`)
+  const menu = page.getByRole('menu', { name: 'ScreenPilot' })
+  await expect(menu).toBeVisible()
+  await expect(menu).toHaveCSS('border-radius', '9px')
+  await expect(menu).toHaveCSS('clip-path', 'inset(-8px round 17px)')
+  await expect(menu).toHaveCSS('overflow-y', 'visible')
+  const first = menu.getByRole('menuitem', { name: en ? 'Text translation F2' : '文本翻译 F2' })
+  await expect(first).not.toBeFocused()
+  await expect(first).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  const overlap = await menu.locator('button').evaluateAll(buttons => buttons.filter(button => {
+    const label = button.firstElementChild?.getBoundingClientRect(), trailing = button.lastElementChild?.getBoundingClientRect()
+    return label && trailing && label.right > trailing.left - 8
+  }).map(button => button.textContent))
+  expect(overlap).toEqual([])
+  const pins = menu.getByRole('menuitemcheckbox')
+  await expect(pins).toBeChecked(); await expect(pins.locator('svg')).toBeVisible()
+  await pins.click(); await expect(pins).not.toBeChecked(); await expect(pins.locator('svg')).toHaveCount(0)
+  await pins.click(); await expect(pins).toBeChecked()
+  await page.screenshot({ path: `.task/tray-followup-${en ? 'en' : 'zh'}.png` })
+})
+
+test('tray opens with no selection, highlights hovered items, and supports keyboard navigation from the container', async ({ page }) => {
+  await page.goto('/?tray-menu-lab=1')
+  const menu = page.getByRole('menu', { name: 'ScreenPilot' }), first = menu.locator('button').first()
+  await expect(menu).toBeVisible()
+  await expect(menu.locator('button:focus-visible')).toHaveCount(0)
+  await expect(first).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await first.hover()
+  await expect(first).toHaveCSS('background-color', 'rgb(238, 242, 247)')
+  await page.mouse.move(500, 500)
+  await expect(first).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await page.keyboard.press('ArrowDown')
+  await expect(first).toBeFocused()
+  await expect(first).toHaveCSS('background-color', 'rgb(238, 242, 247)')
+  await page.keyboard.press('End')
+  await expect(menu.getByRole('menuitem', { name: '退出' })).toBeFocused()
+})
+
+test('no pins means disabled with no check, and the complete tray menu fits a small screen', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 280 })
+  await page.goto('/?tray-menu-lab=1&empty=1&scale=200')
+  const menu = page.getByRole('menu', { name: 'ScreenPilot' }), pins = menu.getByRole('menuitemcheckbox')
+  await expect(pins).toBeDisabled(); await expect(pins).not.toBeChecked()
+  const box = await menu.boundingBox(); if (!box) throw new Error('Missing menu')
+  expect(box.x + box.width).toBeLessThanOrEqual(320); expect(box.y + box.height).toBeLessThanOrEqual(280)
+  expect(await menu.evaluate(e => e.scrollHeight - e.clientHeight)).toBe(0)
+})

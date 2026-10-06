@@ -1,0 +1,411 @@
+[
+  {
+    "key": "theme_color",
+    "tab": "basic",
+    "zh": "主题色",
+    "en": "Theme color",
+    "default": "#3388ff",
+    "kind": "color"
+  },
+  {
+    "key": "capture_engine",
+    "tab": "basic",
+    "zh": "捕获引擎",
+    "en": "Capture engine",
+    "default": "auto",
+    "choices": [
+      "auto",
+      "mss",
+      "hdr"
+    ]
+  },
+  {
+    "key": "smart_selection",
+    "tab": "basic",
+    "zh": "智能选区",
+    "en": "Smart selection",
+    "default": true
+  },
+  {
+    "key": "smart_selection_mode",
+    "tab": "basic",
+    "zh": "检测范围",
+    "en": "Detection scope",
+    "default": "window",
+    "choices": [
+      "window",
+      "element"
+    ]
+  },
+  {
+    "key": "smart_selection_animation",
+    "tab": "basic",
+    "zh": "智能选区过渡动画",
+    "en": "Selection animation",
+    "default": false
+  },
+  {
+    "key": "capture_include_cursor",
+    "tab": "basic",
+    "zh": "截取鼠标指针",
+    "en": "Include cursor",
+    "default": false
+  },
+  {
+    "key": "capture_fullscreen_crosshair",
+    "tab": "basic",
+    "zh": "全屏十字辅助线",
+    "en": "Fullscreen crosshair",
+    "default": false
+  },
+  {
+    "key": "magnifier_enabled",
+    "tab": "basic",
+    "zh": "像素放大镜",
+    "en": "Pixel magnifier",
+    "default": true
+  },
+  {
+    "key": "magnifier_grid",
+    "tab": "basic",
+    "zh": "放大镜像素网格",
+    "en": "Magnifier grid",
+    "default": true
+  },
+  {
+    "key": "magnifier_hint",
+    "tab": "basic",
+    "zh": "放大镜快捷键提示",
+    "en": "Magnifier key hints",
+    "default": true
+  },
+  {
+    "key": "magnifier_zoom",
+    "tab": "basic",
+    "zh": "放大镜倍率",
+    "en": "Magnifier zoom",
+    "default": 4,
+    "min": 1,
+    "max": 10,
+    "step": 0.25
+  },
+  {
+    "key": "magnifier_color_formats",
+    "tab": "basic",
+    "zh": "取色格式与顺序",
+    "en": "Color formats and order",
+    "default": "",
+    "kind": "color-formats"
+  },
+  {
+    "key": "quick_capture_pin",
+    "tab": "basic",
+    "zh": "直接拖选钉图",
+    "en": "Drag to pin",
+    "default": "win+dragleft",
+    "kind": "shortcut"
+  },
+  {
+    "key": "quick_capture_copy",
+    "tab": "basic",
+    "zh": "直接拖选复制",
+    "en": "Drag to copy",
+    "default": "",
+    "kind": "shortcut"
+  },
+  {
+    "key": "quick_capture_copy_pin",
+    "tab": "basic",
+    "zh": "直接拖选复制并钉图",
+    "en": "Drag to copy and pin",
+    "default": "",
+    "kind": "shortcut"
+  },
+  {
+    "key": "quick_capture_edit",
+    "tab": "basic",
+    "zh": "拖选后原位标注",
+    "en": "Drag to annotate",
+    "default": "",
+    "kind": "shortcut"
+  },
+  {
+    "key": "ui_scale_percent",
+    "tab": "annotation",
+    "zh": "原版工具条缩放",
+    "en": "Toolbar scale",
+    "default": 0,
+    "choices": [
+      0,
+      80,
+      90,
+      100,
+      110,
+      125,
+      150,
+      175,
+      200
+    ]
+  },
+  {
+    "key": "selection_border_width",
+    "tab": "annotation",
+    "zh": "选区边框粗细",
+    "en": "Selection border width",
+    "default": 4,
+    "choices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      10
+    ]
+  },
+  {
+    "key": "selection_handle_style",
+    "tab": "annotation",
+    "zh": "选区控制点",
+    "en": "Selection handles",
+    "default": "all",
+    "choices": [
+      "all",
+      "corners",
+      "none"
+    ]
+  },
+  {
+    "key": "selection_handle_size",
+    "tab": "annotation",
+    "zh": "控制点大小",
+    "en": "Handle size",
+    "default": "small",
+    "choices": [
+      "small",
+      "medium",
+      "large"
+    ]
+  },
+  {
+    "key": "cross_tool_selection",
+    "tab": "annotation",
+    "zh": "Ctrl 跨工具选中标注",
+    "en": "Ctrl selects across tools",
+    "default": true
+  },
+  {
+    "key": "text_always_on_top",
+    "tab": "annotation",
+    "zh": "文字标注保持在上层",
+    "en": "Text annotations on top",
+    "default": true
+  },
+  {
+    "key": "scroll_cooldown",
+    "tab": "scroll",
+    "zh": "滚动后等待时间（秒）",
+    "en": "Scroll settle time (seconds)",
+    "default": 0.15,
+    "choices": [
+      0.05,
+      0.1,
+      0.15,
+      0.2,
+      0.3,
+      0.5,
+      1
+    ]
+  },
+  {
+    "key": "long_stitch_ignore_top_pixels",
+    "tab": "scroll",
+    "zh": "忽略顶部固定区域（像素）",
+    "en": "Ignore fixed header (pixels)",
+    "default": 0,
+    "min": 0,
+    "max": 300
+  },
+  {
+    "key": "gif_fps",
+    "tab": "record",
+    "zh": "录制帧率",
+    "en": "Recording frame rate",
+    "default": 10,
+    "choices": [
+      5,
+      10,
+      16,
+      24
+    ]
+  },
+  {
+    "key": "barcode_copy_single",
+    "tab": "scan",
+    "zh": "单个识别结果直接复制",
+    "en": "Copy a single code directly",
+    "default": false
+  },
+  {
+    "key": "screenshot_save_enabled",
+    "tab": "save",
+    "zh": "完成截图时自动保存",
+    "en": "Auto-save completed captures",
+    "default": true
+  },
+  {
+    "key": "screenshot_save_path",
+    "tab": "save",
+    "zh": "保存目录",
+    "en": "Save folder",
+    "default": "",
+    "kind": "directory"
+  },
+  {
+    "key": "screenshot_format",
+    "tab": "save",
+    "zh": "图片格式",
+    "en": "Image format",
+    "default": "PNG",
+    "choices": [
+      "PNG",
+      "JPG",
+      "BMP",
+      "WEBP",
+      "PDF"
+    ]
+  },
+  {
+    "key": "screenshot_quality",
+    "tab": "save",
+    "zh": "有损格式质量",
+    "en": "Lossy image quality",
+    "default": 100,
+    "min": 0,
+    "max": 100
+  },
+  {
+    "key": "screenshot_filename",
+    "tab": "save",
+    "zh": "文件名格式",
+    "en": "Filename format",
+    "default": "Screenshot_$yyyy-MM-dd_HH-mm-ss$.png",
+    "kind": "filename"
+  },
+  {
+    "key": "clipboard_file_reference_enabled",
+    "tab": "save",
+    "zh": "复制图片时同时附带文件路径",
+    "en": "Include saved file with image copy",
+    "default": true
+  },
+  {
+    "key": "screenshot_rounded_enabled",
+    "tab": "save",
+    "zh": "圆角截图",
+    "en": "Rounded corners",
+    "default": false
+  },
+  {
+    "key": "screenshot_rounded_radius",
+    "tab": "save",
+    "zh": "圆角半径",
+    "en": "Corner radius",
+    "default": 16,
+    "min": 0,
+    "max": 100
+  },
+  {
+    "key": "screenshot_border_enabled",
+    "tab": "save",
+    "zh": "描边或阴影",
+    "en": "Border or shadow",
+    "default": false
+  },
+  {
+    "key": "screenshot_border_mode",
+    "tab": "save",
+    "zh": "效果样式",
+    "en": "Effect style",
+    "default": "shadow",
+    "choices": [
+      "shadow",
+      "border"
+    ]
+  },
+  {
+    "key": "screenshot_border_size",
+    "tab": "save",
+    "zh": "效果大小",
+    "en": "Effect size",
+    "default": 21,
+    "min": 1,
+    "max": 50
+  },
+  {
+    "key": "screenshot_shadow_color",
+    "tab": "save",
+    "zh": "阴影颜色",
+    "en": "Shadow color",
+    "default": "#0078FF",
+    "kind": "color"
+  },
+  {
+    "key": "screenshot_border_color",
+    "tab": "save",
+    "zh": "描边颜色",
+    "en": "Border color",
+    "default": "#FF0000",
+    "kind": "color"
+  },
+  {
+    "key": "screenshot_border_persist",
+    "tab": "save",
+    "zh": "每次截图保持描边或阴影",
+    "en": "Keep effect between captures",
+    "default": false
+  },
+  {
+    "key": "pin_auto_toolbar",
+    "tab": "pin",
+    "zh": "钉图自动显示工具条",
+    "en": "Show pin toolbar automatically",
+    "default": false
+  },
+  {
+    "key": "pin_default_opacity",
+    "tab": "pin",
+    "zh": "钉图默认透明度",
+    "en": "Pin opacity",
+    "default": 1,
+    "choices": [
+      0.1,
+      0.25,
+      0.5,
+      0.75,
+      1
+    ]
+  },
+  {
+    "key": "pin_rounded_corners",
+    "tab": "pin",
+    "zh": "系统圆角与阴影",
+    "en": "System corners and shadow",
+    "default": false
+  },
+  {
+    "key": "pin_escape_close",
+    "tab": "pin",
+    "zh": "esc关闭钉图",
+    "en": "Close pin with Esc",
+    "default": true
+  },
+  {
+    "key": "pin_double_click_close",
+    "tab": "pin",
+    "zh": "双击关闭钉图",
+    "en": "Close pin with double-click",
+    "default": true
+  }
+]

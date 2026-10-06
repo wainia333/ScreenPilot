@@ -11,8 +11,14 @@ import { TranslatorPage } from '../features/translator/translator-page'
 import { ExternalLinkBridge } from './external-link-bridge'
 import { VisionRouteBoundary, VisionRouteLoading } from './vision-route-state'
 import { WindowListenerRecovery } from './window-listener-recovery'
+import { NativeNotice } from './native-notice'
 
 const ReferenceVision = lazy(() => import('../features/vision/reference-vision'))
+const CaptureRoot = lazy(() => import('../features/capture/editor/surface').then(module => ({ default: module.CaptureRoot })))
+const ScanResultRoot = lazy(() => import('../features/capture/scan-result').then(module => ({ default: module.ScanResultRoot })))
+const TrayMenuRoot = lazy(() => import('./tray-menu').then(module => ({ default: module.TrayMenuRoot })))
+const CaptureLab = import.meta.env.DEV ? lazy(() => import('../shared/testing/capture-lab')) : null
+const TrayMenuLab = import.meta.env.DEV ? lazy(() => import('../shared/testing/tray-menu-lab')) : null
 
 function routeAllowedInWindow(
   nextRoute: WindowRoute,
@@ -116,11 +122,20 @@ function RouteContent() {
 }
 
 export function App({ port }: { port?: DesktopPort } = {}) {
+  if (TrayMenuLab && new URLSearchParams(window.location.search).has('tray-menu-lab') && !isTauriRuntime()) return <Suspense fallback={null}><TrayMenuLab /></Suspense>
+  if (CaptureLab && new URLSearchParams(window.location.search).has('capture-lab') && !isTauriRuntime()) return <Suspense fallback={null}><CaptureLab /></Suspense>
+  const label = isTauriRuntime() ? getCurrentWindow().label : new URLSearchParams(window.location.search).get('window')
+  if (label === 'tray-menu') return <Suspense fallback={null}><TrayMenuRoot /></Suspense>
+  if (label?.startsWith('capture-scan-')) return <DesktopProvider {...(port === undefined ? {} : { port })}><Suspense fallback={null}><ScanResultRoot /></Suspense><NativeNotice /></DesktopProvider>
+  if (label === 'capture' || label === 'capture-quick' || label?.startsWith('capture-pin-')) {
+    return <Suspense fallback={null}><CaptureRoot /></Suspense>
+  }
   return (
     <DesktopProvider {...(port === undefined ? {} : { port })}>
       <BrowserPreviewBadge />
       <ExternalLinkBridge />
       <RouteContent />
+      <NativeNotice />
     </DesktopProvider>
   )
 }

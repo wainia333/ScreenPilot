@@ -1,4 +1,5 @@
 import type { AppSettings } from './types'
+import captureDefaults from '../../../src-tauri/src/domain/capture-defaults.json' with { type: 'json' }
 import karakeepPromptDefaults from '../../../src-tauri/src/domain/integrations/karakeep-system-prompt.json' with { type: 'json' }
 
 export const DEFAULT_KARAKEEP_SYSTEM_PROMPT = karakeepPromptDefaults.systemPrompt
@@ -25,6 +26,7 @@ export const DEFAULT_OPTIMIZER_PROMPT =
   '请优化下面的原始提示词，并使用 {lang} 输出。\n\n优化原则：\n- 先判断任务类型和目标用户，不盲目套模板。\n- 保留原始意图、硬性约束、变量占位符、输入输出字段和语气。\n- 将含糊要求改写为可执行的步骤、判断标准和输出格式。\n- 补足必要上下文、角色边界、禁止事项、异常处理和质量检查。\n- 如果原提示词已经足够清晰，只做轻量整理。\n- 不要添加与原任务无关的能力、工具、背景或事实。\n\n输出格式：\n## 优化后的提示词\n给出可直接复制使用的完整提示词。\n\n## 调整要点\n用 3-6 条短要点说明主要改动。\n\n原始提示词：\n{text}'
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  capture: captureDefaults,
   karakeep: { enabled: false, baseUrl: '', instanceId: '', defaultSearchMode: 'fts', visionPolicy: 'auto', systemPrompt: DEFAULT_KARAKEEP_SYSTEM_PROMPT },
   schemaVersion: 1,
   theme: 'system',

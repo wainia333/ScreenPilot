@@ -1,5 +1,6 @@
 import { createContext, isValidElement, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
+import { NoticeContent } from '../../shared/ui/top-notice'
 import { Loader2, Copy, Check, Square, Download, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, Volume2, RefreshCw, Pencil, Save, X, Sparkles, MessageSquare } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, type VisionStreamPayload, type VisionTranslateStreamPayload, type VisionWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
@@ -5484,7 +5485,7 @@ export default function Vision({ knowledgeUi }: { knowledgeUi?: VisionKnowledgeU
           aria-live="polite"
           className="pointer-events-none absolute left-1/2 top-3 z-[90] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-amber-300/70 bg-amber-50/95 px-3 py-2 text-[12px] leading-5 text-amber-900 shadow-lg backdrop-blur dark:border-amber-700/70 dark:bg-amber-950/90 dark:text-amber-100"
         >
-          {captureWarning}
+          <NoticeContent message={captureWarning} language={lang} />
         </div>
       ) : null}
       {streamListenerError ? (
@@ -5526,7 +5527,7 @@ export default function Vision({ knowledgeUi }: { knowledgeUi?: VisionKnowledgeU
           data-screenpilot-copy-error="true"
           className="pointer-events-none absolute left-1/2 top-14 z-[91] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
         >
-          {copyErrorAnnouncement}
+          <NoticeContent message={copyErrorAnnouncement} language={lang} />
         </div>
       ) : null}
       {exportErrorAnnouncement ? (
@@ -5535,7 +5536,7 @@ export default function Vision({ knowledgeUi }: { knowledgeUi?: VisionKnowledgeU
           data-screenpilot-export-error="true"
           className="pointer-events-none absolute left-1/2 top-14 z-[91] max-w-[min(680px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-rose-300/70 bg-rose-50/95 px-3 py-2 text-[12px] leading-5 text-rose-700 shadow-lg backdrop-blur dark:border-rose-700/70 dark:bg-rose-950/90 dark:text-rose-200"
         >
-          {exportErrorAnnouncement}
+          <NoticeContent message={exportErrorAnnouncement} language={lang} />
         </div>
       ) : null}
       {historyRejectedCount > 0 ? (

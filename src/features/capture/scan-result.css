@@ -1,0 +1,9 @@
+/* Frame, controls, themes and arrival keyframes come from the translator popup. */
+.scan-result-list { display: flex; flex-direction: column; gap: 14px; }
+.scan-result-entry { flex-shrink: 0; gap: 8px; }
+.scan-result-entry .ocr-result-section-heading { justify-content: space-between; color: var(--sp-text-muted); font-size: 11px; }
+.scan-result-text { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; line-height: 1.65; font-size: 13px; }
+.scan-result-text a { color: var(--sp-accent); text-decoration: underline; text-underline-offset: 3px; }
+.scan-result-text a:hover { color: var(--sp-accent-hover); }
+.scan-result-empty { display: flex; flex: 1; align-items: center; justify-content: center; flex-direction: column; gap: 12px; min-height: 140px; color: var(--sp-text-muted); font-size: 12px; }
+.scan-result-empty p { margin: 0; }

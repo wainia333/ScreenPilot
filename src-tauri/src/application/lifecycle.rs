@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -25,6 +24,7 @@ enum FeatureSurface {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum HotkeyAction {
+    Capture,
     Translator,
     Vision,
     ScreenshotTranslation,
@@ -34,6 +34,7 @@ enum HotkeyAction {
 impl HotkeyAction {
     fn scope(self) -> &'static str {
         match self {
+            Self::Capture => "capture",
             Self::Translator => "translator",
             Self::Vision => "vision",
             Self::ScreenshotTranslation => "screenshot_translation",
@@ -224,7 +225,7 @@ fn capture_after_withdrawal<T>(
 }
 
 #[cfg(target_os = "windows")]
-fn disable_capture_window_transitions(
+pub(crate) fn disable_capture_window_transitions(
     hwnd: windows::Win32::Foundation::HWND,
 ) -> Result<(), String> {
     use windows::core::BOOL;
@@ -343,7 +344,7 @@ impl MainRoute {
 
     fn size(self) -> (f64, f64) {
         match self {
-            Self::Settings => (760.0, 620.0),
+            Self::Settings => (844.0, 620.0),
             Self::PromptOptimizer => (680.0, 450.0),
         }
     }
@@ -676,6 +677,9 @@ pub fn show_vision(
 }
 
 pub fn request_vision(app: &AppHandle, mode: &'static str) -> Result<(), String> {
+    if super::capture_service::busy(app) {
+        return Err("请先完成当前截图 / Finish the active capture first".into());
+    }
     let state = app.state::<AppState>();
     let Some(generation) = state.begin_vision_surface_action(mode) else {
         return Ok(());
@@ -742,6 +746,19 @@ fn deliver_translator_selection<T>(
 
 fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
     if !accept_hotkey_trigger(action) {
+        return;
+    }
+    if matches!(action, HotkeyAction::Capture) {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = super::capture_service::request(&app, "image") {
+                eprintln!("Capture failed: {error}");
+                super::capture_runtime::report_capture_error(&app, &error);
+            }
+        });
+        return;
+    }
+    if super::capture_service::busy(app) {
         return;
     }
     let state = app.state::<AppState>();
@@ -836,6 +853,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = match action {
+            HotkeyAction::Capture => Ok(()),
             HotkeyAction::Translator => Ok(()),
             HotkeyAction::Vision => {
                 let selection = if app.state::<AppState>().vision_active() {
@@ -909,11 +927,20 @@ fn active_shortcuts(settings: &AppSettings) -> Vec<(&'static str, &str, HotkeyAc
             HotkeyAction::PromptOptimizer,
         ));
     }
+    if settings.capture.enabled && !settings.capture.shortcut.is_empty() {
+        shortcuts.push((
+            "截图",
+            settings.capture.shortcut.as_str(),
+            HotkeyAction::Capture,
+        ));
+    }
     shortcuts
 }
 
 fn shortcut_registration_changed(previous: &AppSettings, next: &AppSettings) -> bool {
-    previous.shortcuts != next.shortcuts
+    previous.capture.enabled != next.capture.enabled
+        || previous.capture.shortcut != next.capture.shortcut
+        || previous.shortcuts != next.shortcuts
         || previous.vision.enabled != next.vision.enabled
         || previous.screenshot_translation.enabled != next.screenshot_translation.enabled
         || previous.prompt_optimizer.enabled != next.prompt_optimizer.enabled
@@ -973,21 +1000,21 @@ fn register_shortcut(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TrayLabels {
+pub(crate) struct TrayLabels {
     translator: &'static str,
     vision: &'static str,
     screenshot: &'static str,
     optimizer: &'static str,
-    settings: &'static str,
-    restart_admin: &'static str,
-    quit: &'static str,
+    pub settings: &'static str,
+    pub restart_admin: &'static str,
+    pub quit: &'static str,
 }
 
 const TRAY_SETTINGS_ACTION_ID: &str = "settings";
 const TRAY_RESTART_ADMIN_ACTION_ID: &str = "restart_admin";
 const TRAY_QUIT_ACTION_ID: &str = "quit";
 
-fn tray_labels(language: InterfaceLanguage) -> TrayLabels {
+pub(crate) fn tray_labels(language: InterfaceLanguage) -> TrayLabels {
     match language {
         InterfaceLanguage::Zh => TrayLabels {
             translator: "文本翻译",
@@ -1010,7 +1037,9 @@ fn tray_labels(language: InterfaceLanguage) -> TrayLabels {
     }
 }
 
-fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str, &str)> {
+pub(crate) fn tray_feature_items(
+    settings: &AppSettings,
+) -> Vec<(&'static str, &'static str, &str)> {
     let labels = tray_labels(settings.language);
     let mut items = vec![(
         "translator",
@@ -1034,48 +1063,40 @@ fn tray_feature_items(settings: &AppSettings) -> Vec<(&'static str, &'static str
             settings.shortcuts.prompt_optimizer.as_str(),
         ));
     }
+    if settings.capture.enabled {
+        items.push((
+            "capture",
+            if settings.language == InterfaceLanguage::Zh {
+                "截图 / 录制 / 扫码"
+            } else {
+                "Capture / Record / Scan"
+            },
+            settings.capture.shortcut.as_str(),
+        ));
+    }
     items
 }
 
-fn build_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<Menu<tauri::Wry>, String> {
-    let labels = tray_labels(settings.language);
-    let mut builder = MenuBuilder::new(app);
-    for (id, label, shortcut) in tray_feature_items(settings) {
-        let item = MenuItemBuilder::with_id(id, label)
-            .accelerator(shortcut)
-            .build(app)
-            .map_err(|error| error.to_string())?;
-        builder = builder.item(&item);
-    }
-    // Held modifiers / mouse gestures are descriptive text, not menu accelerators.
-    let shortcut = settings
-        .alt_snap
-        .shortcut
-        .replace("Control", "Ctrl")
-        .replace("Meta", "Win");
-    let label = format!("AltSnap\t{shortcut}");
-    let alt_snap = MenuItemBuilder::with_id("altsnap", label)
-        .enabled(settings.alt_snap.enabled)
-        .build(app)
-        .map_err(|error| error.to_string())?;
-    builder = builder.item(&alt_snap);
-    builder
-        .separator()
-        .text(TRAY_SETTINGS_ACTION_ID, labels.settings)
-        .separator()
-        .text(TRAY_RESTART_ADMIN_ACTION_ID, labels.restart_admin)
-        .text(TRAY_QUIT_ACTION_ID, labels.quit)
-        .build()
-        .map_err(|error| error.to_string())
-}
-
-pub fn create_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
-    let menu = build_tray_menu(app, settings)?;
+pub fn create_tray(app: &AppHandle, _settings: &AppSettings) -> Result<(), String> {
+    super::tray_popup::prepare(app)?;
     let mut builder = TrayIconBuilder::with_id("main")
-        .menu(&menu)
         .tooltip("ScreenPilot")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } = &event
+            {
+                let app = tray.app_handle();
+                if let Err(error) =
+                    super::tray_popup::open(app, position.x as i32, position.y as i32)
+                {
+                    super::capture_runtime::report_capture_error(app, &error);
+                }
+            }
             if matches!(
                 event,
                 TrayIconEvent::DoubleClick {
@@ -1086,40 +1107,44 @@ pub fn create_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String
                 let app = tray.app_handle();
                 let _ = run_surface_action(app, || show_main(app, MainRoute::Settings));
             }
-        })
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "translator" => {
-                let _ = run_surface_action(app, || {
-                    app.state::<AppState>()
-                        .set_translator_selection(String::new());
-                    show_translator(app)
-                });
-            }
-            "vision" => {
-                let _ = request_vision(app, "chat");
-            }
-            "screenshot" => {
-                let _ = request_vision(app, "translate");
-            }
-            "optimizer" => {
-                let _ = run_surface_action(app, || show_main(app, MainRoute::PromptOptimizer));
-            }
-            "settings" => {
-                let _ = run_surface_action(app, || show_main(app, MainRoute::Settings));
-            }
-            "restart_admin" => match crate::platform::windows::startup::launch_elevated_restart() {
-                Ok(()) => app.exit(0),
-                Err(error) => {
-                    eprintln!("Administrator restart failed: {error}");
-                }
-            },
-            "quit" => app.exit(0),
-            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
     builder.build(app).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn run_tray_action(app: &AppHandle, action: &str) -> Result<(), String> {
+    if super::capture_service::busy(app) && !matches!(action, TRAY_QUIT_ACTION_ID | "pins") {
+        return super::capture_service::focus(app);
+    }
+    match action {
+        "capture" => trigger_hotkey_action(app, HotkeyAction::Capture),
+        "pins" => return super::commands::toggle_pin_visibility(app),
+        "translator" => {
+            return run_surface_action(app, || {
+                app.state::<AppState>()
+                    .set_translator_selection(String::new());
+                show_translator(app)
+            })
+        }
+        "vision" => return request_vision(app, "chat"),
+        "screenshot" => return request_vision(app, "translate"),
+        "optimizer" => {
+            return run_surface_action(app, || show_main(app, MainRoute::PromptOptimizer))
+        }
+        "altsnap" => {}
+        TRAY_SETTINGS_ACTION_ID => {
+            return run_surface_action(app, || show_main(app, MainRoute::Settings))
+        }
+        TRAY_RESTART_ADMIN_ACTION_ID => {
+            crate::platform::windows::startup::launch_elevated_restart()?;
+            app.exit(0);
+        }
+        TRAY_QUIT_ACTION_ID => app.exit(0),
+        _ => return Err("未知托盘菜单操作".into()),
+    }
     Ok(())
 }
 
@@ -1132,15 +1157,27 @@ pub fn focus_second_instance(app: &AppHandle) {
 }
 
 pub fn update_tray(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
-    let menu = build_tray_menu(app, settings)?;
+    let _ = settings;
     let tray = app.tray_by_id("main").ok_or("Tray is unavailable")?;
-    tray.set_menu(Some(menu))
-        .map_err(|error| error.to_string())?;
+    super::tray_popup::refresh(app)?;
     tray.set_tooltip(Some("ScreenPilot"))
         .map_err(|error| error.to_string())
 }
 
 pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if window.label() == super::tray_popup::LABEL {
+        if matches!(event, tauri::WindowEvent::Focused(false)) {
+            let _ = super::tray_popup::dismiss_unfocused(window.app_handle());
+        }
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = super::tray_popup::dismiss(window.app_handle(), None);
+        }
+        return;
+    }
+    if window.label().starts_with("capture-pin-") && matches!(event, tauri::WindowEvent::Moved(_)) {
+        super::capture_runtime::pin_moved(window.app_handle(), window.label());
+    }
     if matches!(window.label(), "vision" | "ocr") && matches!(event, tauri::WindowEvent::Moved(_)) {
         #[cfg(target_os = "windows")]
         if !crate::application::commands::safe_drag_active(ReferenceSurface::for_window(
@@ -1152,6 +1189,26 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
 
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
+        if window.label() == "capture"
+            || window.label().starts_with("capture-pin-")
+            || window.label().starts_with("capture-scan-")
+        {
+            let app = window.app_handle().clone();
+            let label = window.label().to_owned();
+            tauri::async_runtime::spawn_blocking(move || {
+                if label.starts_with("capture-pin-") {
+                    if let Err(error) = super::capture_runtime::forget_pin(&app, &label, None) {
+                        super::capture_runtime::report_capture_error(
+                            &app,
+                            &format!("钉图关闭失败：{error}"),
+                        );
+                        return;
+                    }
+                }
+                super::capture_runtime::close(&app, &label)
+            });
+            return;
+        }
         if matches!(window.label(), "vision" | "ocr") {
             let surface = ReferenceSurface::for_window(window.label());
             let app = window.app_handle().clone();
@@ -1251,7 +1308,7 @@ fn cursor_monitor_geometry(app: &AppHandle) -> Result<(PhysicalPoint, MonitorGeo
     Ok((point, monitor_geometry_at_point(app, point)?))
 }
 
-fn physical_window_size(logical: (f64, f64), scale: f64) -> (i32, i32) {
+pub(crate) fn physical_window_size(logical: (f64, f64), scale: f64) -> (i32, i32) {
     let scale = if scale.is_finite() && scale > 0.0 {
         scale
     } else {
@@ -1271,7 +1328,7 @@ fn clamp_axis(start: i32, minimum: i32, maximum: i32, size: i32) -> i32 {
     }
 }
 
-fn popup_position(
+pub(crate) fn popup_position(
     cursor: PhysicalPoint,
     monitor: (i32, i32, i32, i32),
     window: (i32, i32),
@@ -2169,6 +2226,7 @@ mod tests {
     #[test]
     fn filters_shortcuts_and_tray_entries_by_feature_enablement() {
         let mut settings = AppSettings::default();
+        settings.capture.enabled = false;
         settings.vision.enabled = false;
         settings.screenshot_translation.enabled = false;
         settings.prompt_optimizer.enabled = false;
@@ -2203,6 +2261,7 @@ mod tests {
                 ("vision", "Vision", "F3"),
                 ("screenshot", "OCR翻译", "F4"),
                 ("optimizer", "提示词优化", "Control+Alt+P"),
+                ("capture", "截图 / 录制 / 扫码", "Control+Alt+S"),
             ]
         );
         let mut en = zh.clone();
@@ -2214,6 +2273,7 @@ mod tests {
                 ("vision", "Vision", "F3"),
                 ("screenshot", "OCR translation", "F4"),
                 ("optimizer", "Prompt optimization", "Control+Alt+P"),
+                ("capture", "Capture / Record / Scan", "Control+Alt+S"),
             ]
         );
         assert_eq!(tray_labels(InterfaceLanguage::Zh).settings, "设置");

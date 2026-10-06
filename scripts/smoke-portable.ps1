@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ExecutablePath = (Join-Path $PSScriptRoot '..\release\ScreenPilot-0.1.6-portable\ScreenPilot.exe'),
+    [string]$ExecutablePath = (Join-Path $PSScriptRoot '..\release\ScreenPilot-0.1.7-single-exe\ScreenPilot.exe'),
     [string]$ReportPath = (Join-Path $PSScriptRoot '..\release\portable-smoke.json')
 )
 

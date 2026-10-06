@@ -19,6 +19,7 @@ import { HistoryMenu } from '../history/history-menu'
 import { copyFor, translationLanguageOptions, translationMethodLabel } from '../../shared/ui-copy'
 import { syncDocumentTheme } from '../../shared/theme'
 import { nextTranslationGeneration } from './translation-generation'
+import { NoticeContent } from '../../shared/ui/top-notice'
 
 type TargetLanguage = TranslationLanguage
 
@@ -905,7 +906,7 @@ export function TranslatorPage() {
         <aside className="mx-3 mt-2 shrink-0 rounded-lg bg-white/95 px-3 py-2 text-[11px] text-red-600 shadow-md ring-1 ring-black/5 dark:bg-neutral-900/95 dark:text-red-400 dark:ring-white/10" role="alert">
           {settingsError === null ? null : (
             <div className="flex items-center gap-2">
-              <p className="min-w-0 flex-1 break-words">{settingsError}</p>
+              <div className="min-w-0 flex-1 break-words"><NoticeContent message={settingsError} language={interfaceLanguage} /></div>
               <button
                 type="button"
                 className="text-button h-6 shrink-0 px-1"
@@ -918,7 +919,7 @@ export function TranslatorPage() {
           )}
           {(['prepare', 'selection'] as const).map((kind) => listenerErrors[kind] === undefined ? null : (
             <div className="flex items-center gap-2" key={kind}>
-              <span className="min-w-0 flex-1 break-words">{recoveryCopy[kind]} {listenerErrors[kind]}</span>
+              <div className="min-w-0 flex-1 break-words"><NoticeContent message={`${recoveryCopy[kind]} ${listenerErrors[kind] ?? ''}`} language={interfaceLanguage} /></div>
               <button
                 type="button"
                 className="text-button h-6 shrink-0 px-1"

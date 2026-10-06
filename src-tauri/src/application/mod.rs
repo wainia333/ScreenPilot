@@ -1,7 +1,20 @@
+mod capture_cursor;
+mod capture_input;
+pub mod capture_native;
+pub mod capture_pin_handoff;
+mod capture_pin_render;
+mod capture_pins;
+mod capture_platform;
+pub mod capture_runtime;
+mod capture_scan;
+mod capture_scroll;
+pub mod capture_service;
+mod capture_video;
 pub mod commands;
 pub mod karakeep_retrieval;
 pub mod lifecycle;
 pub mod state;
+pub mod tray_popup;
 pub mod vision_agent;
 #[cfg(test)]
 mod vision_agent_tests;

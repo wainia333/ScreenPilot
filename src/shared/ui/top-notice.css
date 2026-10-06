@@ -1,0 +1,14 @@
+.top-notice-fixed { position: fixed; z-index: 100; }
+.save-success-toast:has(.top-notice-actions) { border-radius: 10px; }
+.top-notice-content { display: flex; align-items: center; gap: 8px; }
+.top-notice-body { flex: 1; min-width: 0; }
+.top-notice-heading { min-width: 0; line-height: 1.6; }
+.top-notice-message { min-width: 0; }
+.top-notice-dismiss { display: flex; flex: 0 0 24px; width: 24px; height: 24px; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 0; background: transparent; color: inherit; cursor: pointer; pointer-events: auto; }
+.top-notice-details-toggle { display: inline-block; vertical-align: baseline; border: 0; border-radius: 4px; padding: 0 4px; background: transparent; color: inherit; font: inherit; line-height: inherit; white-space: nowrap; cursor: pointer; pointer-events: auto; }
+.top-notice-actions { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 5px; pointer-events: auto; }
+.top-notice-actions button { border: 0; border-radius: 8px; padding: 4px 9px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.top-notice-actions button:hover, .top-notice-dismiss:hover, .top-notice-details-toggle:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.top-notice-actions button:focus-visible, .top-notice-dismiss:focus-visible, .top-notice-details-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.top-notice-details { margin-top: 6px; text-align: left; font-size: 11px; line-height: 1.5; pointer-events: auto; }
+.top-notice-details > pre { max-height: min(160px, 35vh); overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 6px; background: rgb(127 127 127 / 8%); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

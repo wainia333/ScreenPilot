@@ -1,0 +1,35 @@
+import { test, expect } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
+
+test('native capture settings use fixed tabs, save original FPS and have no launch header', async ({ page }) => {
+  await page.setViewportSize({ width: 980, height: 780 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '截图', exact: true }).click()
+  await expect(page.getByRole('tab')).toHaveCount(7)
+  await expect(page.getByRole('tab', { name: /OCR|翻译|剪贴板/u })).toHaveCount(0)
+  const tabs = page.getByRole('tablist')
+  const initial = await tabs.boundingBox()
+  await page.getByRole('combobox', { name: '直接拖选钉图', exact: true }).scrollIntoViewIfNeeded()
+  expect((await tabs.boundingBox())?.y).toBe(initial?.y)
+  await page.getByRole('tab', { name: '录制', exact: true }).click()
+  await page.getByRole('combobox', { name: '录制帧率' }).selectOption('16')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await page.getByRole('tab', { name: '基础', exact: true }).click()
+  await page.getByRole('tab', { name: '录制', exact: true }).click()
+  await expect(page.getByRole('combobox', { name: '录制帧率' })).toHaveValue('16')
+  await expect(page.getByRole('button', { name: /开始截图|开始录制|框选扫码/u })).toHaveCount(0)
+  await expect(page).not.toHaveURL(/route=capture/u)
+  // BrowserPreview deliberately stores settings in memory only; start a fresh
+  // view for the visual artifact after verifying saved recording preferences.
+  await page.reload()
+  await page.getByRole('button', { name: '截图', exact: true }).click()
+  await page.getByRole('tab', { name: '标注', exact: true }).click()
+  const results = await new AxeBuilder({ page }).analyze()
+  expect(results.violations).toEqual([])
+  await page.screenshot({ path: 'release/capture-native-preview/settings-annotation.png' })
+  await page.setViewportSize({ width: 680, height: 520 })
+  await page.getByRole('tab', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('combobox', { name: '图片格式' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})

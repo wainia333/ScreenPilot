@@ -32,6 +32,7 @@ impl SettingsStore {
             .map_err(|error| format!("Settings file is invalid: {error}"))?;
         settings.migrate_provider_protocols(&raw);
         settings.migrate_missing_ai_toggles(&raw);
+        settings.migrate_capture_shortcut(&raw);
         settings.migrate_prompt_defaults();
         settings.normalize_ai_options();
         // Older releases allowed this invalid combination to be persisted.
@@ -47,7 +48,49 @@ impl SettingsStore {
     }
 
     pub fn load_or_recover(&self) -> Result<(AppSettings, Option<String>), String> {
-        self.load_or_recover_with(|| self.quarantine_invalid())
+        let (mut settings, mut notice) = self.load_or_recover_with(|| self.quarantine_invalid())?;
+        if let Err(error) = self.migrate_capture_tools(&mut settings) {
+            let message = format!("旧截图工具设置迁移失败，原文件已保留：{error}");
+            notice =
+                Some(notice.map_or(message.clone(), |previous| format!("{previous}\n{message}")));
+        }
+        Ok((settings, notice))
+    }
+
+    fn migrate_capture_tools(&self, settings: &mut AppSettings) -> Result<(), String> {
+        // Presence, even an empty object, means settings.json is authoritative.
+        let raw = fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if raw
+            .as_ref()
+            .and_then(|v| v.get("capture"))
+            .and_then(|v| v.get("tools"))
+            .is_some()
+        {
+            return Ok(());
+        }
+        let legacy = self
+            .path
+            .parent()
+            .ok_or("配置目录不存在")?
+            .join("capture/tools.json");
+        if !legacy.try_exists().map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        if fs::metadata(&legacy).map_err(|e| e.to_string())?.len() > 128_000 {
+            return Err("工具设置过大".into());
+        }
+        let mut value = serde_json::from_slice(&fs::read(&legacy).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        crate::domain::capture::strip_removed_tools(&mut value);
+        crate::domain::capture::validate_tools(&value)?;
+        let mut migrated = settings.clone();
+        migrated.capture.tools = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        self.save(&migrated)?;
+        *settings = migrated;
+        // Keep the original as an upgrade backup; it is never read or written again.
+        Ok(())
     }
 
     fn load_or_recover_with<F>(
@@ -234,6 +277,31 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_pins_survive_restart_and_settings_export_import() {
+        use crate::domain::settings::SettingsExport;
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut settings = AppSettings::default();
+        settings.capture.pins_visible = false;
+        store.save(&settings).unwrap();
+        let restarted = SettingsStore::new(directory.path()).load().unwrap();
+        assert!(!restarted.capture.pins_visible);
+        let exported = SettingsExport {
+            export_type: "screenpilot-settings-export".into(),
+            schema_version: 1,
+            app_version: "0.1.6".into(),
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            includes_secrets: false,
+            settings: restarted,
+            secrets: None,
+        };
+        let imported: SettingsExport =
+            serde_json::from_slice(&serde_json::to_vec(&exported).unwrap()).unwrap();
+        store.save(&imported.settings).unwrap();
+        assert!(!store.load().unwrap().capture.pins_visible);
+    }
 
     fn write_settings(path: &Path, settings: &AppSettings) {
         fs::write(
@@ -535,5 +603,232 @@ mod tests {
             loaded.screenshot_translation.ocr_method,
             crate::domain::settings::OcrMethod::Chaoxing
         );
+    }
+
+    #[test]
+    fn upgrading_capture_never_quarantines_an_existing_shortcut_collision() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().remove("capture");
+        raw["shortcuts"]["vision"] = serde_json::json!("Ctrl+Alt+S");
+        fs::write(store.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let (loaded, notice) = store.load_or_recover().unwrap();
+        assert_eq!(loaded.shortcuts.vision, "Ctrl+Alt+S");
+        assert_eq!(loaded.capture.shortcut, "");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn retired_capture_preferences_never_quarantine_existing_main_or_legacy_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        let legacy_tools = serde_json::json!({"highlighter":{"width":15},"pen":{"width":22},"layout":[{"key":"highlighter","mode":"show"},{"key":"save","mode":"show"},{"key":"confirm","mode":"show"}]});
+        raw["capture"]["tools"] = legacy_tools.clone();
+        fs::write(store.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let (loaded, notice) = store.load_or_recover().unwrap();
+        assert!(notice.is_none());
+        assert!(!loaded.capture.tools.contains_key("highlighter"));
+        assert_eq!(loaded.capture.tools["pen"]["width"], 22);
+        store.save(&loaded).unwrap();
+        assert!(!fs::read_to_string(store.path())
+            .unwrap()
+            .contains("highlighter"));
+        raw["capture"].as_object_mut().unwrap().remove("tools");
+        fs::write(store.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let legacy = directory.path().join("capture/tools.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, legacy_tools.to_string()).unwrap();
+        let (migrated, notice) = store.load_or_recover().unwrap();
+        assert!(notice.is_none());
+        assert_eq!(migrated.capture.tools, loaded.capture.tools);
+        assert_eq!(
+            fs::read_to_string(legacy).unwrap(),
+            legacy_tools.to_string()
+        );
+    }
+
+    #[test]
+    fn pin_close_switches_persist_and_export_independently_in_main_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        for (esc, double_click) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut settings = AppSettings::default();
+            settings
+                .capture
+                .native_options
+                .insert("pin_escape_close".into(), esc.into());
+            settings
+                .capture
+                .native_options
+                .insert("pin_double_click_close".into(), double_click.into());
+            store.save(&settings).unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+            assert_eq!(raw["capture"]["nativeOptions"]["pin_escape_close"], esc);
+            assert_eq!(
+                raw["capture"]["nativeOptions"]["pin_double_click_close"],
+                double_click
+            );
+            let (loaded, notice) = store.load_or_recover().unwrap();
+            assert!(notice.is_none());
+            assert_eq!(loaded, settings);
+            let export = crate::domain::settings::SettingsExport {
+                export_type: "screenpilot-settings".into(),
+                schema_version: 1,
+                app_version: "test".into(),
+                exported_at: "test".into(),
+                includes_secrets: false,
+                settings: loaded,
+                secrets: None,
+            };
+            let imported: crate::domain::settings::SettingsExport =
+                serde_json::from_slice(&serde_json::to_vec(&export).unwrap()).unwrap();
+            assert_eq!(imported.settings, settings);
+            settings
+                .capture
+                .native_options
+                .insert("pin_escape_close".into(), "false".into());
+            assert!(store.save(&settings).is_err());
+            assert_eq!(store.load().unwrap(), imported.settings);
+        }
+    }
+
+    #[test]
+    fn jpeg_quality_values_persist_in_main_settings_without_recovery_or_data_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        for quality in [0, 85, 100] {
+            let mut settings = AppSettings::default();
+            settings
+                .capture
+                .native_options
+                .insert("screenshot_format".into(), serde_json::json!("JPG"));
+            settings
+                .capture
+                .native_options
+                .insert("screenshot_quality".into(), serde_json::json!(quality));
+            store.save(&settings).unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+            assert_eq!(
+                raw["capture"]["nativeOptions"]["screenshot_quality"],
+                quality
+            );
+            let (loaded, notice) = store.load_or_recover().unwrap();
+            assert!(notice.is_none());
+            assert_eq!(loaded, settings);
+        }
+    }
+
+    #[test]
+    fn retired_pin_switches_are_removed_without_resetting_saved_or_imported_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        raw["capture"]["pinsVisible"] = serde_json::json!(false);
+        raw["capture"]["nativeOptions"] = serde_json::json!({
+            "pin_hover_buttons": true, "pin_auto_border": false, "theme_color": "#123456", "pin_escape_close": false
+        });
+        fs::write(store.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let (settings, notice) = store.load_or_recover().unwrap();
+        assert!(notice.is_none());
+        assert!(!settings.capture.pins_visible);
+        assert_eq!(settings.capture.native_options.len(), 2);
+        assert_eq!(settings.capture.native_options["theme_color"], "#123456");
+        assert_eq!(settings.capture.native_options["pin_escape_close"], false);
+        store.save(&settings).unwrap();
+        assert_eq!(store.load().unwrap(), settings);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert!(saved["capture"]["nativeOptions"]
+            .get("pin_hover_buttons")
+            .is_none());
+        assert!(saved["capture"]["nativeOptions"]
+            .get("pin_auto_border")
+            .is_none());
+        let legacy_export = serde_json::json!({
+            "type": "screenpilot-settings", "schemaVersion": 1, "appVersion": "test",
+            "exportedAt": "test", "includesSecrets": false, "settings": raw, "secrets": null
+        });
+        let imported: crate::domain::settings::SettingsExport =
+            serde_json::from_value(legacy_export).unwrap();
+        imported.settings.validate().unwrap();
+        assert_eq!(imported.settings, settings);
+    }
+
+    #[test]
+    fn capture_tools_migrate_once_into_the_exportable_main_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        raw["capture"].as_object_mut().unwrap().remove("tools");
+        fs::write(store.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let legacy = directory.path().join("capture/tools.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let tools = serde_json::json!({"pen":{"width":22,"color":"#123456"},"layout":[{"key":"confirm","mode":"show"}],"lastRegion":{"x":-900,"y":20,"width":500,"height":300}});
+        fs::write(&legacy, tools.to_string()).unwrap();
+        let (settings, notice) = store.load_or_recover().unwrap();
+        assert!(notice.is_none());
+        assert_eq!(
+            serde_json::to_value(&settings.capture.tools).unwrap(),
+            tools
+        );
+        assert_eq!(store.load().unwrap(), settings);
+        let export = crate::domain::settings::SettingsExport {
+            export_type: "screenpilot-settings".into(),
+            schema_version: 1,
+            app_version: "test".into(),
+            exported_at: "test".into(),
+            includes_secrets: false,
+            settings: settings.clone(),
+            secrets: None,
+        };
+        let imported: crate::domain::settings::SettingsExport =
+            serde_json::from_slice(&serde_json::to_vec(&export).unwrap()).unwrap();
+        assert_eq!(imported.settings, settings);
+        // An imported empty tools object is authoritative; never resurrect the backup.
+        store.save(&AppSettings::default()).unwrap();
+        assert!(store.load_or_recover().unwrap().0.capture.tools.is_empty());
+        assert_eq!(fs::read_to_string(legacy).unwrap(), tools.to_string());
+    }
+
+    #[test]
+    fn invalid_legacy_tools_do_not_quarantine_the_main_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        raw["capture"].as_object_mut().unwrap().remove("tools");
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        fs::write(store.path(), &bytes).unwrap();
+        fs::create_dir_all(directory.path().join("capture")).unwrap();
+        fs::write(
+            directory.path().join("capture/tools.json"),
+            r#"{"ocr":true}"#,
+        )
+        .unwrap();
+        let (settings, notice) = store.load_or_recover().unwrap();
+        assert_eq!(settings, AppSettings::default());
+        assert!(notice.unwrap().contains("迁移失败"));
+        assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn native_capture_preferences_survive_disk_reload_without_changing_other_features() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path());
+        let mut settings = AppSettings::default();
+        settings
+            .capture
+            .native_options
+            .insert("gif_fps".into(), serde_json::json!(16));
+        settings
+            .capture
+            .native_options
+            .insert("capture_engine".into(), serde_json::json!("mss"));
+        store.save(&settings).unwrap();
+        let reopened = SettingsStore::new(directory.path()).load().unwrap();
+        assert_eq!(reopened, settings);
     }
 }

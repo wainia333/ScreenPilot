@@ -1,16 +1,46 @@
+# Dependencies and generated build files
 node_modules/
-dist/
-coverage/
-playwright-report/
-test-results/
-src-tauri/target/
-src-tauri/gen/
+/dist/
+target/
+/src-tauri/gen/
+*.tsbuildinfo
+.vite/
+
+# Test reports and local verification artifacts (keep test source and snapshots)
+/coverage/
+/playwright-report/
+/test-results/
+/.task/
+__pycache__/
+.pytest_cache/
+
+# Release executables, installers and old distributions
+/release/
+
+# Runtime user data, portable settings and recovery backups
+ScreenPilot-data/
+ScreenPilot-pins/
+/settings.json
+/settings.json.next
+/settings.json.previous
+/settings.invalid*.json
+/ScreenPilot-settings.json
+/capture/tools.json
+
+# Local reports, logs and environment configuration
+/综合审查.md
 *.log
 *.local
 .env
 .env.*
 !.env.example
-/综合审查.md
 docs
-release
-tests
+
+# Private signing certificate bundles
+*.pfx
+*.p12
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

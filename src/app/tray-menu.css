@@ -1,0 +1,3 @@
+body:has(.sp-tray-menu-surface), body:has(.sp-tray-menu-surface) #root { background: transparent !important; overflow: hidden; }
+.sp-tray-menu-surface { position: fixed; inset: 0; background: transparent; }
+.sp-tray-menu-surface .sp-popup-menu { position: absolute; }

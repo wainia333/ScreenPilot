@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "algorithm": "sha256",
+  "normalization": "utf8-lf",
+  "files": [
+    {
+      "path": "hdrcapture/src/d3d11.rs",
+      "sha256": "f4d9dbda4c173e02c10d69da31869a42ed0e2ceea64adb80ffb55b9285f32685"
+    },
+    {
+      "path": "hdrcapture/src/dxgi_duplication_api.rs",
+      "sha256": "739d298fedaaea4a41a1d90d1e9eede6935c2fc6ec51d44c1f9fd70c0559cb9e"
+    },
+    {
+      "path": "hdrcapture/src/lib.rs",
+      "sha256": "3b676d30b35fa2ae791e4dbe9f74059816d00fbb876e810927352a1e99733025"
+    },
+    {
+      "path": "hdrcapture/src/monitor.rs",
+      "sha256": "7fd12fd23c517a423f40b46fd87cd1ad6b03e0132feb89bb0f0b6d5d8f8611c6"
+    },
+    {
+      "path": "hdrcapture/src/hdr_capture/capture.rs",
+      "sha256": "728b4e140d59280d221a956eb81d0b8236d30dcc37a67e96bc2c5b3bf70ebcc6"
+    },
+    {
+      "path": "hdrcapture/src/hdr_capture/color.rs",
+      "sha256": "d275e2c3d341f366ea48802d85ada06ba13158b0c960fa3554a82962bb3072f8"
+    },
+    {
+      "path": "hdrcapture/src/hdr_capture/display.rs",
+      "sha256": "1bdfbd6588e62e8492d8b1947ee994ce89483cdc37de904afa2648f4746623e9"
+    },
+    {
+      "path": "hdrcapture/src/hdr_capture/gpu.rs",
+      "sha256": "3bc29b4ad6956967adfff05c3fc143120ad6b5924d271f18acc7b0fac3610458"
+    },
+    {
+      "path": "hdrcapture/src/hdr_capture/mod.rs",
+      "sha256": "4d43d40eac8a73a6539701ee8b0973a1a9b73eec2b993e3051ec2c22d42f0e53"
+    },
+    {
+      "path": "inputhub/src/engine.rs",
+      "sha256": "fcade5758346bcae84e55cebd954e5a14861ee947db14aeff9683f238d3d32fa"
+    },
+    {
+      "path": "inputhub/src/hooks.rs",
+      "sha256": "4ed6428c638d1580eb2cd1ddc895db739662488c70f07a2afb59a3d4983d9711"
+    },
+    {
+      "path": "inputhub/src/lib.rs",
+      "sha256": "928cc132e71bce149e4e9301e96f5178a5b11ae77f86ec7164bef388488091f4"
+    },
+    {
+      "path": "inputhub/src/engine/tests.rs",
+      "sha256": "0494067eadf8b2435e257c21bd41888c52faa50f8b14b7e99a2e4020a83553dd"
+    },
+    {
+      "path": "gifrecorder/src/capture.rs",
+      "sha256": "0232b4885ca77c5cb8cc5d0503efe2765e7c5b3461c13826583912cb896b6848"
+    },
+    {
+      "path": "gifrecorder/src/decoder.rs",
+      "sha256": "f7e513c14fd28153586a5d7a8d4837369a5de1f18fab6053b1e1918ebdff85ed"
+    },
+    {
+      "path": "gifrecorder/src/frame_source.rs",
+      "sha256": "a345a652346540e3fc7d826ad0a47746171855e3b409d87e44693db627395e9c"
+    },
+    {
+      "path": "gifrecorder/src/frame_store.rs",
+      "sha256": "7bb3b061c0882d3976f6177ca6603076aafb8558b038506e75119a21086c91e6"
+    },
+    {
+      "path": "gifrecorder/src/gif_export.rs",
+      "sha256": "6a9dcf5d7fc399db49bc52d577759ad7ccacff9c4cb2098711bb97b0205c8650"
+    },
+    {
+      "path": "gifrecorder/src/jpeg.rs",
+      "sha256": "fbbf350cdf40e7bd40fb5e50e82f460bbbb0338baab6e539dfbcbd3619add882"
+    },
+    {
+      "path": "gifrecorder/src/lib.rs",
+      "sha256": "7cae52a60db9d54513d1e7fc0a0caef42d2fc40c18ce9c37540a932a0bba0f9e"
+    },
+    {
+      "path": "gifrecorder/src/recorder.rs",
+      "sha256": "47bd33d58be9def70d4fb2e088f4614196abdb2fbc1298b1a5b6b6c0cc4ad083"
+    },
+    {
+      "path": "gifrecorder/src/resize.rs",
+      "sha256": "c79d74ec2c12633274732e6f5cd29e2dcac4f7626e77779cba482437ae14dfff"
+    },
+    {
+      "path": "longstitch/src/error.rs",
+      "sha256": "847f8bc6ec225d367e68dc06c4ebe40ecaa3cddce3b4114108ea40bf75adaeb9"
+    },
+    {
+      "path": "longstitch/src/hash.rs",
+      "sha256": "0b5c3017c26a59ea265c3e0a4df6f798c4e6dbaf9b71c616d29469f4b5ec94d2"
+    },
+    {
+      "path": "longstitch/src/lcs.rs",
+      "sha256": "e99dcd0d569a5e15b5dc59029c518bbf36751e4196e56bb94bf5a5c7aa6e40a3"
+    },
+    {
+      "path": "longstitch/src/lib.rs",
+      "sha256": "61c1ca857f1f8431db6840bb12f4aa6ef7e2304fc195caa4b2a42238f5f2caff"
+    },
+    {
+      "path": "longstitch/src/stitch.rs",
+      "sha256": "ba46f4775eb41e50642cbc5824bc26fabe784217585c37fc1ab439a43d4dca0c"
+    }
+  ]
+}

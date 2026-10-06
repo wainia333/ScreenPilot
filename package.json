@@ -1,7 +1,7 @@
 {
   "name": "screenpilot",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "ScreenPilot desktop screen assistant",
   "author": "Wainia",
   "type": "module",
@@ -24,7 +24,7 @@
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
-    "release:prepare": "npm run verify && npm run build:ui",
+    "release:prepare": "npm run verify && npm run capture:verify && npm run build:ui",
     "release": "tauri build",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "lint": "eslint .",
@@ -39,7 +39,9 @@
     "smoke:windows": "pwsh -NoProfile -File scripts/smoke-windows.ps1",
     "release:signed:windows": "pwsh -NoProfile -File scripts/build-signed-windows-release.ps1",
     "verify:signatures:windows": "pwsh -NoProfile -File scripts/verify-authenticode.ps1",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "capture:test": "node scripts/test-capture-rust.mjs",
+    "capture:verify": "node scripts/verify-capture-native.mjs"
   },
   "dependencies": {
     "@tailwindcss/typography": "0.5.19",
@@ -47,6 +49,7 @@
     "@tauri-apps/plugin-clipboard-manager": "2.3.2",
     "katex": "0.18.1",
     "lucide-react": "1.27.0",
+    "polygon-clipping": "0.15.7",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-markdown": "10.1.0",

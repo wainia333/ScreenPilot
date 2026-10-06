@@ -1,6 +1,14 @@
 mod application;
+#[cfg(debug_assertions)]
+pub use application::capture_pin_handoff::check_native_pin_follower;
+#[cfg(debug_assertions)]
+mod capture_click_check;
+#[cfg(debug_assertions)]
+pub mod capture_handoff_check;
 mod domain;
 mod infrastructure;
+#[cfg(debug_assertions)]
+pub mod tray_menu_check;
 #[cfg(target_os = "windows")]
 mod native_freeze {
     include!(concat!(env!("OUT_DIR"), "/native_freeze_runtime.rs"));
@@ -39,6 +47,17 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .invoke_handler(tauri::generate_handler![
+            capture_open,
+            capture_snapshot,
+            capture_ready,
+            capture_action,
+            capture_frame,
+            capture_export,
+            capture_export_cancel,
+            application::tray_popup::tray_menu_snapshot,
+            application::tray_popup::tray_menu_ready,
+            application::tray_popup::tray_menu_dismiss,
+            application::tray_popup::tray_menu_action,
             open_external,
             settings_load,
             integration_karakeep_configured,
@@ -120,6 +139,10 @@ pub fn run() {
             )
             .map_err(std::io::Error::other)?;
             let store = SettingsStore::new(&directories.configuration);
+            app.manage(application::capture_service::CaptureManager::new(
+                directories.configuration.join("capture"),
+                directories.data.clone(),
+            ));
             let (settings, recovery_notice) =
                 store.load_or_recover().map_err(std::io::Error::other)?;
             let images = ImageStore::new(&directories.data, &directories.cache)
@@ -164,13 +187,15 @@ pub fn run() {
                     .set_startup_notice(startup_notices.join("\n\n"));
             }
             lifecycle::startup_window(app.handle()).map_err(std::io::Error::other)?;
+            application::capture_service::warm_up(app.handle().clone());
             Ok(())
         })
         .on_window_event(lifecycle::handle_window_event)
         .build(tauri::generate_context!())
         .expect("ScreenPilot failed to build")
-        .run(|_, event| {
+        .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                application::capture_service::cancel(app);
                 #[cfg(target_os = "windows")]
                 crate::platform::windows::altsnap::stop();
             }

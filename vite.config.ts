@@ -31,7 +31,7 @@ export default defineConfig({
   server: {
     strictPort: true,
     watch: {
-      ignored: ['**/src-tauri/target/**'],
+      ignored: ['**/src-tauri/target/**', '**/release/**', '**/.task/**', '**/ScreenPilot-data/**'],
     },
   },
   build: {
@@ -89,6 +89,7 @@ export default defineConfig({
         'src/features/history/**/*.{ts,tsx}',
         'src/features/prompt-optimizer/**/*.{ts,tsx}',
         'src/features/settings/**/*.{ts,tsx}',
+        'src/features/capture/**/*.{ts,tsx}',
         'src/features/translator/**/*.{ts,tsx}',
         'src/features/vision/**/*.{ts,tsx}',
         'src/shared/**/*.{ts,tsx}',

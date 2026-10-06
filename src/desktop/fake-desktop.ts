@@ -1,4 +1,5 @@
 import { DEFAULT_SETTINGS } from '../features/settings/defaults'
+import { PreviewCapturePort } from '../features/capture/preview-capture'
 import { sanitizeSettings } from '../features/settings/sanitize'
 import type { AppSettings, ProviderSettings, SettingsExport, SettingsSecrets } from '../features/settings/types'
 import type {
@@ -35,11 +36,12 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function mergePatch(current: unknown, patch: unknown): unknown {
+function mergePatch(current: unknown, patch: unknown, path = 'settings'): unknown {
   if (!isRecord(current) || !isRecord(patch)) return structuredClone(patch)
-  const merged: Record<string, unknown> = structuredClone(current)
+  let merged: Record<string, unknown> = structuredClone(current)
   Object.entries(patch).forEach(([key, value]) => {
-    merged[key] = key in merged ? mergePatch(merged[key], value) : structuredClone(value)
+    if (value === null && (path === 'settings.capture.nativeOptions' || path === 'settings.capture.tools' || path.startsWith('settings.capture.tools.'))) { merged = Object.fromEntries(Object.entries(merged).filter(([field]) => field !== key)); return }
+    merged[key] = key in merged ? mergePatch(merged[key], value, `${path}.${key}`) : structuredClone(value)
   })
   return merged
 }
@@ -51,6 +53,7 @@ function hasPatchConflict(base: unknown, current: unknown, patch: unknown): bool
 }
 
 export class FakeDesktopPort implements DesktopPort {
+  readonly capture = new PreviewCapturePort()
   private integrationConfigured = false
   readonly karakeepTestCalls: { baseUrl: string; apiKey?: string }[] = []
   karakeepConfigured = () => Promise.resolve(this.integrationConfigured)

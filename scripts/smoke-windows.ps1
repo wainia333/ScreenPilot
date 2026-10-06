@@ -4,7 +4,8 @@ param(
     [ValidateRange(1, 60)]
     [int]$StartupTimeoutSeconds = 20,
     [switch]$AllowUnsupportedPlatformSkip,
-    [switch]$AllowExistingInstanceSkip
+    [switch]$AllowExistingInstanceSkip,
+    [switch]$RequireCaptureRuntime
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,7 +106,12 @@ function Get-RunningScreenPilotInstance {
         }
     }
 
-    return @($matches | Sort-Object -Property ProcessId -Unique)
+    # CIM can omit an elevated process on restricted desktops. A known process
+    # name is still enough to avoid handing the smoke launch to that instance.
+    $nameMatches = @(Get-Process -Name 'screenpilot*' -ErrorAction SilentlyContinue | ForEach-Object {
+        [pscustomobject]@{ ProcessId = $_.Id; Name = $_.ProcessName; ExecutablePath = '' }
+    })
+    return @(@($matches) + $nameMatches | Sort-Object -Property ProcessId -Unique)
 }
 
 $existingInstances = @(Get-RunningScreenPilotInstance -TargetExecutable $resolvedExecutable)
@@ -154,6 +160,10 @@ try {
             $pendingParentIds = $nextParentIds
         }
         $webView = $descendants | Where-Object { $_.Name -ieq 'msedgewebview2.exe' } | Select-Object -First 1
+        if ($RequireCaptureRuntime) {
+            $legacy = $descendants | Where-Object { $_.Name -match '(?i)^(python|pythonw|ffmpeg)\.exe$' }
+            if ($legacy) { throw 'SMOKE_FAILED: 截图仍启动了外部运行时。' }
+        }
         if ($null -ne $webView) {
             $consecutiveWebViewProbes += 1
             $webViewProcessId = [int]$webView.ProcessId
@@ -183,4 +193,7 @@ finally {
         }
         $process.Dispose()
     }
+}
+if ($RequireCaptureRuntime) {
+    Write-Host 'CAPTURE_RUNTIME_PASSED: 启动进程树不包含 Python、Qt 截图侧车或 FFmpeg。截图交互需另行运行 capture 测试。'
 }

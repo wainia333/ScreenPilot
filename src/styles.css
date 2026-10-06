@@ -167,6 +167,7 @@ select:focus-visible {
 }
 
 .settings-window {
+  --sp-settings-field-width: 187.5px;
   position: relative;
   display: grid;
   grid-template-columns: 168px 1fr;
@@ -456,6 +457,13 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.setting-row__label-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
 .setting-row__description {
   color: var(--sp-text-muted);
   font-size: 11px;
@@ -552,10 +560,10 @@ select:focus-visible {
 }
 
 .settings-window .select-field {
-  width: 187.5px;
+  width: var(--sp-settings-field-width);
   min-width: 0;
   max-width: 100%;
-  flex: 0 1 187.5px;
+  flex: 0 1 var(--sp-settings-field-width);
 }
 
 .connection-input {
@@ -1055,7 +1063,7 @@ select:focus-visible {
   max-width: 100%;
   padding: 8px 18px;
   border: 1px solid color-mix(in srgb, var(--sp-success) 42%, var(--sp-border-strong));
-  border-radius: 999px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--sp-success) 12%, var(--sp-surface-raised));
   box-shadow: 0 8px 20px rgb(40 32 28 / 14%);
   color: var(--sp-success);

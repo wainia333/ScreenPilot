@@ -1,5 +1,6 @@
 import {
   Aperture,
+  Camera,
   BookMarked,
   Bot,
   Info,
@@ -19,6 +20,7 @@ import { GeneralSection } from './sections/general-section'
 import { OptimizerSection } from './sections/optimizer-section'
 import { ProvidersSection, type ProviderKeyTextDrafts } from './sections/providers-section'
 import { ScreenshotSection } from './sections/screenshot-section'
+import { CaptureSection, CaptureSettingsNavigation } from './sections/capture-section'
 import { TranslationSection } from './sections/translation-section'
 import { IntegrationsSection } from './sections/integrations-section'
 import { VisionSection } from './sections/vision-section'
@@ -34,6 +36,7 @@ import { useWindowDrag } from '../../shared/hooks/use-window-drag'
 import { copyFor, type UiCopy } from '../../shared/ui-copy'
 import { syncDocumentTheme } from '../../shared/theme'
 import { ModalDialog } from '../../shared/ui/modal-dialog'
+import { TopNotice } from '../../shared/ui/top-notice'
 import { AltSnapSection } from './sections/altsnap-section'
 import {
   ADAPTER_CREDENTIALS,
@@ -42,7 +45,7 @@ import {
   type AdapterCredentialId,
 } from './adapter-credential-specs'
 
-type Section = 'integrations' | 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'altsnap' | 'providers' | 'about'
+type Section = 'capture' | 'integrations' | 'general' | 'translation' | 'screenshot' | 'vision' | 'optimizer' | 'altsnap' | 'providers' | 'about'
 type DialogState = 'none' | 'close' | 'import'
 type SettingsOperation = 'directory' | 'export' | 'import'
 type StatusTone = 'status' | 'error'
@@ -79,6 +82,7 @@ const navigation = [
   { id: 'general', label: 'navGeneral', icon: Settings2 },
   { id: 'translation', label: 'navTranslation', icon: Languages },
   { id: 'screenshot', label: 'navScreenshot', icon: ScanText },
+  { id: 'capture', label: 'navCapture', icon: Camera },
   { id: 'vision', label: 'navVision', icon: Aperture },
   { id: 'optimizer', label: 'navOptimizer', icon: Sparkles },
   { id: 'altsnap', label: 'navAltSnap', icon: Move },
@@ -99,7 +103,8 @@ function diffValue(base: unknown, next: unknown): unknown {
   if (JSON.stringify(base) === JSON.stringify(next)) return undefined
   if (isRecord(base) && isRecord(next)) {
     const patch: Record<string, unknown> = {}
-    Object.keys(next).forEach((key) => {
+    new Set([...Object.keys(base), ...Object.keys(next)]).forEach((key) => {
+      if (!(key in next)) { patch[key] = null; return }
       const value = diffValue(base[key], next[key])
       if (value !== undefined) patch[key] = value
     })
@@ -244,6 +249,7 @@ function settingsIssueMessage(issue: SettingsIssue | undefined, t: UiCopy): stri
 }
 
 function sectionForIssuePath(path: string): Section {
+  if (path.startsWith('capture.')) return 'capture'
   if (path.startsWith('karakeep.')) return 'integrations'
   if (path.startsWith('providers.')) return 'providers'
   if (path.startsWith('credentials.')) return 'screenshot'
@@ -272,6 +278,7 @@ function mergeSavedProviderKeyCounts(current: AppSettings, saved: AppSettings): 
 }
 
 export function SettingsPage({ navigationRequest = null, onNavigationRequestResolved }: SettingsPageProps) {
+  const [captureTab, setCaptureTab] = useState('basic')
   const desktop = useDesktop()
   const beginWindowDrag = useWindowDrag()
   const [section, setSection] = useState<Section>('general')
@@ -359,6 +366,9 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
       phase: 'visible',
       tone,
     })
+    // Errors may have expandable diagnostics; keep them until dismissal or a
+    // subsequent action instead of hiding them while the user reads details.
+    if (tone === 'error') return
     saveSuccessToastTimer.current = setTimeout(() => {
       saveSuccessToastTimer.current = null
       if (saveSuccessToastSequence.current !== key) return
@@ -719,6 +729,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
     if (isNavigation) void acknowledgeNavigation(false)
     const focusPath = failure?.focusPath ?? failure?.issues?.[0]?.path ?? '__settings-save__'
     setSection(sectionForIssuePath(focusPath))
+    if (focusPath.startsWith('capture.')) setCaptureTab('basic')
     setFocusIssuePath(focusPath)
   }, [acknowledgeNavigation, closeSaveFailure])
   const restoreDraft = useCallback(() => {
@@ -882,6 +893,7 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
         onOpenCredentials={() => setSection('screenshot')}
       />
     ),
+    capture: <CaptureSection settings={draft} onChange={setDraft} tab={captureTab} saving={saving} />,
     screenshot: (
       <ScreenshotSection
         settings={draft}
@@ -993,18 +1005,8 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
             <X size={16} />
           </button>
         </header>
+        {section === 'capture' && <CaptureSettingsNavigation value={captureTab} onChange={setCaptureTab} language={draft.language} />}
         <div className="settings-scroll">
-          {issues.length === 0 ? null : (
-            <div className="validation-banner" role="alert">{settingsIssueMessage(issues[0], t)}</div>
-          )}
-          {status === null ? null : (
-            <div
-              className={statusTone === 'error' ? 'validation-banner' : 'status-banner'}
-              role={statusTone === 'error' ? 'alert' : 'status'}
-            >
-              {status}
-            </div>
-          )}
           {content[section]}
         </div>
         <footer className="settings-footer">
@@ -1027,24 +1029,11 @@ export function SettingsPage({ navigationRequest = null, onNavigationRequestReso
           </button>
         </footer>
       </section>
-      <div
-        className="save-success-toast-region"
-        role={saveSuccessToast?.tone === 'error' ? 'alert' : 'status'}
-        aria-live={saveSuccessToast?.tone === 'error' ? 'assertive' : 'polite'}
-        aria-atomic="true"
-        aria-label={saveSuccessToast?.message}
-      >
-        {saveSuccessToast === null ? null : (
-          <div
-            key={saveSuccessToast.key}
-            className={`save-success-toast${saveSuccessToast.tone === 'error' ? ' is-error' : ''}${saveSuccessToast.phase === 'leaving' ? ' is-leaving' : ''}`}
-            data-toast-sequence={saveSuccessToast.key}
-            data-toast-phase={saveSuccessToast.phase}
-          >
-            {saveSuccessToast.message}
-          </div>
-        )}
-      </div>
+      <TopNotice message={saveSuccessToast?.message ?? status ?? (issues[0] ? settingsIssueMessage(issues[0], t) : null)}
+        language={language}
+        tone={saveSuccessToast?.tone ?? (status ? statusTone : issues.length ? 'error' : 'status')}
+        sequence={saveSuccessToast?.key} phase={saveSuccessToast?.phase}
+        onDismiss={status ? () => setStatus(null) : saveSuccessToast?.tone === 'error' ? dismissSaveSuccessToast : undefined} />
       {dialog === 'close' ? (
         <ModalDialog
           titleId="close-dialog-title"

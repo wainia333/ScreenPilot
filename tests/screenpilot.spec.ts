@@ -543,7 +543,7 @@ async function settingsNavigationKeyframes(page: Page) {
   })
 }
 
-test('settings supports nine sections, unsaved close choices and accessible layout', async ({ page }) => {
+test('settings supports ten sections, unsaved close choices and accessible layout', async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 620 })
   await installVisionTauriMock(page, undefined, true, undefined, 0, 0, 0, '', false, {}, 'microsoft', 'main')
   await page.goto('/')
@@ -567,10 +567,10 @@ test('settings supports nine sections, unsaved close choices and accessible layo
   await expect(savedDot).toHaveCSS('background-color', 'rgb(52, 118, 86)')
   await expectEdgeSafeFrame(page.locator('.settings-window'))
   await expect(page.locator('.settings-footer').getByRole('button', { name: '保存' })).toBeVisible()
-  await expect.soft(settingsNavigation.getByRole('button')).toHaveCount(9)
+  await expect.soft(settingsNavigation.getByRole('button')).toHaveCount(10)
   expect.soft(await settingsNavigation.getByRole('button').evaluateAll((buttons) => (
     buttons.map((button) => button.textContent.trim())
-  ))).toEqual(['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于'])
+  ))).toEqual(['常规', '翻译', 'OCR', '截图', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于'])
   const settingsFooter = page.locator('.settings-footer')
   const cancelSettings = settingsFooter.getByRole('button', { name: '取消' })
   await expect(cancelSettings).toBeVisible()
@@ -651,7 +651,7 @@ test('settings removes row help text and preserves the bottom AltSnap instructio
 test('A06 settings contrast stays accessible across themes and navigation states', async ({ page }) => {
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 680, height: 520 })
-  const sections = ['常规', '翻译', 'OCR', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于']
+  const sections = ['常规', '翻译', 'OCR', '截图', 'Vision', '提示词优化', 'AltSnap', 'KaraKeep', '模型提供商', '关于']
   const themes = [
     { radio: '浅色', documentTheme: 'light', colorScheme: 'light' },
     { radio: '深色', documentTheme: 'dark', colorScheme: 'dark' },
@@ -680,7 +680,7 @@ test('A06 settings contrast stays accessible across themes and navigation states
       await selected.click()
       await expect(selected).toHaveAttribute('aria-current', 'page')
       for (const dropdown of await page.getByRole('combobox').all()) {
-        expect((await dropdown.boundingBox())?.width).toBe(187.5)
+        expect((await dropdown.boundingBox())?.width).toBe(section === '截图' ? 274 : 187.5)
       }
 
       await expectAccessible(page)
@@ -2111,9 +2111,13 @@ test('screenshot archive failures warn without breaking capture and clean the te
 
   await expect(page.getByText(/ScreenPilot 视觉测试/)).toBeVisible()
   const archiveWarning = page.getByRole('status').filter({
-    hasText: /^截图已完成，但自动归档失败：synthetic access denied$/u,
+    has: page.locator('.top-notice-message'),
   })
-  await expect(archiveWarning).toHaveText('截图已完成，但自动归档失败：synthetic access denied')
+  await expect(archiveWarning.locator('.top-notice-message')).toHaveText('截图已完成，但自动归档失败：权限不足，请检查文件或目录权限')
+  await expect(archiveWarning.locator('pre')).toBeHidden()
+  await archiveWarning.getByText('详情', { exact: true }).click()
+  await expect(archiveWarning.locator('pre')).toBeVisible()
+  await expect(archiveWarning.locator('pre')).toHaveText('截图已完成，但自动归档失败：synthetic access denied')
   await expect.poll(async () => page.evaluate(() => {
     const state = (window as typeof window & {
       __SCREENPILOT_TEST__: { temporaryImageIds: string[] }

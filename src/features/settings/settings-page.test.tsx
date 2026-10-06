@@ -585,7 +585,7 @@ describe('SettingsPage', () => {
       await Promise.resolve()
     })
 
-    expect(screen.getByText('选择目录失败：synthetic directory failure')).toHaveAttribute('role', 'alert')
+    expect(screen.getByText('选择目录失败：synthetic directory failure').closest('.save-success-toast-region')).toHaveAttribute('role', 'alert')
     expect(chooseDirectory).toBeEnabled()
     expect(chooseDirectory).toHaveAttribute('aria-busy', 'false')
 
@@ -630,7 +630,7 @@ describe('SettingsPage', () => {
       rejectExport?.(new Error('synthetic export failure'))
       await Promise.resolve()
     })
-    expect(screen.getByText('配置导出失败：synthetic export failure')).toHaveAttribute('role', 'alert')
+    expect(screen.getByText('配置导出失败：synthetic export failure').closest('.save-success-toast-region')).toHaveAttribute('role', 'alert')
 
     desktop.exportResult = Promise.resolve(false)
     await act(async () => {
@@ -645,7 +645,7 @@ describe('SettingsPage', () => {
       fireEvent.click(exportButton)
       await Promise.resolve()
     })
-    expect(screen.getByText('配置已导出')).toHaveAttribute('role', 'status')
+    expect(screen.getByText('配置已导出').closest('.save-success-toast-region')).toHaveAttribute('role', 'status')
     expect(desktop.exportCalls).toEqual([false, false, false])
   })
 
@@ -667,7 +667,7 @@ describe('SettingsPage', () => {
       rejectImport?.(new Error('synthetic import failure'))
       await Promise.resolve()
     })
-    expect(screen.getByText('配置导入失败：synthetic import failure')).toHaveAttribute('role', 'alert')
+    expect(screen.getByText('配置导入失败：synthetic import failure').closest('.save-success-toast-region')).toHaveAttribute('role', 'alert')
     expect(importButton).toBeEnabled()
     expect(importButton).toHaveAttribute('aria-busy', 'false')
 
@@ -1857,11 +1857,15 @@ describe('SettingsPage', () => {
     fireEvent.change(keys, { target: { value: 'retry-secret' } })
     fireEvent.click(save)
     await act(async () => Promise.resolve())
-    const status = screen.getByText(/保存失败：凭据保存失败/u)
+    const status = screen.getByText('保存失败：无法保存密钥，请稍后重试')
     expect(status).toBeVisible()
-    expect(status).toHaveClass('validation-banner')
-    expect(status).toHaveAttribute('role', 'alert')
+    expect(status.closest('.save-success-toast')).toHaveClass('is-error')
+    expect(status.closest('.save-success-toast-region')).toHaveAttribute('role', 'alert')
     expect(status).not.toHaveTextContent('retry-secret')
+    const details = status.closest('.save-success-toast')?.querySelector('.top-notice-details')
+    expect(details).not.toBeVisible()
+    expect(details).toHaveTextContent('credential store unavailable: ***')
+    expect(details).not.toHaveTextContent('retry-secret')
     expect(screen.queryByText('设置已保存并立即生效')).not.toBeInTheDocument()
     expect(keys).toHaveValue('retry-secret')
     expect(save).toBeEnabled()
@@ -1876,8 +1880,9 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByRole('radio', { name: '深色' }))
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     const failure = await screen.findByRole('alert')
-    expect(failure).toHaveTextContent('保存失败：Error: synthetic save failure')
-    expect(failure).toHaveClass('validation-banner')
+    expect(failure.querySelector('.top-notice-message')).toHaveTextContent('保存失败：synthetic save failure')
+    expect(failure).toHaveClass('save-success-toast-region')
+    expect(failure.querySelector('.save-success-toast')).toHaveClass('is-error')
   })
 
   it('clears a removed provider key draft without writing credentials', async () => {

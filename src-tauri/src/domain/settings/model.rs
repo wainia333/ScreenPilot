@@ -28,6 +28,8 @@ const LEGACY_OPTIMIZER_PROMPT: &str =
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     #[serde(default)]
+    pub capture: crate::domain::capture::CaptureSettings,
+    #[serde(default)]
     pub karakeep: crate::domain::integrations::karakeep::KarakeepConfig,
     pub schema_version: u8,
     pub theme: ThemeMode,
@@ -304,6 +306,7 @@ impl<'de> Deserialize<'de> for SettingsSecrets {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            capture: Default::default(),
             karakeep: Default::default(),
             schema_version: SETTINGS_SCHEMA_VERSION,
             theme: ThemeMode::System,
@@ -379,6 +382,37 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Only assign the new shortcut when upgrading a configuration that did not
+    /// already choose one. Existing feature shortcuts always keep precedence.
+    pub fn migrate_capture_shortcut(&mut self, raw: &serde_json::Value) {
+        if raw.get("capture").and_then(|v| v.get("shortcut")).is_some() {
+            return;
+        }
+        let canonical = |value: &str| {
+            let mut parts: Vec<_> = value
+                .split('+')
+                .map(|part| match part.trim().to_ascii_lowercase().as_str() {
+                    "ctrl" => "control".to_owned(),
+                    "option" => "alt".to_owned(),
+                    other => other.to_owned(),
+                })
+                .collect();
+            parts.sort();
+            parts
+        };
+        let candidate = canonical(&self.capture.shortcut);
+        if [
+            &self.shortcuts.translator,
+            &self.shortcuts.vision,
+            &self.shortcuts.screenshot_translation,
+            &self.shortcuts.prompt_optimizer,
+        ]
+        .iter()
+        .any(|shortcut| canonical(shortcut) == candidate)
+        {
+            self.capture.shortcut.clear();
+        }
+    }
     pub fn migrate_provider_protocols(&mut self, raw: &serde_json::Value) {
         let Some(raw_providers) = raw.get("providers").and_then(serde_json::Value::as_array) else {
             return;
@@ -506,6 +540,7 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.capture.validate()?;
         if self.karakeep.enabled || !self.karakeep.base_url.is_empty() {
             crate::domain::integrations::karakeep::instance_url(&self.karakeep.base_url)?;
         }
@@ -544,6 +579,9 @@ impl AppSettings {
             return Err("OCR translation target language is unsupported".into());
         }
         let mut shortcuts = vec![self.shortcuts.translator.as_str()];
+        if self.capture.enabled && !self.capture.shortcut.is_empty() {
+            shortcuts.push(self.capture.shortcut.as_str());
+        }
         if self.vision.enabled {
             shortcuts.push(self.shortcuts.vision.as_str());
         }

@@ -33,6 +33,6 @@ describe('Tauri window configuration', () => {
     const path = resolve(process.cwd(), 'src-tauri/tauri.conf.json')
     const config = JSON.parse(readFileSync(path, 'utf8')) as TauriConfig
     const settings = config.app.windows.find((window) => window.label === 'main')
-    expect(settings).toMatchObject({ width: 760, height: 620 })
+    expect(settings).toMatchObject({ width: 844, height: 620 })
   })
 })

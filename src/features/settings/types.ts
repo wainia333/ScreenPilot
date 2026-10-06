@@ -111,6 +111,7 @@ export type PromptOptimizerSettings = {
 }
 
 export type AppSettings = {
+  capture: import('../capture/types').CaptureSettings
   karakeep: import('../karakeep/types').KarakeepConfig
   schemaVersion: 1
   theme: ThemeMode
